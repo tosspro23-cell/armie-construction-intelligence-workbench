@@ -4,6 +4,10 @@ An auditable multimodal AI reference system for querying BIM models, engineering
 
 This is an independent ARMIE AI Labs reference implementation. It is not a production SaaS, compliance engine, unrestricted BIM reasoning system, or multi-tenant platform.
 
+![ARMIE Construction Intelligence Workbench overview](docs/images/workbench-overview.png)
+
+*Public synthetic demo: interactive BIM viewer, conversational workspace, Evidence Inspector, and audit surface in one workbench.*
+
 ## Why this exists
 
 Construction information is fragmented across BIM models, drawings, schedules, screenshots, and structured engineering data. A chat-only system can hallucinate facts and hide how an answer was produced. This workbench keeps natural language as the interaction layer while deterministic domain tools remain the factual execution layer.
@@ -55,6 +59,22 @@ The repository includes only synthetic assets in `demo_data/`:
 - `armie_demo_schedule.pdf`: synthetic engineering schedule with fictional identifiers such as `DB-L1-A`, `DB-L2-B`, and `Panel-A`.
 
 The UI has three source modes: BIM Model, Engineering Drawing, and Viewer Snapshot. Evidence Inspector and Audit Trail show how each answer was produced.
+
+## Visual walkthrough
+
+The following screenshots were captured locally from the synthetic public fixtures in `demo_data/`.
+
+![Deterministic BIM query](docs/images/bim-query.png)
+
+*A typed IFC query returns a data-derived result with element citations and independent verification.*
+
+![Engineering drawing evidence](docs/images/drawing-evidence.png)
+
+*The drawing workflow routes a synthetic schedule question to document analysis and keeps the source page visible alongside the answer.*
+
+![Audit trail and verification](docs/images/audit-verification.png)
+
+*Grouped execution stages make planning, tool execution, evidence, verification, and the final disposition inspectable.*
 
 ## Supported capabilities
 
