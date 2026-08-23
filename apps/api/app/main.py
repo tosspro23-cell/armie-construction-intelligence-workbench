@@ -10,7 +10,14 @@ from fastapi.responses import FileResponse
 
 from app.agent.graph import AgentService
 from app.config import get_settings
-from app.schemas.models import AgentResponse, AuditEvent, ChatRequest, ClarificationResumeRequest, Disposition, VerificationStatus
+from app.schemas.models import (
+    AgentResponse,
+    AuditEvent,
+    ChatRequest,
+    ClarificationResumeRequest,
+    Disposition,
+    VerificationStatus,
+)
 from app.services import ServiceContainer
 
 

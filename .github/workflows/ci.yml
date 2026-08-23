@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# No Ollama, no model downloads, no secrets, no network egress beyond
+# package registries (SPEC-M1 §4.8/21). Any test requiring a live model is
+# out of scope for this milestone.
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: backend (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install apps/api
+        run: pip install -e 'apps/api[dev]'
+      - name: Run backend test suite
+        run: PYTHONPATH=apps/api python3 -m pytest -q
+
+  frontend:
+    name: frontend (Node 22)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - name: Install dependencies (no flags)
+        run: npm ci
+      - name: Build
+        run: npm run build
+
+  lint:
+    name: lint (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install ruff
+        run: pip install -e 'apps/api[dev]'
+      - name: "Ruff (blocking: F, E9, I, F401)"
+        run: ruff check --select F,E9,I,F401 apps/api tests
+      # BLE001 (blind except) stays advisory: those excepts sit on the
+      # failure paths this milestone characterizes; fixing them before
+      # F1-F12 exist inverts the order (SPEC-M1 OD-3). Never fails the job.
+      - name: "Ruff (advisory: BLE001)"
+        run: ruff check --select BLE001 apps/api tests || true

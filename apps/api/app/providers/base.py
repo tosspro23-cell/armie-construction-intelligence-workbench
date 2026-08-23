@@ -11,6 +11,7 @@ class ModelProvider(Protocol):
     """Provider boundary used only for non-deterministic interpretation."""
 
     name: str
+    model: str
 
     async def structured(
         self,

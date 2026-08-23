@@ -5,7 +5,6 @@ from typing import Any
 
 from app.schemas.models import MultiQueryPlan, QueryPlan
 
-
 ELEMENT_ALIASES = {
     "door": "IfcDoor", "doors": "IfcDoor",
     "window": "IfcWindow", "windows": "IfcWindow",
