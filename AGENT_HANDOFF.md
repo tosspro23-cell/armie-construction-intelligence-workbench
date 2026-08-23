@@ -9,8 +9,11 @@ This is a cold-start guide for a new vendor or frontier coding agent. Read this 
 
    ```bash
    PYTHONPATH=apps/api python3 -m pytest -q
-   (cd apps/web && npm run build)
+   (cd apps/web && npm ci && npm run build)
    ```
+
+   Both must pass with no flags; `.github/workflows/ci.yml` runs the same checks (backend on
+   Python 3.9-3.12, frontend on Node 22, plus `ruff`) on every push and pull request.
 
 3. Start Ollama with the models in `.env.example`, start FastAPI, then start Vite and run one synthetic browser query. Do not use private assignment files to diagnose the public repository.
 4. Read the relevant code path before making a proposal. Do not infer production readiness from screenshots or from a passing compile alone.
@@ -25,11 +28,14 @@ This is a cold-start guide for a new vendor or frontier coding agent. Read this 
 | Fast-path semantics and source/intent detection | `apps/api/app/agent/router.py` |
 | Plan canonicalization and cross-field validation | `apps/api/app/agent/plan_validation.py` |
 | Typed request/plan/response/evidence contracts | `apps/api/app/schemas/models.py`, `apps/api/app/schemas/vision.py` |
-| Ollama/OpenAI provider boundary | `apps/api/app/providers/` |
+| Ollama/OpenAI provider boundary; centralized provider selection | `apps/api/app/providers/`, `apps/api/app/providers/factory.py` |
+| Provider **factory** injection seam (text/vision/escalation), audit store, tool services | `apps/api/app/services.py` (`ServiceContainer`) |
 | IFC deterministic adapter | `apps/api/app/tools/ifc/repository.py` |
 | PDF rendering/native lookup/vision preparation | `apps/api/app/tools/document/analyzer.py` |
 | Independent and invariant verification | `apps/api/app/verification/verifiers.py` |
 | Browser state, viewer, citations, audit grouping, cancellation | `apps/web/src/main.tsx`, `apps/web/src/IfcViewer.tsx`, `apps/web/src/styles.css` |
+| Deterministic-contract, failure-path, characterization, and seam-invariance tests | `tests/` (see `docs/specs/SPEC-M1-reliability-foundation-v1.md`) |
+| The only fake used to drive the probabilistic path in tests | `tests/fakes/fake_provider.py` (`FakeModelProvider`) |
 
 ## End-to-end lifecycle
 
@@ -43,13 +49,13 @@ This is a cold-start guide for a new vendor or frontier coding agent. Read this 
 - `VerificationStatus` contains one or more `VerifierResult` records; an answer without sufficient evidence should not be presented as verified.
 - `AgentResponse` is the browser/API boundary: disposition, answer, citations, verification, execution metadata, and context update.
 - `ViewerContext` carries selected IDs, optional snapshot bytes, camera metadata, and explicit clear-state flags.
-- `ModelProvider` exposes typed text and vision calls. Models may interpret; they must not become the authority for IFC arithmetic.
+- `ModelProvider` exposes typed text and vision calls (`name: str`, `model: str`, `structured`, `vision_structured`). Models may interpret; they must not become the authority for IFC arithmetic. `ServiceContainer` injects provider *factories* (`text_provider_factory`, `vision_provider_factory`, `escalation_provider_factory`), defaulting to `providers/factory.py`'s functions; provider selection logic must stay centralized there.
 
 ## Guardrails for changes
 
 - Preserve synthetic-only public data. Never copy private assignment files, evidence crops, screenshots, runtime traces, or absolute machine paths into Git.
 - Prefer a failing test or a new fixture-backed acceptance case before changing a planner/tool contract.
-- Keep valid-but-unsupported, ambiguous, provider error, timeout, and cancellation dispositions distinct.
+- Keep valid-but-unsupported, ambiguous, provider error, timeout, and cancellation dispositions distinct. Known gap: `AgentService._unsupported_subresult` currently collapses parse-failure/repair-exhausted, escalation-unavailable, and transport-error outcomes to `disposition="refused"` instead of the normatively distinct `error`/`clarification` categories (SPEC-M1 §4.3, defect findings in the SPEC-M1 PR) -- still safe (no numeric claim), but do not "fix" this without reading that writeup first; it is a `graph.py` control-flow change, out of the SPEC-M1 M1 "call sites only" scope.
 - Do not add a generic BIM query language, cross-source joins, compliance reasoning, or long-term memory without an explicit scope decision.
 - Treat Dockerfiles and OpenAI hooks as unvalidated extension points unless a fresh end-to-end run proves otherwise.
 - Do not silently broaden CORS, secrets, persistence, or external network access.

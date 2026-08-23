@@ -110,7 +110,7 @@ npm install
 npm run dev
 ```
 
-Open the URL printed by Vite, normally `http://127.0.0.1:5173`. Vite may select the next free port when that port is occupied.
+Use `npm ci` instead of `npm install` for a reproducible install from the committed lockfile (this is what CI runs; both work with no flags -- see `docs/decisions/README.md` D-006). Open the URL printed by Vite, normally `http://127.0.0.1:5173`. Vite may select the next free port when that port is occupied.
 
 ## Demo questions
 
@@ -129,7 +129,7 @@ PYTHONPATH=apps/api python3 -m pytest -q
 cd apps/web && npm run build
 ```
 
-The public fixture tests cover planning, IFC tools, document safety, verification, and provider parsing. Browser acceptance should be run against the local API and Vite server; no private-data traces are required or included.
+122 tests run against the public synthetic fixture: 2 IFC fixture tests (`test_public_workspace.py`), deterministic contract tests for the router/plan-validation/verification modules, 12 provider failure-path evals (F1-F12) driven by a fake, no-network provider, CJK/multilingual characterization tests, and provider-seam-invariance tests. CI runs the full suite on Python 3.9-3.12 (`.github/workflows/ci.yml`); see `docs/specs/SPEC-M1-reliability-foundation-v1.md` for the full test inventory. Browser acceptance should be run against the local API and Vite server; no private-data traces are required or included.
 
 ## Privacy and data
 
