@@ -26,6 +26,12 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://127.0.0.1:11434"
     ollama_text_model: str = "qwen3:8b"
     ollama_vision_model: str = "qwen3-vl:8b"
+    # Bounded semantic-repair escalation (SPEC-M1 §4.2/9, OD-2) is opt-in and
+    # disabled by default: no developer or CI environment is silently
+    # required to hold a 30B model. Set this to escalate persistent semantic
+    # validation failures to a larger local model before falling back to
+    # clarification.
+    ollama_escalation_model: str | None = None
 
     checkpoint_db_path: Path = Path("./runtime/checkpoints.sqlite")
     audit_store_path: Path = Path("./runtime/audit.jsonl")

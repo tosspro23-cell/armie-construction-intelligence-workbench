@@ -28,7 +28,6 @@ from app.agent.plan_validation import (
     verify_execution_consistency,
 )
 from app.config import Settings
-from app.providers.factory import get_text_provider, get_vision_provider
 from app.schemas.models import (
     AgentResponse,
     AuditEvent,
@@ -266,7 +265,7 @@ class AgentService:
                 raw_user_message=state["question"], normalized_request=state["question"], interpretation_confidence="high",
             )
         else:
-            provider = get_text_provider(self.settings)
+            provider = self.container.text_provider_factory(self.settings)
             self._audit(state, "semantic_plan", "model_called", "Language-agnostic semantic task decomposition started.", {"purpose": "multi_query_plan", "fallback_reason": coverage["reason"], "planner_type": "semantic_model"}, actual_provider=provider.name, actual_model=provider.model, planning_mode="llm")
             try:
                 multi_plan = asyncio.run(provider.structured(
@@ -308,24 +307,27 @@ class AgentService:
                     model_call_count += 1
                     self._audit(state, "semantic_repair", "semantic_repair", "Semantic repair completed.", {"status": "passed" if not issues else "failed", "corrections": [*repair_corrections, *interpretation_corrections], "issues": [issue.__dict__ for issue in issues], "multi_plan": multi_plan.model_dump()}, actual_provider=provider.name, actual_model=provider.model, planning_mode="llm", retry_count=1)
                     if issues:
-                        # Optional escalation is deliberately bounded and uses
-                        # the configured local 30B model only for unresolved
-                        # semantic conflicts.
-                        from app.providers.ollama_provider import OllamaProvider
-                        escalated = OllamaProvider(self.settings.ollama_base_url, "qwen3:30b", self.settings.model_call_timeout_seconds)
-                        self._audit(state, "semantic_repair", "model_escalation", "Persistent semantic validation failures escalated to qwen3:30b.", {"issues": [issue.__dict__ for issue in issues]}, actual_provider=escalated.name, actual_model=escalated.model, planning_mode="llm", retry_count=2)
-                        try:
-                            candidate = asyncio.run(escalated.structured(prompt=self._semantic_repair_prompt(state["question"], context, multi_plan, issues), response_model=MultiQueryPlan, purpose="multi_query_plan_escalation"))
-                            multi_plan = candidate.model_copy(update={"subplans": [self._normalize_subplan(item, index) for index, item in enumerate(candidate.subplans, start=1)], "raw_user_message": state["question"]})
-                            multi_plan, escalation_corrections = canonicalize_multi_plan(multi_plan, context)
-                            multi_plan, grouped_escalation_corrections = enforce_grouped_request_contract(multi_plan, state["question"])
-                            escalation_corrections.extend(grouped_escalation_corrections)
-                            multi_plan, interpretation_corrections = calibrate_interpretation_confidence(multi_plan)
-                            issues = validate_multi_plan(multi_plan)
-                            model_call_count += 1
-                            self._audit(state, "semantic_repair", "semantic_repair", "qwen3:30b escalation completed.", {"status": "passed" if not issues else "failed", "corrections": [*escalation_corrections, *interpretation_corrections], "issues": [issue.__dict__ for issue in issues]}, actual_provider=escalated.name, actual_model=escalated.model, planning_mode="llm", retry_count=2)
-                        except Exception as escalation_error:
-                            self._audit(state, "semantic_repair", "model_failed", "qwen3:30b semantic escalation was unavailable.", {"error": str(escalation_error)}, actual_provider=escalated.name, actual_model=escalated.model, planning_mode="llm", retry_count=2)
+                        # Optional escalation is deliberately bounded and opt-in
+                        # (SPEC-M1 §4.2/9, OD-2): it only runs against a
+                        # configured local model for unresolved semantic
+                        # conflicts, and is skipped entirely when unconfigured.
+                        escalated = self.container.escalation_provider_factory(self.settings)
+                        if escalated is None:
+                            self._audit(state, "semantic_repair", "model_failed", "Semantic escalation is not configured; no escalation model set.", {"issues": [issue.__dict__ for issue in issues]}, planning_mode="llm", retry_count=2)
+                        else:
+                            self._audit(state, "semantic_repair", "model_escalation", f"Persistent semantic validation failures escalated to {escalated.model}.", {"issues": [issue.__dict__ for issue in issues]}, actual_provider=escalated.name, actual_model=escalated.model, planning_mode="llm", retry_count=2)
+                            try:
+                                candidate = asyncio.run(escalated.structured(prompt=self._semantic_repair_prompt(state["question"], context, multi_plan, issues), response_model=MultiQueryPlan, purpose="multi_query_plan_escalation"))
+                                multi_plan = candidate.model_copy(update={"subplans": [self._normalize_subplan(item, index) for index, item in enumerate(candidate.subplans, start=1)], "raw_user_message": state["question"]})
+                                multi_plan, escalation_corrections = canonicalize_multi_plan(multi_plan, context)
+                                multi_plan, grouped_escalation_corrections = enforce_grouped_request_contract(multi_plan, state["question"])
+                                escalation_corrections.extend(grouped_escalation_corrections)
+                                multi_plan, interpretation_corrections = calibrate_interpretation_confidence(multi_plan)
+                                issues = validate_multi_plan(multi_plan)
+                                model_call_count += 1
+                                self._audit(state, "semantic_repair", "semantic_repair", f"{escalated.model} escalation completed.", {"status": "passed" if not issues else "failed", "corrections": [*escalation_corrections, *interpretation_corrections], "issues": [issue.__dict__ for issue in issues]}, actual_provider=escalated.name, actual_model=escalated.model, planning_mode="llm", retry_count=2)
+                            except Exception as escalation_error:
+                                self._audit(state, "semantic_repair", "model_failed", f"{escalated.model} semantic escalation was unavailable.", {"error": str(escalation_error)}, actual_provider=escalated.name, actual_model=escalated.model, planning_mode="llm", retry_count=2)
                 if issues:
                     # A semantically invalid plan is not executable even when
                     # it is syntactically valid JSON.
@@ -807,7 +809,7 @@ Return only a corrected MultiQueryPlan JSON object."""
             board = self.container.document_analyzer.target_board(query.question)
             field = self.container.document_analyzer.target_field(query.question)
             if board and field:
-                provider = get_vision_provider(self.settings)
+                provider = self.container.vision_provider_factory(self.settings)
                 self._audit(state, "execute_pdf", "model_called", "PDF board-localization model call started.", {"purpose": "pdf_board_localize", "board": board}, actual_provider=provider.name, actual_model=provider.model)
                 location, _ = asyncio.run(self.container.document_analyzer.localize_board(provider, query, board))
                 model_call_count += 1
@@ -866,7 +868,7 @@ Return only a corrected MultiQueryPlan JSON object."""
 
             result = self.container.document_analyzer.native_lookup(query)
             if result.confidence < self.settings.pdf_confidence_threshold:
-                provider = get_vision_provider(self.settings)
+                provider = self.container.vision_provider_factory(self.settings)
                 self._audit(
                     state,
                     "execute_pdf",
@@ -968,7 +970,7 @@ Return only a corrected MultiQueryPlan JSON object."""
         target_visible = bool(viewer.get("target_visible")) or target_type in {"IfcStair", "IfcStairFlight"}
         target = "staircase" if stair_question else "construction elements"
         grounding = "selected_metadata" if target_type or target_id else "question_only"
-        provider = get_vision_provider(self.settings)
+        provider = self.container.vision_provider_factory(self.settings)
         self._audit(state, "execute_viewer", "model_called", "Viewer snapshot sent to the vision provider.", {"purpose": "viewer_snapshot", "screenshot_id": viewer.get("snapshot_id"), "target": target, "target_grounding": grounding, "selected_type": target_type, "selected_global_id": target_id}, actual_provider=provider.name, actual_model=provider.model)
         try:
             model_call_count = state.get("model_call_count", 0) + 1
