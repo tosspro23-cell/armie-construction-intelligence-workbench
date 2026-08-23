@@ -80,13 +80,19 @@ def test_defect_heuristic_multi_plan_crashes_on_cross_source_join() -> None:
     cross-source-join branch constructs ``MultiQueryPlan(subplans=[], ...)``,
     which violates the schema's own ``min_length=1`` constraint and raises
     ``ValidationError`` instead of returning the intended graceful refusal.
-    graph.py._route calls heuristic_multi_plan unconditionally on every
-    request (before ever consulting heuristic_plan's own, working,
-    cross-source-join refusal branch), so this crashes routing for any
-    question matching cross_source_join_requested(). See PR "Defect
-    findings": reported per SPEC-M1 §4.3 ("any implementation divergence is
-    a defect finding, not a test to adjust"); router.py is outside SPEC-M1
-    §6's allowed scope, so this is deliberately not fixed in this milestone.
+
+    This branch is currently unreachable from the live graph: AgentService
+    ``_resolve_context`` runs its own independent
+    ``cross_source_join_requested`` check and diverts to the "refuse" node
+    before "route" (and therefore heuristic_multi_plan) is ever invoked
+    (verified end-to-end by F9 in test_failure_path_evals.py), so this bug
+    has no live user-facing impact today. It is still a real latent defect
+    in heuristic_multi_plan itself
+    -- duplicated, drifting join-detection logic across two call sites, one
+    of which crashes -- reported per SPEC-M1 §4.3 ("any implementation
+    divergence is a defect finding, not a test to adjust"). router.py is
+    outside SPEC-M1 §6's allowed scope, so this is deliberately not fixed
+    in this milestone; see PR "Defect findings".
     """
     with pytest.raises(Exception) as excinfo:
         heuristic_multi_plan("Please join the PDF connected load data with the IFC room area.", {}, has_viewer_context=False)
