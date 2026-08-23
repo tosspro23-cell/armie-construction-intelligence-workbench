@@ -23,6 +23,7 @@ reports/private/
 
 __pycache__/
 *.py[cod]
+*.egg-info/
 *.tsbuildinfo
 .pytest_cache/
 .mypy_cache/
