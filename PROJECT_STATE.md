@@ -102,6 +102,18 @@ npm run dev
 
 Both `npm ci` and `npm install` work with no flags (`three` is pinned to `0.149.0` to match `web-ifc-three`'s peer requirement; see `docs/decisions/README.md` D-006). Use the Vite URL printed by the command, normally `http://127.0.0.1:5173`. Set `API_PROXY_TARGET` when the API uses a different port. Runtime traces/evidence are intentionally ignored by Git.
 
-## Recommended next milestones
+## Milestone history
 
-The next agent should first reproduce the tests/build and a synthetic browser smoke path, then choose one bounded improvement at a time. Candidate work includes expanding fixture-backed tests, decomposing `graph.py` (deferred to M1.5, tests before refactor), removing the dead `web-ifc`/`web-ifc-three` dependencies if confirmed unneeded (`docs/decisions/REVIEW_REQUIRED.md`), and defining a deployment/security boundary. None is approved by this document; product scope and acceptance criteria must be agreed before implementation.
+**M1 — Test Seam, Reproducible Build & Deterministic Behavioural Contract** is complete and submitted via PR #1 (`docs/specs/SPEC-M1-reliability-foundation-v1.md`). It established: a reproducible `npm ci`/`npm run build` (D-006); an injected provider-factory seam on `ServiceContainer` so the probabilistic path can be driven by `FakeModelProvider` with no live model (D-007); 122 deterministic and failure-path tests (`tests/`) covering the router/plan-validation/verification boundary and the F1–F12 canonical disposition contract (D-008); CI on the Python 3.9–3.12 matrix plus a frontend build and lint gate (`.github/workflows/ci.yml`); and corrected documentation claims (the false fixture-coverage claim, audit persistence, evidence-endpoint containment, the opt-in escalation setting).
+
+M1 deliberately did **not** fix either defect its own failure-path tests found (the disposition-category collapse described below, and a latent `heuristic_multi_plan` crash — see `docs/decisions/REVIEW_REQUIRED.md`), and did not restructure `graph.py`. Both were out of M1's "call sites only" / declared-file-surface scope; fixing them was left to a later milestone with the regression net already in place.
+
+## Next milestone (M1.5 — scope not yet approved)
+
+Candidate scope: a narrowly-scoped repair of the disposition collapse (`error`/`clarification`/`unsupported` all currently surfacing as `refused`) and the `_refuse`-node unreachability behind it (`docs/decisions/README.md` D-008 "Current conformance"), plus only the local `graph.py` control-flow decoupling that fix requires — explicitly **not** a full `graph.py` decomposition. Rationale: this restores the D-004 honest-failure invariant the repository currently declares but does not fully honour, and it should precede capability expansion, since any new capability added on top of the current planning/execution path would inherit the collapsed disposition layer.
+
+## Deferred beyond M1.5
+
+Dead `web-ifc`/`web-ifc-three` removal, `graph.py` decomposition more broadly, the `ResponseLanguage` (`pt-PT`/`fr`/`es`) contract decision, and the deployment/security boundary — all tracked in `docs/decisions/REVIEW_REQUIRED.md`.
+
+No scope beyond what is explicitly stated above is approved by this document; product scope and acceptance criteria must be agreed before implementation.
