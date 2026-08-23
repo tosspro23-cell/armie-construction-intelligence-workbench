@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from app.config import Settings
 from app.providers.base import ModelProvider
 from app.providers.ollama_provider import OllamaProvider
