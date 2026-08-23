@@ -5,9 +5,8 @@ from app.schemas.models import (
     Evidence,
     IfcQueryInput,
     IfcQueryResult,
-    QueryPlan,
-    VerifierResult,
     VerificationStatus,
+    VerifierResult,
 )
 from app.tools.ifc.repository import IfcRepository
 

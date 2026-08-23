@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 import asyncio
-
 from typing import Any, Optional, TypedDict
 from uuid import uuid4
 
 from langgraph.graph import END, START, StateGraph
 
+from app.agent.plan_validation import (
+    calibrate_interpretation_confidence,
+    canonicalize_multi_plan,
+    eligible_scalar_count_batch,
+    enforce_grouped_request_contract,
+    validate_multi_plan,
+    verify_execution_consistency,
+)
 from app.agent.router import (
     capability_gate,
     cross_source_join_requested,
@@ -18,14 +25,6 @@ from app.agent.router import (
     planner_prompt,
     resolve_reference,
     selected_element_plan,
-)
-from app.agent.plan_validation import (
-    calibrate_interpretation_confidence,
-    canonicalize_multi_plan,
-    eligible_scalar_count_batch,
-    enforce_grouped_request_contract,
-    validate_multi_plan,
-    verify_execution_consistency,
 )
 from app.config import Settings
 from app.schemas.models import (
@@ -41,9 +40,8 @@ from app.schemas.models import (
     QueryPlan,
     ResponseLanguage,
     SourceType,
-    SupportedMultiQueryPlan,
-    VerifierResult,
     VerificationStatus,
+    VerifierResult,
 )
 from app.schemas.vision import VisionViewerInspection, VisionViewerVerification
 from app.services import ServiceContainer

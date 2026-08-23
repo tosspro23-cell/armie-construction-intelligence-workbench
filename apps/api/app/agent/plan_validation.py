@@ -7,12 +7,11 @@ and execution/result-shape checks independent from prompt wording.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import re
+from dataclasses import dataclass
 from typing import Any
 
 from app.schemas.models import MultiQueryPlan, QueryPlan
-
 
 EXECUTION_MODIFIERS = {"group_by", "sort_by", "limit", "aggregation", "comparison", "postprocess"}
 

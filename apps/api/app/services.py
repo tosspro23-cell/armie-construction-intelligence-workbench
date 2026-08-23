@@ -1,4 +1,3 @@
-from pathlib import Path
 from typing import Callable
 
 from app.audit.store import AuditStore
