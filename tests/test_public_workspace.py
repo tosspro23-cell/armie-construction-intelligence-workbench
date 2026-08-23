@@ -4,7 +4,6 @@ from app.config import Settings
 from app.schemas.models import IfcQueryInput
 from app.tools.ifc.repository import IfcRepository
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
 

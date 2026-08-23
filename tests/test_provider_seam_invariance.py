@@ -12,14 +12,13 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from fakes.fake_provider import FakeModelProvider
-
 from app.agent.graph import AgentService
 from app.config import Settings
 from app.providers.factory import get_text_provider, get_vision_provider
 from app.providers.ollama_provider import StructuredOutputError
 from app.schemas.models import MultiQueryPlan, QueryPlan
 from app.services import ServiceContainer
+from fakes.fake_provider import FakeModelProvider
 
 ROOT = Path(__file__).resolve().parents[1]
 

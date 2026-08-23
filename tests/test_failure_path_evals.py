@@ -19,14 +19,13 @@ import functools
 from pathlib import Path
 
 import pytest
-from fakes.fake_provider import FakeModelProvider, sleep_past_deadline
-
 from app.agent.graph import AgentService
 from app.config import Settings
 from app.providers.ollama_provider import StructuredOutputError, _extract_json
 from app.schemas.models import ChatRequest, MultiQueryPlan, QueryPlan, ResponseLanguage
 from app.schemas.vision import VisionEvidenceVerification, VisionFieldExtraction
 from app.services import ServiceContainer
+from fakes.fake_provider import FakeModelProvider, sleep_past_deadline
 
 ROOT = Path(__file__).resolve().parents[1]
 

@@ -57,9 +57,9 @@ jobs:
       - name: Install ruff
         run: pip install -e 'apps/api[dev]'
       - name: "Ruff (blocking: F, E9, I, F401)"
-        run: ruff check --select F,E9,I,F401 apps/api
+        run: ruff check --select F,E9,I,F401 apps/api tests
       # BLE001 (blind except) stays advisory: those excepts sit on the
       # failure paths this milestone characterizes; fixing them before
       # F1-F12 exist inverts the order (SPEC-M1 OD-3). Never fails the job.
       - name: "Ruff (advisory: BLE001)"
-        run: ruff check --select BLE001 apps/api || true
+        run: ruff check --select BLE001 apps/api tests || true

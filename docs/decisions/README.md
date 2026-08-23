@@ -18,6 +18,8 @@ Tool results produce `Evidence` and `Citation` locators. Independent determinist
 
 Ambiguous questions clarify; valid unsupported capabilities refuse with an explanation; provider/transport failures are errors; cancellation and deadlines are terminal states. The system must not turn missing evidence into a confident answer.
 
+This invariant is currently only partially honoured: `error`, `clarification`, and `unsupported` collapse into a single `refused` disposition on the semantic-planning failure path. Safety holds (no numeric or factual claim is ever emitted on this path), but the distinct-disposition half of this invariant does not. See D-008's "Current conformance" section for the mechanism and the regression tests that pin it.
+
 ## D-005 — Public repository uses synthetic fixtures only
 
 `demo_data/` and committed screenshots are synthetic/public-safe. Supplied assignment/customer material, derived crops, runtime traces, credentials, and local model caches are excluded. This repository is a local reference workbench, not a security or privacy boundary.
@@ -41,3 +43,11 @@ M1 adds `model: str` to the `ModelProvider` Protocol (both concrete providers al
 ## D-008 — Canonical disposition contract
 
 M1 makes the mapping from failure condition to response disposition explicit and normative (`docs/specs/SPEC-M1-reliability-foundation-v1.md` §4.3): transport failure/timeout/unavailability → `error`; unparseable output after bounded repair → `error`; unsupported capability → `unsupported`/refusal with rationale; ambiguous request → `clarification`; failed verification → not `answered`; client cancellation → `cancelled` with no conversation-context mutation; deadline exceeded → a timeout state distinct from `error`. No branch may emit a numeric or factual claim without evidence, citations, and a passing `VerificationStatus`. F1–F12 (§4.5) test this contract directly; any implementation divergence found while testing is a defect finding, not a reason to adjust a test.
+
+### Current conformance
+
+As of this milestone, production does **not** fully satisfy this contract: `error`, `clarification`, and `unsupported` all currently surface as disposition `refused` on the semantic-planning failure path, rather than as the three distinct categories above.
+
+The root cause is in `apps/api/app/agent/graph.py`. `AgentService._route` sets `state["planner_error"]` when structured-output parsing fails and bounded repair is also exhausted, but that key is only ever read by the `_refuse` node. `_refuse` is reachable solely from `AgentService._after_context`'s conditional edge (triggered by `state["unsupported_reason"]`, set only for a cross-source-join question) — it is unreachable once the static `route → execute_multi` edge has already run, which is the only path that ever sets `planner_error`. Separately, `AgentService._unsupported_subresult` hardcodes `disposition="refused"` for any subplan with `source="unsupported"`, regardless of whether the underlying cause was a genuinely unsupported capability, an exhausted repair, an exhausted escalation, or a raw transport error.
+
+Safety is preserved throughout: no numeric or factual claim is ever emitted on this path, and `VerificationStatus.status` never reaches `passed`. Only the disposition *category* is collapsed. `tests/test_failure_path_evals.py`'s F2 (malformed output, repair exhausted), F5 (escalation configured but unavailable), and F6 (transport error) all assert this actual, safe behaviour and document the divergence in their docstrings, so the eventual fix is regression-protected rather than discovered again from scratch. See `docs/decisions/REVIEW_REQUIRED.md` for this milestone's M1.5 candidate status.

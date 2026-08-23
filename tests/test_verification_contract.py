@@ -9,7 +9,13 @@ from __future__ import annotations
 from pathlib import Path
 
 from app.config import Settings
-from app.schemas.models import Citation, Evidence, IfcQueryInput, SourceType, VerifierResult
+from app.schemas.models import (
+    Citation,
+    Evidence,
+    IfcQueryInput,
+    SourceType,
+    VerifierResult,
+)
 from app.tools.ifc.repository import IfcRepository
 from app.verification.verifiers import (
     DeterministicVerifier,

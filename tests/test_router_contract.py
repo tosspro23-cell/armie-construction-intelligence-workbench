@@ -6,7 +6,6 @@ Pure functions only; no provider, no network, no fixtures beyond plain dicts.
 from __future__ import annotations
 
 import pytest
-
 from app.agent.router import (
     ELEMENT_ALIASES,
     capability_gate,

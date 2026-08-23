@@ -18,14 +18,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fakes.fake_provider import FakeModelProvider
-
 from app.agent.graph import AgentService
 from app.agent.plan_validation import enforce_grouped_request_contract
 from app.agent.router import heuristic_multi_plan, selected_element_plan
 from app.config import Settings
 from app.schemas.models import MultiQueryPlan, QueryPlan
 from app.services import ServiceContainer
+from fakes.fake_provider import FakeModelProvider
 
 ROOT = Path(__file__).resolve().parents[1]
 

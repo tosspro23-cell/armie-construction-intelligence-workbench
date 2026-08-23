@@ -57,6 +57,7 @@ The committed public fixture contains two storeys, four synthetic doors, four sy
 - The graph module is large and carries historical compatibility paths. Refactoring it should preserve the typed plan and verification boundaries.
 - The automated public test surface is 122 tests across 7 files (`tests/`; see the "Verification state" section below), CI-verified on Python 3.9-3.12 via `.github/workflows/ci.yml`. This is a deterministic-contract and fake-provider-driven regression net for the router/planning/verification boundary, not a scored or graded evaluation harness; there is no claim of a 216-case/deep evaluation run in this repository.
 - CORS is configured for the documented local development origins. A deployment must replace this with an explicit environment-specific policy.
+- The `error`/`clarification`/`unsupported` dispositions all currently collapse into `refused` on the semantic-planning failure path (`AgentService._unsupported_subresult` hardcodes `refused` for any `source="unsupported"` subplan; `state["planner_error"]` is set but only read by the unreachable `_refuse` node). This is a partial violation of the D-004 honest-failure invariant. No numeric or factual claim is ever emitted on this path and `VerificationStatus.status` never reaches `passed`, so it is safe but imprecise. `tests/test_failure_path_evals.py`'s F2, F5, and F6 pin the actual behaviour. Leading M1.5 candidate; see `docs/decisions/README.md` D-008 and `docs/decisions/REVIEW_REQUIRED.md`.
 
 ## Verification state (this checkout)
 
