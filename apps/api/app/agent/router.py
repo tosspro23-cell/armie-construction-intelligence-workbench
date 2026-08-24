@@ -4,6 +4,7 @@ import re
 from typing import Any
 
 from app.schemas.models import MultiQueryPlan, QueryPlan
+from app.tools.document.analyzer import DocumentAnalyzer
 
 ELEMENT_ALIASES = {
     "door": "IfcDoor", "doors": "IfcDoor",
@@ -216,7 +217,7 @@ def heuristic_plan(question: str, context: dict, has_viewer_context: bool, sourc
         return QueryPlan(
             source=source_preference, intent="document_lookup" if source_preference == "pdf" else "visual_inspection",
             operation="extract_field" if source_preference == "pdf" else "inspect_view",
-            requested_field=question if source_preference == "pdf" else None,
+            requested_field=DocumentAnalyzer.target_field(question) if source_preference == "pdf" else None,
             entity_type=context.get("active_entity_type"), filters=context.get("active_filters", {}), group_by="none",
             rationale="The user applied a manual source override.", planning_mode="context", rule_id="source_override",
             matched_signals=[f"source_override:{source_preference}"], match_status="complete",
@@ -230,7 +231,7 @@ def heuristic_plan(question: str, context: dict, has_viewer_context: bool, sourc
         )
     if any(term in lowered for term in ("load", "circuit", "diversity", "schedule", "breaker", "electrical")):
         return QueryPlan(
-            source="pdf", intent="document_lookup", operation="extract_field", requested_field=question,
+            source="pdf", intent="document_lookup", operation="extract_field", requested_field=DocumentAnalyzer.target_field(question),
             rationale="Question contains explicit engineering-drawing terminology.", planning_mode="heuristic",
             rule_id="pdf_engineering_schedule", matched_signals=["domain:electrical_schedule"], match_status="complete",
         )
