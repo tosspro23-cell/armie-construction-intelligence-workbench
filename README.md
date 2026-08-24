@@ -46,7 +46,7 @@ LLMs interpret intent and help construct bounded plans. Python and IfcOpenShell 
 | Natural-language interpretation | Rules plus bounded LLM |
 | Query planning | Deterministic parser plus Qwen text planner |
 | IFC fact computation | IfcOpenShell and Python |
-| Drawing interpretation | Qwen vision model through Ollama |
+| Drawing interpretation | Deterministic row/column extraction first; Qwen vision model through Ollama as bounded fallback |
 | Evidence construction | Application runtime |
 | Verification | Deterministic and independent validation |
 | Final presentation | React workbench |
@@ -80,7 +80,7 @@ The following screenshots were captured locally from the synthetic public fixtur
 
 - Project and per-level door/window counts.
 - Grouped counts by storey and bounded maximum-height aggregation for doors/windows.
-- Synthetic schedule field lookup for connected load and diversity factor.
+- Synthetic schedule field lookup for connected load and diversity factor, resolved deterministically from the document's own text layer first, with vision as a bounded fallback (see "Known limitations" for the generality caveat).
 - Current-view screenshot inspection with honest target visibility handling.
 - Short-term conversational context, clarification, unsupported-operation handling, citations, and independent verification.
 
@@ -129,7 +129,7 @@ PYTHONPATH=apps/api python3 -m pytest -q
 cd apps/web && npm run build
 ```
 
-122 tests run against the public synthetic fixture: 2 IFC fixture tests (`test_public_workspace.py`), deterministic contract tests for the router/plan-validation/verification modules, 12 provider failure-path evals (F1-F12) driven by a fake, no-network provider, CJK/multilingual characterization tests, and provider-seam-invariance tests. CI runs the full suite on Python 3.9-3.12 (`.github/workflows/ci.yml`); see `docs/specs/SPEC-M1-reliability-foundation-v1.md` for the full test inventory. Browser acceptance should be run against the local API and Vite server; no private-data traces are required or included.
+142 tests run against the public synthetic fixture: 2 IFC fixture tests (`test_public_workspace.py`), deterministic contract tests for the router/plan-validation/verification modules, 12 provider failure-path evals (F1-F12) driven by a fake, no-network provider, CJK/multilingual characterization tests, provider-seam-invariance tests, and deterministic document-extraction tests covering every board/field combination in the fixture plus its ambiguity and vision-fallback paths (`test_pdf_deterministic_extraction.py`). CI runs the full suite on Python 3.9-3.12 (`.github/workflows/ci.yml`); see `docs/specs/SPEC-M1-reliability-foundation-v1.md` and `docs/specs/SPEC-M2P1-deterministic-document-extraction-v1.md` for the full test inventory. Browser acceptance should be run against the local API and Vite server; no private-data traces are required or included.
 
 ## Privacy and data
 
@@ -140,7 +140,8 @@ This public repository contains no original recruitment, customer, or proprietar
 - Validated demo language is English; multilingual/noisy input is experimental.
 - The IFC query surface is intentionally bounded, not an unrestricted property language.
 - Visual conclusions depend on the captured view and may require clarification.
-- PDF vision fallback can be slower than native text extraction.
+- Document field lookup is deterministic-first, with vision as a genuine fallback rather than the primary path; vision is slower and used only when deterministic extraction fails or is ambiguous.
+- The deterministic document extractor uses tolerance-based row/column clustering characterized against the committed synthetic schedule's layout. This is **not** a general table-extraction capability: it is not claimed to work on an arbitrary drawing, a multi-page document, a scanned/OCR-required document, or a ruled-line table. A different document layout needs its own characterization before this path can be trusted on it.
 - No IFC/PDF cross-source joins or compliance engine.
 - No multi-tenancy, enterprise SLOs, or large-scale throughput claim.
 - No autonomous camera planning or arbitrary geometry reasoning.

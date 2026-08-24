@@ -28,7 +28,7 @@ The main orchestration lives in `apps/api/app/agent/graph.py`. Shared contracts 
 
 - Synthetic IFC counts, per-storey grouping, selected-element identity, and bounded height extrema for doors and windows.
 - Controlled IFC quantity/property resolution with unit normalization and winner-element evidence.
-- Synthetic PDF schedule lookup with native extraction where possible and Ollama vision fallback for drawing fields.
+- Synthetic PDF schedule lookup resolved deterministically first, from row/column structure reconstructed out of the document's own text layer (`DocumentAnalyzer.native_lookup`), with an Ollama vision path as a bounded fallback only when deterministic extraction fails or is ambiguous. This is characterized against the committed synthetic schedule's layout, not a general table-extraction capability (`docs/decisions/README.md` D-009).
 - Current-view screenshot inspection with target-visibility and sufficient-view checks; clarification is preferred over an unsupported visual claim.
 - Short-term conversational context, explicit clarification, unsupported/refused dispositions, request cancellation/deadlines, citations, grouped audit stages, and independent verification.
 - Local Ollama provider path using `qwen3:8b` and `qwen3-vl:8b`. OpenAI provider hooks remain in the provider abstraction, but the public release has not been validated end to end with OpenAI.
@@ -50,12 +50,12 @@ The committed public fixture contains two storeys, four synthetic doors, four sy
 - One active local workspace and one IFC/PDF pair; no durable multi-user conversation store, authentication, tenancy, migrations, or deployment SLOs.
 - The IFC query surface is deliberately bounded. It is not an arbitrary property-query language, nearest-room search, cross-source join engine, or compliance engine.
 - Viewer geometry is a bounded browser projection of the IFC. Autonomous camera planning and general spatial reasoning are not implemented.
-- PDF vision fallback can be slow and probabilistic; evidence and verification are required, but production document-layout/OCR infrastructure is out of scope.
+- The deterministic document extractor uses tolerance-based row/column clustering (word coordinates -> row bands by `y`, column bands by the header row's `x` extents) characterized specifically against the committed synthetic schedule's clean, left-aligned layout. It is **not** a general table-extraction capability: no claim is made that it works on an arbitrary drawing, a multi-page document, a scanned/OCR-required document, or a ruled-line table (`docs/decisions/README.md` D-009). When it fails or is ambiguous, the Ollama vision path is a bounded fallback, which can be slow and probabilistic; evidence and verification are required, but production document-layout/OCR infrastructure is out of scope.
 - Conversations and request state are held in process; restart loses active context. The audit trail itself is the exception: it persists to a local JSONL file (`runtime/audit.jsonl`, `AuditStore`), so audit history survives a restart even though conversation context does not.
 - The `/api/v1/evidence/{filename}` endpoint enforces basename containment (`Path(filename).name != filename` is rejected) before resolving into `evidence_dir`; this was previously an undocumented invariant rather than a gap.
 - OpenAI hooks, LangSmith hooks, and the two API Dockerfiles are extension/development paths, not claims of a separately validated production deployment. No Compose file is present in this repository.
 - The graph module is large and carries historical compatibility paths. Refactoring it should preserve the typed plan and verification boundaries.
-- The automated public test surface is 122 tests across 7 files (`tests/`; see the "Verification state" section below), CI-verified on Python 3.9-3.12 via `.github/workflows/ci.yml`. This is a deterministic-contract and fake-provider-driven regression net for the router/planning/verification boundary, not a scored or graded evaluation harness; there is no claim of a 216-case/deep evaluation run in this repository.
+- The automated public test surface is 142 tests across 8 files (`tests/`; see the "Verification state" section below), CI-verified on Python 3.9-3.12 via `.github/workflows/ci.yml`. This is a deterministic-contract and fake-provider-driven regression net for the router/planning/verification boundary, not a scored or graded evaluation harness; there is no claim of a 216-case/deep evaluation run in this repository.
 - CORS is configured for the documented local development origins. A deployment must replace this with an explicit environment-specific policy.
 - The `error`/`clarification`/`unsupported` dispositions all currently collapse into `refused` on the semantic-planning failure path (`AgentService._unsupported_subresult` hardcodes `refused` for any `source="unsupported"` subplan; `state["planner_error"]` is set but only read by the unreachable `_refuse` node). This is a partial violation of the D-004 honest-failure invariant. No numeric or factual claim is ever emitted on this path and `VerificationStatus.status` never reaches `passed`, so it is safe but imprecise. `tests/test_failure_path_evals.py`'s F2, F5, and F6 pin the actual behaviour. Leading M1.5 candidate; see `docs/decisions/README.md` D-008 and `docs/decisions/REVIEW_REQUIRED.md`.
 
@@ -64,18 +64,22 @@ The committed public fixture contains two storeys, four synthetic doors, four sy
 The last local verification for the public workspace was:
 
 ```text
-PYTHONPATH=apps/api python3 -m pytest -q  -> 122 passed
+PYTHONPATH=apps/api python3 -m pytest -q  -> 142 passed
 cd apps/web && npm ci && npm run build    -> passed (Vite chunk-size warning only)
 ```
 
-The 122 tests are: 2 `IfcRepository` fixture tests (`test_public_workspace.py`); deterministic
+The 142 tests are: 2 `IfcRepository` fixture tests (`test_public_workspace.py`); deterministic
 contract tests for `router.py`, `plan_validation.py`, and `verifiers.py` (no provider); 12
 failure-path evals F1-F12 (`test_failure_path_evals.py`) driven by a scripted, no-network fake
 provider, asserting the disposition contract in `docs/specs/SPEC-M1-reliability-foundation-v1.md`
 §4.3; CJK/multilingual characterization tests that pin, but do not endorse, current behaviour;
-and provider-seam-invariance tests. CI (`.github/workflows/ci.yml`) runs this suite on Python
-3.9, 3.10, 3.11, and 3.12 on every push and pull request, plus a frontend build and a `ruff`
-lint gate. See the SPEC-M1 PR for the run.
+provider-seam-invariance tests; and deterministic document-extraction tests
+(`test_pdf_deterministic_extraction.py`) covering every board/field combination in the fixture
+at the analyzer level and end-to-end with zero model calls, `Panel-A` regressions, content-driven
+ambiguity and miss handling, and the vision-fallback path, per
+`docs/specs/SPEC-M2P1-deterministic-document-extraction-v1.md` §4.7. CI (`.github/workflows/ci.yml`)
+runs this suite on Python 3.9, 3.10, 3.11, and 3.12 on every push and pull request, plus a
+frontend build and a `ruff` lint gate. See the SPEC-M1 and SPEC-M2P1 PRs for the runs.
 
 The browser screenshots in `docs/images/` are public synthetic-data captures. They are presentation evidence, not a substitute for a fresh browser run after code changes. Live-provider (Ollama/OpenAI) end-to-end behaviour is not exercised by this automated suite; equivalence across `llm_provider` values is asserted at the factory-selection and audit-field level only (`test_provider_seam_invariance.py`).
 
