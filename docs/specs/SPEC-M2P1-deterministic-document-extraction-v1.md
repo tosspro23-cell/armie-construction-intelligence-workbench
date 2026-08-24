@@ -190,6 +190,9 @@ Zero-behaviour-change lint fixes required by the CI gate are permitted outside t
 
 ## 9. Live-model baseline (owner-run, not agent-run)
 
+**RESOLVED.** Live-model baseline collected locally 2026-08-24; see
+`docs/reports/2026-08-24-m2p1-live-model-baseline.md`.
+
 Parts 2–3 of the diagnostic could not run because the agent's sandbox has no Ollama (`which
 ollama` → not found); the sandbox's loopback is not the owner's machine. Per **OD-10**, this step
 runs on the owner's local machine with Ollama available, using a locally-executing agent session,
@@ -199,9 +202,10 @@ and is recorded as milestone evidence rather than as a gate on implementation:
   correctness, `extraction_method`, model-call count, and latency;
 - **after:** the same nine on this branch.
 
-Expected shape of the result: vision-dependent with run-to-run variance, versus deterministic with
-zero model calls and region evidence. Report the actual numbers, including any case where the
-deterministic path is worse.
+Expected shape of the result: deterministic with zero model calls and region evidence, versus a
+vision-dependent baseline that is reproducible at `temperature=0` (per `ollama_provider.py`), not
+run-to-run variance. Report the actual numbers, including any case where the deterministic path
+is worse.
 
 ## 10. Git, stop conditions
 

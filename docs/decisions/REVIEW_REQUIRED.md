@@ -86,3 +86,40 @@ states OpenAI has not been validated end to end. SPEC-M1 M1 preserves this selec
 unchanged and asserts its equivalence only at the factory-selection/audit-field level
 (`test_provider_seam_invariance.py`); it does not decide whether OpenAI/hybrid is an active
 release target.
+
+## M2P1 live-model finding: vision fallback does not distinguish "no matching record" from "genuinely unclear image"
+
+Both a structurally unanswerable question (no record named, or a record named but ambiguous
+among several) and a genuinely unclear image trip the same `if result.confidence <
+pdf_confidence_threshold` gate (`graph.py:805`) into the vision fallback, because
+`native_lookup`'s confidence=0.4 ("no record named") and confidence=0.0 ("field absent")
+both fall below the threshold with no distinction from "vision might actually help here."
+Measured live: the intentionally-ambiguous "total connected load" question costs 2 real
+model calls and ~26s post-M2P1, versus 0 calls pre-M2P1 (where a now-removed hardcoded gate
+short-circuited it for free). Candidate fix: an ambiguity-*reason* distinction so a
+record-miss short-circuits to clarification without invoking vision, since vision cannot
+resolve "which record did you mean" from the same rendered page. Evidence:
+`docs/reports/2026-08-24-m2p1-live-model-baseline.md`.
+
+## Pre-existing: the vision path's `ambiguity` field is surfaced to the user with no validation
+
+`graph.py:822` and `:910` pass `location.ambiguity`/`visual_verification.rationale`
+verbatim into the user-facing answer. Live-model testing observed `qwen3-vl:8b` sometimes
+returning a non-informative or boolean-like value in this field (observed: `"true"`,
+`"ambiguity"`) instead of a natural-language explanation. Reproduces identically on both
+`main` @ `0d11ed6` and the M2P1 branch, confirming the vision prompts/logic are genuinely
+unmodified by M2P1 (§4.5 item 12) -- pre-existing, not introduced or fixed by this milestone.
+No fabricated value is ever presented as verified (disposition stays
+`clarification_required` in every observed case), so this is a message-quality defect, not
+a D-004 violation. Evidence: `docs/reports/2026-08-24-m2p1-live-model-baseline.md`.
+
+## Pre-existing: PDF-question routing (`router.py:231`) is English-only
+
+The keyword list gating the PDF-domain heuristic fast path (`"load", "circuit", "diversity",
+"schedule", "breaker", "electrical"`) is English-only, so a CJK document question (e.g.
+"连接负荷是多少" for "what is the connected load") never reaches it and falls to the
+semantic LLM planner, which live-model testing observed misclassifying and refusing it on
+both `main` @ `0d11ed6` and the M2P1 branch. Distinct from the response-language (CJK
+answer-rendering) behaviour M1 already characterizes (§4.6) -- this is source-routing
+detection, not answer language, and was not touched by M2P1 (§6 limits `router.py` changes
+to `requested_field` only). Evidence: `docs/reports/2026-08-24-m2p1-live-model-baseline.md`.
