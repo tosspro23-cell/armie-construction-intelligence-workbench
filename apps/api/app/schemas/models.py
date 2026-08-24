@@ -23,6 +23,7 @@ class Disposition(str, Enum):
     ANSWERED = "answered"
     PARTIALLY_ANSWERED = "partially_answered"
     CLARIFICATION_REQUIRED = "clarification_required"
+    UNSUPPORTED = "unsupported"
     REFUSED = "refused"
     ERROR = "error"
     TIMEOUT = "timeout"

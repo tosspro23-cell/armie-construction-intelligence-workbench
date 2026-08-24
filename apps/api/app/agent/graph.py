@@ -511,7 +511,7 @@ Return only a corrected MultiQueryPlan JSON object."""
             allowed, reason = capability_gate(plan)
             self._audit(state, f"capability_gate[{subtask_id}]", "capability_gate_passed" if allowed else "capability_gate_rejected", reason or "Subplan is within the constrained tool capability boundary.", {"subplan": plan.model_dump()}, planning_mode=plan.planning_mode)
             if not allowed:
-                subresults.append(self._unsupported_subresult(subtask_id, plan, reason or "Unsupported subplan."))
+                subresults.append(self._unsupported_subresult(subtask_id, plan, reason or "Unsupported subplan.", state))
                 continue
             self._audit(state, f"subplan[{subtask_id}]", "subplan_started", "Subplan execution started.", {"subplan": plan.model_dump()}, planning_mode=plan.planning_mode)
             if batch_values and plan.source == "ifc" and plan.operation == "count" and plan.group_by in (None, "none") and plan.expected_result_shape == "scalar_count" and plan.entity_type in batch_values:
@@ -567,8 +567,29 @@ Return only a corrected MultiQueryPlan JSON object."""
             "context_update": {"active_source": SourceType.IFC.value, "active_entity_type": plan.entity_type, "active_filters": plan.filters, "previous_query_plan": plan.model_dump(), "evidence_refs": [item.id for item in result.evidence]},
         }, "evidence": [item.model_dump() for item in result.evidence], "tool_call_count": state.get("tool_call_count", 0) + 1}
 
-    def _unsupported_subresult(self, subtask_id: str, plan: QueryPlan, reason: str) -> dict:
-        return {"subtask_id": subtask_id, "plan": plan.model_dump(), "answer": reason, "disposition": "refused", "citations": [], "verification": VerificationStatus(status="not_applicable", reason=reason).model_dump(), "context_update": {}}
+    def _unsupported_subresult(self, subtask_id: str, plan: QueryPlan, reason: str, state: GraphState) -> dict:
+        """Map a capability-gate rejection to its actual underlying cause (SPEC-M1.5 §4A).
+
+        A ``source="unsupported"`` subplan is not one thing: it can be a
+        genuinely unsupported capability, a request the planner determined
+        needs clarification (``plan.intent == "clarification"``, set at the
+        "issues persisted after repair/escalation" branch in ``_route``), or
+        a transport/parsing failure the planner never recovered from
+        (signalled by ``state["planner_error"]``, set only when bounded
+        repair itself raised). These previously all collapsed into
+        ``disposition="refused"``; the reason string was always correct,
+        only the category was lost.
+        """
+        if state.get("planner_error"):
+            disposition = "error"
+            answer = state["planner_error"]
+        elif plan.intent == "clarification":
+            disposition = "clarification_required"
+            answer = reason
+        else:
+            disposition = "unsupported"
+            answer = reason
+        return {"subtask_id": subtask_id, "plan": plan.model_dump(), "answer": answer, "disposition": disposition, "citations": [], "verification": VerificationStatus(status="not_applicable", reason=reason).model_dump(), "context_update": {}}
 
     def _synthesize_multi_response(self, state: GraphState, multi_plan: MultiQueryPlan, subresults: list[dict[str, Any]], model_calls: int) -> dict:
         if cross_source_join_requested(state.get("question", "")):
@@ -1045,7 +1066,7 @@ Return only a corrected MultiQueryPlan JSON object."""
         self._audit(state, "refuse", "refused", "No safe supported tool route.", {"plan": state.get("plan")})
         return {"tool_result": {
             "answer": state.get("planner_error") or state.get("unsupported_reason") or state.get("plan", {}).get("rationale") or "I cannot answer that reliably from the configured IFC, drawing, or current viewer evidence. Please ask a question about a model element, a drawing field, or the visible selected view.",
-            "disposition": "error" if state.get("planner_error") else "refused",
+            "disposition": "error" if state.get("planner_error") else "unsupported",
             "citations": [],
             "verification": VerificationStatus(status="not_applicable").model_dump(),
             "context_update": {},
