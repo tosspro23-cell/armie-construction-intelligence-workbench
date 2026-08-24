@@ -823,7 +823,21 @@ Return only a corrected MultiQueryPlan JSON object."""
                 {"confidence": result.confidence, "extraction_method": result.extraction_method, "ambiguity": result.ambiguity},
             )
 
-            if result.confidence < self.settings.pdf_confidence_threshold:
+            if result.confidence < self.settings.pdf_confidence_threshold and result.miss_reason == "no_matching_record":
+                # SPEC-M1.5 §4B/OD-14: no candidate record was named at all --
+                # a structural miss, not a document-legibility problem. A
+                # vision pass over the same page cannot resolve "which record
+                # did you mean" either, so route straight to clarification
+                # with zero model calls instead of paying a vision round-trip
+                # that cannot help.
+                self._audit(
+                    state,
+                    "execute_pdf",
+                    "clarification_requested",
+                    "No candidate record was named; vision fallback skipped as it cannot resolve a record-identification ambiguity.",
+                    {"native_confidence": result.confidence, "miss_reason": result.miss_reason},
+                )
+            elif result.confidence < self.settings.pdf_confidence_threshold:
                 board = self.container.document_analyzer.target_board(query.question)
                 field = self.container.document_analyzer.target_field(query.question)
                 self._audit(
