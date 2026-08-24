@@ -793,80 +793,18 @@ Return only a corrected MultiQueryPlan JSON object."""
         try:
             tool_call_count = state.get("tool_call_count", 0) + 1
             model_call_count = state.get("model_call_count", 0)
-            policy_reason = self.container.document_analyzer.ambiguity_policy(query)
-            if policy_reason:
-                self._audit(state, "execute_pdf", "clarification_requested", "PDF ambiguity safety gate rejected an underspecified repeated field.", {"reason": policy_reason})
-                return {"tool_result": {
-                    "answer": policy_reason,
-                    "disposition": "clarification_required",
-                    "citations": [],
-                    "verification": VerificationStatus(status="not_applicable", reason="Ambiguous repeated PDF field was blocked before extraction.").model_dump(),
-                    "context_update": {"active_source": SourceType.PDF.value, "previous_query_plan": plan.model_dump()},
-                }, "tool_call_count": tool_call_count, "model_call_count": model_call_count}
-
-            board = self.container.document_analyzer.target_board(query.question)
-            field = self.container.document_analyzer.target_field(query.question)
-            if board and field:
-                provider = self.container.vision_provider_factory(self.settings)
-                self._audit(state, "execute_pdf", "model_called", "PDF board-localization model call started.", {"purpose": "pdf_board_localize", "board": board}, actual_provider=provider.name, actual_model=provider.model)
-                location, _ = asyncio.run(self.container.document_analyzer.localize_board(provider, query, board))
-                model_call_count += 1
-                # Some vision providers correctly identify the requested board in
-                # their rationale but omit the redundant `board` field. The typed
-                # request already pins the board, so preserve that identity only
-                # when the provider did not report a conflicting board.
-                if not location.board:
-                    location = location.model_copy(update={"board": board})
-                self._audit(state, "execute_pdf", "model_completed", "PDF board-localization model call completed.", {"location": location.model_dump()}, actual_provider=provider.name, actual_model=provider.model)
-                if location.ambiguity or not location.bbox or (location.board or "").upper() != board:
-                    reason = location.ambiguity or f"I could not uniquely locate board {board} in the drawing."
-                    return {"tool_result": {
-                        "answer": reason, "disposition": "clarification_required", "citations": [],
-                        "verification": VerificationStatus(status="not_applicable", reason="Board localization was not unique.").model_dump(),
-                        "context_update": {"active_source": SourceType.PDF.value, "previous_query_plan": plan.model_dump()},
-                    }, "tool_call_count": tool_call_count, "model_call_count": model_call_count}
-                self._audit(state, "execute_pdf", "model_called", "Board-localized PDF crop sent to candidate extractor.", {"purpose": "pdf_board_extract", "board_bbox": location.bbox}, actual_provider=provider.name, actual_model=provider.model)
-                candidates, crop = asyncio.run(self.container.document_analyzer.board_candidates(provider, query, board, location.bbox))
-                model_call_count += 1
-                normalized = [
-                    candidate for candidate in candidates.candidates
-                    if (candidate.board or board).upper() == board
-                    and self.container.document_analyzer.canonical_field(candidate.field)
-                    == self.container.document_analyzer.canonical_field(field)
-                    and candidate.value is not None
-                ]
-                self._audit(state, "execute_pdf", "model_completed", "Board-localized candidate extraction completed.", {"candidate_count": len(candidates.candidates), "valid_candidate_count": len(normalized), "candidates": [item.model_dump() for item in candidates.candidates], "ambiguity": candidates.ambiguity}, actual_provider=provider.name, actual_model=provider.model)
-                if candidates.ambiguity or len(normalized) != 1:
-                    reason = candidates.ambiguity or f"I found {len(normalized)} valid candidates for {field} on {board}; please clarify the target field."
-                    return {"tool_result": {
-                        "answer": reason, "disposition": "clarification_required", "citations": [],
-                        "verification": VerificationStatus(status="not_applicable", reason="Candidate selection was not unique.").model_dump(),
-                        "context_update": {"active_source": SourceType.PDF.value, "previous_query_plan": plan.model_dump()},
-                    }, "tool_call_count": tool_call_count, "model_call_count": model_call_count}
-                candidate = normalized[0]
-                self._audit(state, "execute_pdf", "model_called", "Independent same-crop PDF verifier started.", {"purpose": "pdf_board_verify", "candidate": candidate.model_dump()}, actual_provider=provider.name, actual_model=provider.model)
-                verification = asyncio.run(self.container.document_analyzer.verify_board_candidate(provider, query, board, candidate, crop))
-                model_call_count += 1
-                self._audit(state, "execute_pdf", "model_completed", "Independent same-crop PDF verification completed.", {"verification": verification.model_dump()}, actual_provider=provider.name, actual_model=provider.model)
-                evidence = [Evidence(
-                    source_type=SourceType.PDF, source_file=self.settings.pdf_file,
-                    summary=f"{board} · {field}: {candidate.value}{(' ' + candidate.unit) if candidate.unit else ''}",
-                    locator={"page": query.page_hint or 1, "bbox": location.bbox, "field": field, "board": board, "extraction_method": "board_localized_vision", "evidence_crop": crop.name},
-                    extracted_value=candidate.value, confidence=candidate.confidence,
-                )]
-                citations = self._citations(evidence)
-                verified = all([verification.supported, verification.board_matches, verification.field_matches, verification.value_matches, verification.unique_match])
-                verifier = VerifierResult(verifier="same_crop_pdf_vision", passed=verified, confidence=verification.confidence, reason=verification.rationale, supporting_evidence_ids=[evidence[0].id])
-                status = verification_status([verifier, InvariantValidator().validate(evidence=evidence, citations=[Citation.model_validate(item) for item in citations], disposition="answered" if verified else "clarification_required")])
-                return {"tool_result": {
-                    "answer": f"{candidate.value}{(' ' + candidate.unit) if candidate.unit else ''}" if verified else verification.rationale,
-                    "disposition": "answered" if verified else "clarification_required", "citations": citations, "verification": status.model_dump(),
-                    "context_update": {"active_source": SourceType.PDF.value, "previous_query_plan": plan.model_dump(), "evidence_refs": [evidence[0].id]},
-                }, "evidence": [item.model_dump() for item in evidence], "tool_call_count": tool_call_count, "model_call_count": model_call_count}
-
             result = self.container.document_analyzer.native_lookup(query)
+            self._audit(
+                state,
+                "execute_pdf",
+                "tool_completed",
+                "Deterministic native-text extraction attempted.",
+                {"confidence": result.confidence, "extraction_method": result.extraction_method, "ambiguity": result.ambiguity},
+            )
+
             if result.confidence < self.settings.pdf_confidence_threshold:
-                provider = self.container.vision_provider_factory(self.settings)
+                board = self.container.document_analyzer.target_board(query.question)
+                field = self.container.document_analyzer.target_field(query.question)
                 self._audit(
                     state,
                     "execute_pdf",
@@ -874,6 +812,65 @@ Return only a corrected MultiQueryPlan JSON object."""
                     "Native text was insufficient; invoking vision extraction.",
                     {"native_confidence": result.confidence},
                 )
+                if board and field:
+                    provider = self.container.vision_provider_factory(self.settings)
+                    self._audit(state, "execute_pdf", "model_called", "PDF board-localization model call started.", {"purpose": "pdf_board_localize", "board": board}, actual_provider=provider.name, actual_model=provider.model)
+                    location, _ = asyncio.run(self.container.document_analyzer.localize_board(provider, query, board))
+                    model_call_count += 1
+                    # Some vision providers correctly identify the requested board in
+                    # their rationale but omit the redundant `board` field. The typed
+                    # request already pins the board, so preserve that identity only
+                    # when the provider did not report a conflicting board.
+                    if not location.board:
+                        location = location.model_copy(update={"board": board})
+                    self._audit(state, "execute_pdf", "model_completed", "PDF board-localization model call completed.", {"location": location.model_dump()}, actual_provider=provider.name, actual_model=provider.model)
+                    if location.ambiguity or not location.bbox or (location.board or "").upper() != board:
+                        reason = location.ambiguity or f"I could not uniquely locate board {board} in the drawing."
+                        return {"tool_result": {
+                            "answer": reason, "disposition": "clarification_required", "citations": [],
+                            "verification": VerificationStatus(status="not_applicable", reason="Board localization was not unique.").model_dump(),
+                            "context_update": {"active_source": SourceType.PDF.value, "previous_query_plan": plan.model_dump()},
+                        }, "tool_call_count": tool_call_count, "model_call_count": model_call_count}
+                    self._audit(state, "execute_pdf", "model_called", "Board-localized PDF crop sent to candidate extractor.", {"purpose": "pdf_board_extract", "board_bbox": location.bbox}, actual_provider=provider.name, actual_model=provider.model)
+                    candidates, crop = asyncio.run(self.container.document_analyzer.board_candidates(provider, query, board, location.bbox))
+                    model_call_count += 1
+                    normalized = [
+                        candidate for candidate in candidates.candidates
+                        if (candidate.board or board).upper() == board
+                        and self.container.document_analyzer.canonical_field(candidate.field)
+                        == self.container.document_analyzer.canonical_field(field)
+                        and candidate.value is not None
+                    ]
+                    self._audit(state, "execute_pdf", "model_completed", "Board-localized candidate extraction completed.", {"candidate_count": len(candidates.candidates), "valid_candidate_count": len(normalized), "candidates": [item.model_dump() for item in candidates.candidates], "ambiguity": candidates.ambiguity}, actual_provider=provider.name, actual_model=provider.model)
+                    if candidates.ambiguity or len(normalized) != 1:
+                        reason = candidates.ambiguity or f"I found {len(normalized)} valid candidates for {field} on {board}; please clarify the target field."
+                        return {"tool_result": {
+                            "answer": reason, "disposition": "clarification_required", "citations": [],
+                            "verification": VerificationStatus(status="not_applicable", reason="Candidate selection was not unique.").model_dump(),
+                            "context_update": {"active_source": SourceType.PDF.value, "previous_query_plan": plan.model_dump()},
+                        }, "tool_call_count": tool_call_count, "model_call_count": model_call_count}
+                    candidate = normalized[0]
+                    self._audit(state, "execute_pdf", "model_called", "Independent same-crop PDF verifier started.", {"purpose": "pdf_board_verify", "candidate": candidate.model_dump()}, actual_provider=provider.name, actual_model=provider.model)
+                    verification = asyncio.run(self.container.document_analyzer.verify_board_candidate(provider, query, board, candidate, crop))
+                    model_call_count += 1
+                    self._audit(state, "execute_pdf", "model_completed", "Independent same-crop PDF verification completed.", {"verification": verification.model_dump()}, actual_provider=provider.name, actual_model=provider.model)
+                    evidence = [Evidence(
+                        source_type=SourceType.PDF, source_file=self.settings.pdf_file,
+                        summary=f"{board} · {field}: {candidate.value}{(' ' + candidate.unit) if candidate.unit else ''}",
+                        locator={"page": query.page_hint or 1, "bbox": location.bbox, "field": field, "board": board, "extraction_method": "board_localized_vision", "evidence_crop": crop.name},
+                        extracted_value=candidate.value, confidence=candidate.confidence,
+                    )]
+                    citations = self._citations(evidence)
+                    verified = all([verification.supported, verification.board_matches, verification.field_matches, verification.value_matches, verification.unique_match])
+                    verifier = VerifierResult(verifier="same_crop_pdf_vision", passed=verified, confidence=verification.confidence, reason=verification.rationale, supporting_evidence_ids=[evidence[0].id])
+                    status = verification_status([verifier, InvariantValidator().validate(evidence=evidence, citations=[Citation.model_validate(item) for item in citations], disposition="answered" if verified else "clarification_required")])
+                    return {"tool_result": {
+                        "answer": f"{candidate.value}{(' ' + candidate.unit) if candidate.unit else ''}" if verified else verification.rationale,
+                        "disposition": "answered" if verified else "clarification_required", "citations": citations, "verification": status.model_dump(),
+                        "context_update": {"active_source": SourceType.PDF.value, "previous_query_plan": plan.model_dump(), "evidence_refs": [evidence[0].id]},
+                    }, "evidence": [item.model_dump() for item in evidence], "tool_call_count": tool_call_count, "model_call_count": model_call_count}
+
+                provider = self.container.vision_provider_factory(self.settings)
                 self._audit(state, "execute_pdf", "model_called", "PDF page sent to the vision extractor.", {"purpose": "pdf_extract"}, actual_provider=provider.name, actual_model=provider.model)
                 result = asyncio.run(
                     self.container.document_analyzer.vision_lookup(provider, query)

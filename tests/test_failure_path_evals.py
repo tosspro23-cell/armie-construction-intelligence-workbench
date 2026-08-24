@@ -360,28 +360,47 @@ def test_f11_result_shape_mismatch_is_not_answered(tmp_path: Path) -> None:
 # --- F12: PDF vision path fails / returns low-confidence evidence -------------------
 
 def test_f12_low_confidence_vision_extraction_clarifies_without_fabricating_a_value(tmp_path: Path) -> None:
+    """SPEC-M2P1 scenario rewrite, authorized as a scoped exception to §10.
+
+    The original scenario asked for "the diversity factor situation for
+    Panel-A" -- a question that (both before and after M2P1) is heuristically
+    fast-pathed to the PDF source without ever reaching the semantic planner,
+    so the scripted ``multi_query_plan`` response below was already dead
+    scaffolding in the M1 baseline. What actually decided the outcome was
+    ``requested_field``: under M2P1's deterministic-first extraction, that
+    question names both a real field (Diversity Factor) and a real record
+    (Panel-A) unambiguously, so it is now correctly *answered* (0.70,
+    matching SPEC-M2P1 §3 B9 ground truth) instead of reaching vision. That
+    is the new architecture working as specified, not a regression -- see
+    the SPEC-M2P1 continuation report.
+
+    F12's actual intent -- the vision fallback must never fabricate a value
+    on a low-confidence/ambiguous result -- is preserved here with a
+    scenario deterministic extraction genuinely cannot resolve: an
+    "after diversity load" field, which SPEC-M2P1 §3 B9 establishes does not
+    exist as a column in the fixture at all. That is an unconditional miss
+    (confidence 0.0, no candidate column), which reaches the *generic*
+    vision fallback in ``_execute_pdf`` (no board is named for Panel-A
+    either, since OD-9 does not widen ``target_board``'s regex, so the
+    board-localized vision flow is not the one exercised here).
+    """
     settings = _settings(tmp_path)
     fake = FakeModelProvider()
-    pdf_plan = MultiQueryPlan(response_language="en", rationale="r", subplans=[QueryPlan(
-        subtask_id="task_1", source="pdf", intent="document_lookup", operation="extract_field",
-        requested_field="diversity factor for Panel-A", filters={}, rationale="pdf lookup",
-        planning_mode="llm", match_status="complete", expected_result_shape="document_value",
-    )])
-    fake.script("multi_query_plan", pdf_plan)
-    fake.script("response_language", ResponseLanguage(code="en"))
     fake.script("pdf_extract", VisionFieldExtraction(
         value=None, unit=None, page=1, bbox=None, confidence=0.2, rationale="ambiguous",
-        ambiguity="Could not visibly confirm the diversity factor value for Panel-A uniquely.",
+        ambiguity="Could not visibly confirm an after-diversity-load value for Panel-A on this page.",
     ))
     fake.script("pdf_verify", VisionEvidenceVerification(supported=False, confidence=0.1, rationale="Not visibly supported on this page."))
     container, service = _service(settings, fake)
 
     response = service.invoke(
         thread_id="f12", viewer_context=None,
-        question="Please tell me about the diversity factor situation for Panel-A in this drawing.",
+        question="What is the after diversity load for Panel-A in this drawing?",
     )
 
     assert response.disposition.value == "clarification_required"
     assert not any(char.isdigit() for char in response.answer_markdown)
     for citation in response.citations:
         assert not any(char.isdigit() for char in citation.label)
+    purposes_called = [call.purpose for call in fake.calls]
+    assert purposes_called == ["pdf_extract", "pdf_verify"]
