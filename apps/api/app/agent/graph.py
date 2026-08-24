@@ -186,6 +186,15 @@ class AgentService:
             context["active_snapshot_id"] = viewer["snapshot_id"]
         context["source_preference"] = state.get("source_preference", "auto")
         _, context, clarification = resolve_reference(state["question"], context)
+        # SPEC-M1.5 §4C: this is the single authoritative cross-source-join
+        # gate for the live graph. START -> resolve_context runs
+        # unconditionally before any other node, and this check's outcome
+        # (via _after_context's conditional edge) diverts straight to
+        # "refuse" whenever it fires, before "route" -- and therefore
+        # heuristic_plan/heuristic_multi_plan/_synthesize_multi_response's
+        # own copies of this same check -- ever run. Their checks are
+        # provably unreachable for that reason (see the comments at each),
+        # not merely believed dead.
         if cross_source_join_requested(state["question"]):
             reason = "Cross-source joins between drawing and IFC room-area data are outside this reference implementation. No source tool was executed."
             self._audit(state, "resolve_context", "capability_gate_rejected", "Whole-intent capability gate rejected an unsupported cross-source join.", {"reason": "cross_source_join_unsupported", "target": state["question"]})
@@ -592,10 +601,16 @@ Return only a corrected MultiQueryPlan JSON object."""
         return {"subtask_id": subtask_id, "plan": plan.model_dump(), "answer": answer, "disposition": disposition, "citations": [], "verification": VerificationStatus(status="not_applicable", reason=reason).model_dump(), "context_update": {}}
 
     def _synthesize_multi_response(self, state: GraphState, multi_plan: MultiQueryPlan, subresults: list[dict[str, Any]], model_calls: int) -> dict:
+        # SPEC-M1.5 §4C: unreachable from the live graph for the same reason
+        # as heuristic_plan/heuristic_multi_plan's copies -- _resolve_context
+        # is the single authoritative gate and always runs first, before
+        # "route" -> "execute_multi" -> this method could ever be reached
+        # with a cross-source-join question. Retained as a defensive
+        # fallback for this method's own direct callers/tests.
         if cross_source_join_requested(state.get("question", "")):
             reason = "Cross-source joins between drawing and IFC room-area data are outside this reference implementation. No numeric partial answer can be finalized."
             self._audit(state, "intent_coverage", "capability_gate_rejected", "Whole-intent coverage rejected a partial cross-source execution.", {"reason": "cross_source_join_unsupported"})
-            return {"answer": reason, "disposition": "refused", "citations": [], "verification": VerificationStatus(status="not_applicable", reason=reason).model_dump(), "model_call_count": model_calls}
+            return {"answer": reason, "disposition": "unsupported", "citations": [], "verification": VerificationStatus(status="not_applicable", reason=reason).model_dump(), "model_call_count": model_calls}
         successful = [item for item in subresults if item.get("disposition") == "answered" and item.get("verification", {}).get("status") == "passed"]
         unresolved = [item for item in subresults if item not in successful]
         citations = [citation for item in subresults for citation in item.get("citations", [])]

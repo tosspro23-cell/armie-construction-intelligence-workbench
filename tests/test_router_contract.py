@@ -74,28 +74,28 @@ def test_heuristic_multi_plan_generic_count_case() -> None:
     assert all(plan.operation == "count" for plan in multi_plan.subplans)
 
 
-def test_defect_heuristic_multi_plan_crashes_on_cross_source_join() -> None:
-    """Pins a real defect (not an endorsement): heuristic_multi_plan's own
-    cross-source-join branch constructs ``MultiQueryPlan(subplans=[], ...)``,
-    which violates the schema's own ``min_length=1`` constraint and raises
-    ``ValidationError`` instead of returning the intended graceful refusal.
+def test_heuristic_multi_plan_gracefully_refuses_cross_source_join() -> None:
+    """SPEC-M1.5 §4C: previously a real defect (see git history) --
+    heuristic_multi_plan's own cross-source-join branch constructed
+    ``MultiQueryPlan(subplans=[], ...)``, violating the schema's own
+    ``min_length=1`` and raising ``ValidationError`` instead of returning the
+    intended graceful refusal. Fixed to construct a valid single
+    ``source="unsupported"`` subplan, matching heuristic_plan's own
+    single-plan equivalent.
 
-    This branch is currently unreachable from the live graph: AgentService
-    ``_resolve_context`` runs its own independent
-    ``cross_source_join_requested`` check and diverts to the "refuse" node
-    before "route" (and therefore heuristic_multi_plan) is ever invoked
-    (verified end-to-end by F9 in test_failure_path_evals.py), so this bug
-    has no live user-facing impact today. It is still a real latent defect
-    in heuristic_multi_plan itself
-    -- duplicated, drifting join-detection logic across two call sites, one
-    of which crashes -- reported per SPEC-M1 §4.3 ("any implementation
-    divergence is a defect finding, not a test to adjust"). router.py is
-    outside SPEC-M1 §6's allowed scope, so this is deliberately not fixed
-    in this milestone; see PR "Defect findings".
+    This branch remains unreachable from the live graph: AgentService
+    ``_resolve_context`` is the single authoritative cross-source-join gate
+    and diverts to "refuse" before "route" (and therefore
+    heuristic_multi_plan) is ever invoked (verified end-to-end by F9 in
+    test_failure_path_evals.py). heuristic_multi_plan is still directly
+    tested here, independent of the graph, because it is directly callable.
     """
-    with pytest.raises(Exception) as excinfo:
-        heuristic_multi_plan("Please join the PDF connected load data with the IFC room area.", {}, has_viewer_context=False)
-    assert "subplans" in str(excinfo.value)
+    multi_plan = heuristic_multi_plan("Please join the PDF connected load data with the IFC room area.", {}, has_viewer_context=False)
+    assert multi_plan is not None
+    assert multi_plan.intent == "unsupported"
+    assert len(multi_plan.subplans) == 1
+    assert multi_plan.subplans[0].source == "unsupported"
+    assert multi_plan.subplans[0].intent == "unsupported"
 
 
 # --- nearest_space_requested -------------------------------------------------
