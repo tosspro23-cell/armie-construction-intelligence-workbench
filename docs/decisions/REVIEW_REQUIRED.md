@@ -86,3 +86,17 @@ states OpenAI has not been validated end to end. SPEC-M1 M1 preserves this selec
 unchanged and asserts its equivalence only at the factory-selection/audit-field level
 (`test_provider_seam_invariance.py`); it does not decide whether OpenAI/hybrid is an active
 release target.
+
+## Candidate: `OllamaProvider`'s own response-parsing layer has zero test coverage
+
+Flagged in `docs/reports/2026-08-23-cold-takeover-assessment.md` §9 as a foreseeable risk of a
+fake-provider-only test strategy: a fake that's too well-behaved can miss real quirks such as
+the Ollama `thinking`-vs-`response` field handling. M1's failure-path evals (F1-F3) cover the
+*pipeline's* handling of malformed/unparseable structured output, but they drive that through
+`FakeModelProvider`, which stands in for `ModelProvider` entirely and never calls
+`OllamaProvider`'s own request/response-parsing code. That layer — including whatever
+`thinking`-vs-`response` field logic Ollama's structured-output responses actually require —
+remains untested by construction; `FakeModelProvider` cannot exercise it, since exercising it
+is exactly what a fake bypasses. Candidate scope for a future milestone: unit tests for
+`OllamaProvider`'s parsing built on recorded real response payloads (fixture JSON, not a live
+call), so this layer gets coverage without requiring a live Ollama daemon in CI.
