@@ -1,6 +1,6 @@
 # Agent Handoff
 
-This is a cold-start guide for a new vendor or frontier coding agent. Read this file together with [`PROJECT_STATE.md`](PROJECT_STATE.md), [`README.md`](README.md), [`docs/architecture.md`](docs/architecture.md), and [`SECURITY_AND_DATA.md`](SECURITY_AND_DATA.md) before editing code.
+This is a cold-start guide for a new vendor or frontier coding agent. Read this file together with [`PROJECT_STATE.md`](PROJECT_STATE.md), [`README.md`](README.md), [`docs/architecture.md`](docs/architecture.md), [`SECURITY_AND_DATA.md`](SECURITY_AND_DATA.md), [`docs/decisions/README.md`](docs/decisions/README.md), and [`docs/decisions/REVIEW_REQUIRED.md`](docs/decisions/REVIEW_REQUIRED.md) before editing code.
 
 ## Start here
 
@@ -55,7 +55,7 @@ This is a cold-start guide for a new vendor or frontier coding agent. Read this 
 
 - Preserve synthetic-only public data. Never copy private assignment files, evidence crops, screenshots, runtime traces, or absolute machine paths into Git.
 - Prefer a failing test or a new fixture-backed acceptance case before changing a planner/tool contract.
-- Keep valid-but-unsupported, ambiguous, provider error, timeout, and cancellation dispositions distinct. Known gap: `AgentService._unsupported_subresult` currently collapses parse-failure/repair-exhausted, escalation-unavailable, and transport-error outcomes to `disposition="refused"` instead of the normatively distinct `error`/`clarification` categories (SPEC-M1 §4.3, defect findings in the SPEC-M1 PR) -- still safe (no numeric claim), but do not "fix" this without reading that writeup first; it is a `graph.py` control-flow change, out of the SPEC-M1 M1 "call sites only" scope.
+- Keep valid-but-unsupported, ambiguous, provider error, timeout, and cancellation dispositions distinct. This was a known gap through M1 (documented in SPEC-M1 §4.3) and was fixed in M1.5: `AgentService._unsupported_subresult` now maps the actual underlying cause to the correct disposition (`error` / `clarification_required` / `unsupported`) instead of hardcoding `refused` -- see `docs/decisions/README.md` D-010 for the full mechanism and `tests/test_disposition_contract.py` for the coverage. Do not reintroduce a collapsed disposition when adding a new failure path; map it explicitly.
 - Do not add a generic BIM query language, cross-source joins, compliance reasoning, or long-term memory without an explicit scope decision.
 - Treat Dockerfiles and OpenAI hooks as unvalidated extension points unless a fresh end-to-end run proves otherwise.
 - Do not silently broaden CORS, secrets, persistence, or external network access.
