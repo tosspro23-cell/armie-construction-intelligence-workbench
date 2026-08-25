@@ -112,6 +112,8 @@ npm run dev
 
 Use `npm ci` instead of `npm install` for a reproducible install from the committed lockfile (this is what CI runs; both work with no flags -- see `docs/decisions/README.md` D-006). Open the URL printed by Vite, normally `http://127.0.0.1:5173`. Vite may select the next free port when that port is occupied.
 
+`./scripts/dev.sh` starts both servers together and stops both on Ctrl+C.
+
 ## Demo questions
 
 1. `How many doors are in the model?`
