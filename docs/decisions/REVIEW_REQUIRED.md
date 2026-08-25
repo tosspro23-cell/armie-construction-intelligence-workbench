@@ -148,3 +148,21 @@ both `main` @ `0d11ed6` and the M2P1 branch. Distinct from the response-language
 answer-rendering) behaviour M1 already characterizes (§4.6) -- this is source-routing
 detection, not answer language, and was not touched by M2P1 (§6 limits `router.py` changes
 to `requested_field` only). Evidence: `docs/reports/2026-08-24-m2p1-live-model-baseline.md`.
+
+## M2: the reconciliation detector is keyword-level, not attribute-aware
+
+`cross_source_reconciliation_requested` matches on a door/window entity term, a comparison
+verb, and a drawing/schedule reference -- it does not understand *which attribute* the
+question asks about. A question like "Compare door fire ratings in the IFC and PDF schedule"
+matches the detector and is routed into reconciliation, which always compares only width and
+height regardless of the question's actual wording: `disposition="answered"` with correct
+width/height data, no acknowledgment that fire ratings (or any other unsupported attribute)
+were never checked. Verified directly: this reproduces on current `main`.
+
+This is not a fabrication in the D-004/D-011 sense (the width/height data returned is
+correct, not invented), but it is a silent attribute substitution a user could reasonably
+read as "the system checked what I asked about." Candidate fix: either have the detector
+require the attribute mentioned to be width/height-shaped before matching, or have
+`_synthesize_reconciliation_response` name the attribute it actually compared in the answer
+text so the substitution is visible rather than implicit. Not scheduled; flagging for a
+future milestone's scope decision.
