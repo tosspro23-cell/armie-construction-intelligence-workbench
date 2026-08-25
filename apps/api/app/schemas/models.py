@@ -30,6 +30,29 @@ class Disposition(str, Enum):
     CANCELLED = "cancelled"
 
 
+class ReconciliationStatus(str, Enum):
+    """SPEC-M2 §4D: per-item outcome of an IFC<->drawing door/window join."""
+
+    MATCHED = "matched"
+    DIMENSION_MISMATCH = "dimension_mismatch"
+    MISSING_IN_PDF = "missing_in_pdf"
+    MISSING_IN_IFC = "missing_in_ifc"
+
+
+class ReconciliationItem(BaseModel):
+    """One door/window instance joined on the IFC `Tag` / schedule `Mark` field."""
+
+    tag: str
+    entity_type: str | None = None
+    storey: str | None = None
+    ifc_width_m: float | None = None
+    ifc_height_m: float | None = None
+    pdf_width_m: float | None = None
+    pdf_height_m: float | None = None
+    status: ReconciliationStatus
+    detail: str
+
+
 class ViewerContext(BaseModel):
     selected_global_ids: list[str] = Field(default_factory=list)
     selected_express_ids: list[int] = Field(default_factory=list)
@@ -237,6 +260,7 @@ class AgentResponse(BaseModel):
     viewer_actions: list[dict[str, Any]] = Field(default_factory=list)
     execution_metadata: dict[str, Any] = Field(default_factory=dict)
     context_update: dict[str, Any] = Field(default_factory=dict)
+    reconciliation_items: list[ReconciliationItem] = Field(default_factory=list)
 
 
 class IfcQueryInput(BaseModel):

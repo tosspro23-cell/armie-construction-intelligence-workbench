@@ -39,6 +39,7 @@ from app.schemas.models import (
     IfcQueryInput,
     MultiQueryPlan,
     QueryPlan,
+    ReconciliationItem,
     ResponseLanguage,
     SourceType,
     VerificationStatus,
@@ -1305,6 +1306,7 @@ Return only a corrected MultiQueryPlan JSON object."""
                     },
                 },
                 context_update=result.get("context_update", {}),
+                reconciliation_items=[ReconciliationItem.model_validate(item) for item in result.get("reconciliation_items", [])],
             )
         self._audit(
             state,
