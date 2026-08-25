@@ -30,6 +30,29 @@ class Disposition(str, Enum):
     CANCELLED = "cancelled"
 
 
+class ReconciliationStatus(str, Enum):
+    """SPEC-M2 §4D: per-item outcome of an IFC<->drawing door/window join."""
+
+    MATCHED = "matched"
+    DIMENSION_MISMATCH = "dimension_mismatch"
+    MISSING_IN_PDF = "missing_in_pdf"
+    MISSING_IN_IFC = "missing_in_ifc"
+
+
+class ReconciliationItem(BaseModel):
+    """One door/window instance joined on the IFC `Tag` / schedule `Mark` field."""
+
+    tag: str
+    entity_type: str | None = None
+    storey: str | None = None
+    ifc_width_m: float | None = None
+    ifc_height_m: float | None = None
+    pdf_width_m: float | None = None
+    pdf_height_m: float | None = None
+    status: ReconciliationStatus
+    detail: str
+
+
 class ViewerContext(BaseModel):
     selected_global_ids: list[str] = Field(default_factory=list)
     selected_express_ids: list[int] = Field(default_factory=list)
@@ -99,6 +122,7 @@ class QueryPlan(BaseModel):
         "visual_inspection",
         "clarification",
         "unsupported",
+        "reconciliation",
     ]
     operation: Literal[
         "count",
@@ -139,7 +163,7 @@ class QueryPlan(BaseModel):
 class MultiQueryPlan(BaseModel):
     """Language-neutral, typed decomposition of one conversational turn."""
 
-    intent: Literal["single_query", "multi_query", "clarification", "unsupported"] = "single_query"
+    intent: Literal["single_query", "multi_query", "clarification", "unsupported", "reconciliation"] = "single_query"
     response_language: str = "en"
     subplans: list[QueryPlan] = Field(min_length=1, max_length=8)
     rationale: str = ""
@@ -236,6 +260,7 @@ class AgentResponse(BaseModel):
     viewer_actions: list[dict[str, Any]] = Field(default_factory=list)
     execution_metadata: dict[str, Any] = Field(default_factory=dict)
     context_update: dict[str, Any] = Field(default_factory=dict)
+    reconciliation_items: list[ReconciliationItem] = Field(default_factory=list)
 
 
 class IfcQueryInput(BaseModel):

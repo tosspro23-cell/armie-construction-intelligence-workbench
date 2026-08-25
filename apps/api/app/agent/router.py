@@ -19,11 +19,35 @@ ELEMENT_ALIASES = {
 SUPPORTED_ENTITY_TYPES = set(ELEMENT_ALIASES.values())
 
 
+def cross_source_reconciliation_requested(question: str) -> bool:
+    """Detect the narrow IFC<->drawing door/window reconciliation pilot (SPEC-M2 §4A).
+
+    Deliberately conservative: requires a door/window entity term AND a
+    reconciliation-intent verb AND a schedule/drawing reference term, all
+    three together, so this never fires on an ordinary single-source
+    door/window question or on a non-reconciliation cross-source question
+    (for example an electrical-load-vs-room-area join, which has no
+    door/window term and so can never match here).
+    """
+    lowered = " ".join(question.lower().split())
+    entity_marker = re.search(r"\b(door|doors|window|windows)\b|门|窗", lowered)
+    verb_marker = re.search(r"\b(compare|verify|reconcile|check|match|cross-check|cross check|consistent)\b|核对|比对|一致", lowered)
+    drawing_marker = re.search(r"\b(pdf|drawing|schedule)\b|图纸|排程|明细表", lowered)
+    return bool(entity_marker and verb_marker and drawing_marker)
+
+
 def cross_source_join_requested(question: str) -> bool:
     """Detect an explicit request to combine drawing and IFC semantics.
 
     This is an intent-level safety boundary, not a route for either source.
+    SPEC-M2 §4B: the narrow door/window reconciliation pilot is carved out
+    of this refusal at this single, shared definition -- every one of this
+    function's four call sites (one live, three retained-dead per D-010)
+    inherits the carve-out automatically and cannot drift relative to each
+    other again.
     """
+    if cross_source_reconciliation_requested(question):
+        return False
     lowered = " ".join(question.lower().split())
     join_marker = re.search(r"\b(join|combine|merge|link|cross[- ]source|relate)\b|关联|连接|合并", lowered)
     pdf_marker = re.search(r"\b(pdf|drawing|load|connected load|circuit|diversity|schedule)\b|图纸|负载|配电", lowered)
@@ -199,6 +223,43 @@ def heuristic_multi_plan(question: str, context: dict, has_viewer_context: bool,
         intent="multi_query" if len(subplans) > 1 else "single_query", response_language=response_language,
         raw_user_message=question, normalized_request=question, interpretation_confidence="high", subplans=subplans,
         rationale="Generic multi-entity IFC count/grouping plan.",
+    )
+
+
+def reconciliation_plan(question: str, context: dict) -> MultiQueryPlan | None:
+    """SPEC-M2 §4C: narrow IFC<->drawing door/window reconciliation plan.
+
+    The two subplans below are a typed, audited record of intent -- they
+    are not executed through the generic per-subplan tool contract. The IFC
+    side must cover both `IfcDoor` and `IfcWindow` together (the generic
+    executor is single-entity-type), and the PDF side must read every row
+    of the schedule's page 2 rather than one question-driven record/field
+    (the generic executor's `native_lookup` contract). `intent="reconciliation"`
+    is exactly the signal `AgentService._execute_multi` uses to route to the
+    dedicated join in `_synthesize_reconciliation_response` instead of
+    executing these subplans generically.
+    """
+    if not cross_source_reconciliation_requested(question):
+        return None
+    reason = "IFC<->drawing door/window reconciliation, joined on the IFC Tag / schedule Mark field."
+    response_language = "zh-CN" if any("\u4e00" <= char <= "\u9fff" for char in question) else "en"
+    subplans = [
+        QueryPlan(
+            subtask_id="task_1", source="ifc", intent="reconciliation", operation="list",
+            entity_type=None, filters={}, group_by="none", expected_result_shape="list",
+            rationale=reason, planning_mode="heuristic", rule_id="door_window_reconciliation",
+            matched_signals=["intent:reconciliation", "entity:IfcDoor", "entity:IfcWindow"], match_status="complete",
+        ),
+        QueryPlan(
+            subtask_id="task_2", source="pdf", intent="reconciliation", operation="extract_field",
+            filters={"page_hint": 2}, group_by="none", expected_result_shape="list",
+            rationale=reason, planning_mode="heuristic", rule_id="door_window_reconciliation",
+            matched_signals=["intent:reconciliation", "source:pdf_schedule_page_2"], match_status="complete",
+        ),
+    ]
+    return MultiQueryPlan(
+        intent="reconciliation", response_language=response_language, raw_user_message=question,
+        normalized_request=question, interpretation_confidence="high", subplans=subplans, rationale=reason,
     )
 
 

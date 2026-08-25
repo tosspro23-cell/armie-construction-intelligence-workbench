@@ -23,6 +23,7 @@ from app.agent.router import (
     heuristic_plan,
     nearest_space_requested,
     planner_prompt,
+    reconciliation_plan,
     resolve_reference,
     selected_element_plan,
 )
@@ -38,6 +39,7 @@ from app.schemas.models import (
     IfcQueryInput,
     MultiQueryPlan,
     QueryPlan,
+    ReconciliationItem,
     ResponseLanguage,
     SourceType,
     VerificationStatus,
@@ -258,6 +260,20 @@ class AgentService:
             or (plan.match_status == "complete" and plan.source == "ifc")
             or (plan.match_status == "complete" and plan.source in {"pdf", "viewer_snapshot"})
         )
+        reconciliation = reconciliation_plan(state["question"], context)
+        if reconciliation is not None:
+            # SPEC-M2 §4C: return immediately, before canonicalize_multi_plan
+            # / enforce_grouped_request_contract / validate_multi_plan below
+            # -- those exist to repair and validate a generically executable
+            # single-entity-type IFC/PDF plan, a contract these two
+            # audit-only reconciliation subplans deliberately do not follow
+            # (see reconciliation_plan's docstring). Running them here would
+            # misread the IFC subplan's intentionally-absent single
+            # entity_type as a missing_entity validation failure and silently
+            # replace this plan with a generic clarification request.
+            self._audit(state, "semantic_plan", "semantic_validation", "Narrow IFC<->drawing door/window reconciliation intent was recognized before the cross-source-join gate could apply.", {"intent": "reconciliation", "rule_id": "door_window_reconciliation"}, planning_mode="heuristic")
+            self._audit(state, "decompose", "decomposed", "Request decomposed into independent subplans.", {"subplan_count": len(reconciliation.subplans), "subplans": [item.model_dump() for item in reconciliation.subplans]}, planning_mode="heuristic")
+            return {"multi_plan": reconciliation.model_dump(), "plan": reconciliation.subplans[0].model_dump(), "model_call_count": model_call_count}
         if generic_multi is not None:
             multi_plan = generic_multi
         elif nearest_space_requested(state["question"]):
@@ -491,6 +507,48 @@ Return only a corrected MultiQueryPlan JSON object."""
     def _execute_multi(self, state: GraphState) -> dict:
         """Execute each validated subplan independently and retain partial success."""
         multi_plan = MultiQueryPlan.model_validate(state["multi_plan"])
+        if multi_plan.intent == "reconciliation":
+            # SPEC-M2 §4C/D: reconciliation's two subplans are a typed,
+            # audited record of intent, not independently executable through
+            # the generic per-subplan loop below (one IFC subplan must cover
+            # both IfcDoor and IfcWindow; the PDF subplan reads the whole
+            # page-2 table, not one question-driven record/field). The join
+            # is executed and synthesized together in one dedicated path.
+            try:
+                response = self._synthesize_reconciliation_response(state, multi_plan)
+            except Exception as error:
+                # SPEC-M2 §4G: a genuine failure to read one side (for
+                # example the schedule page's table structure could not be
+                # parsed at all) means the join could not run at all -- a
+                # system-execution failure, not a content disagreement
+                # between sources. Reporting every item "missing" here
+                # would be a fabricated result (Codex P1 finding). Idiom
+                # matches _execute_ifc's own failure handling (this
+                # method's `except Exception as error: self._audit(...)`
+                # sibling above) rather than inventing a second mechanism.
+                self._audit(state, "reconciliation", "error", "Door/window reconciliation could not execute.", {"error": str(error)})
+                response = {
+                    "answer": f"I could not complete the door/window reconciliation: {error}",
+                    "disposition": "error",
+                    "citations": [],
+                    "verification": VerificationStatus(status="failed", reason=str(error)).model_dump(),
+                    "reconciliation_items": [],
+                    "subresults": [],
+                    "evidence": [],
+                    "tool_call_count_delta": 0,
+                }
+            evidence = response.pop("evidence", [])
+            tool_calls = state.get("tool_call_count", 0) + response.pop("tool_call_count_delta", 0)
+            response["context_update"] = self._merge_conversation_context(state.get("conversation_context", {}), multi_plan, response.get("subresults", []))
+            # SPEC-M2 Codex P2: this dedicated synthesis path has no
+            # localized reconciliation templates yet, even though
+            # reconciliation_plan may detect "zh-CN" from the question
+            # itself -- report the language the answer text is actually
+            # written in, not the language the question was in, until
+            # localized templates exist (tracked in REVIEW_REQUIRED.md).
+            response["response_language"] = "en"
+            self._audit(state, "context_update", "context_updated", "Structured conversational context updated.", {"context_update": response["context_update"]})
+            return {"tool_result": response, "evidence": evidence, "tool_call_count": tool_calls, "model_call_count": state.get("model_call_count", 0)}
         subresults: list[dict[str, Any]] = []
         all_evidence: list[dict[str, Any]] = []
         tool_calls = state.get("tool_call_count", 0)
@@ -619,6 +677,156 @@ Return only a corrected MultiQueryPlan JSON object."""
         verification = VerificationStatus(status="passed" if disposition == "answered" else "not_applicable", reason=None if disposition == "answered" else "One or more subtasks were unresolved; successful subtasks remain independently verified.")
         self._audit(state, "synthesize", "synthesized", "Subplan outcomes synthesized without omitting partial results.", {"successful_subtasks": len(successful), "unresolved_subtasks": len(unresolved), "disposition": disposition})
         return {"answer": answer, "disposition": disposition, "citations": citations, "verification": verification.model_dump(), "model_call_count": model_calls}
+
+    # SPEC-M2 §4F: ±0.01m independently for width and height. The one
+    # designed mismatch (W02: 1.75 vs 1.70) is 0.05m, five times this
+    # tolerance -- unambiguous by design.
+    _RECONCILIATION_TOLERANCE_M = 0.01
+
+    def _reconciliation_ifc_items(self) -> dict[str, dict[str, Any]]:
+        """Read every door/window's Tag and controlled width/height from the source IFC.
+
+        Zero model calls, deterministic. Reads directly from the already-open
+        ifcopenshell model (`IfcRepository.model`) rather than adding a new
+        `IfcRepository` operation: no existing operation covers "both
+        IfcDoor and IfcWindow, joined on the Tag attribute", and generalizing
+        one for this single narrow pilot is out of SPEC-M2's scope (§5).
+        """
+        import ifcopenshell.util.element as ifc_element_util
+
+        model = self.container.ifc_repository.model
+        items: dict[str, dict[str, Any]] = {}
+        for element in [*model.by_type("IfcDoor"), *model.by_type("IfcWindow")]:
+            tag = getattr(element, "Tag", None)
+            if not tag:
+                continue
+            psets = ifc_element_util.get_psets(element, qtos_only=True)
+            quantities = next(iter(psets.values()), {}) if psets else {}
+            containment = getattr(element, "ContainedInStructure", []) or []
+            storey = getattr(containment[0].RelatingStructure, "Name", None) if containment else None
+            items[str(tag)] = {
+                "tag": str(tag),
+                "entity_type": element.is_a(),
+                "storey": storey,
+                "width_m": quantities.get("Width"),
+                "height_m": quantities.get("Height"),
+                "global_id": element.GlobalId,
+                "express_id": element.id(),
+            }
+        return items
+
+    def _reconciliation_pdf_items(self, page_number: int = 2) -> dict[str, dict[str, Any]]:
+        """Read every row of the schedule's page-2 Mark/Level/Type/Width/Height table.
+
+        Reuses `DocumentAnalyzer._read_table` exactly as M2P1 built it --
+        the same word-coordinate row/column clustering already used by
+        `native_lookup` -- rather than introducing a new PDF-parsing
+        technique (SPEC-M2 §7). `native_lookup` itself is not reused because
+        its contract is one question-driven record/field lookup, not "every
+        row of this table."
+
+        Raises when the page's table structure could not be read at all
+        (`_read_table` returns `None`: the PDF is unavailable, or the page
+        has no legible text/no header row) -- this is a genuine execution
+        failure, distinct from a legitimately empty table (a header row was
+        found but it names no Mark-like column, or it names one with zero
+        data rows). Collapsing both into an empty mapping would let the
+        caller report "checked, every IFC item missing from the PDF" when
+        the schedule was never actually read (SPEC-M2 §4G).
+        """
+        table = self.container.document_analyzer._read_table(page_number)
+        if table is None:
+            raise RuntimeError(f"The schedule's page {page_number} table structure could not be read.")
+        items: dict[str, dict[str, Any]] = {}
+        labels = [column.label.lower() for column in table.columns]
+
+        def _index(prefix: str) -> int | None:
+            return next((i for i, label in enumerate(labels) if label.startswith(prefix)), None)
+
+        mark_index, width_index, height_index = _index("mark"), _index("width"), _index("height")
+        if mark_index is None:
+            return items
+        for row in table.rows:
+            mark_cell = row[mark_index] if mark_index < len(row) else None
+            if not mark_cell or not mark_cell.text.strip():
+                continue
+            mark = mark_cell.text.strip()
+
+            def _value(index: int | None) -> float | None:
+                cell = row[index] if index is not None and index < len(row) else None
+                text = cell.text.strip() if cell else ""
+                try:
+                    return float(text) if text else None
+                except ValueError:
+                    return None
+
+            items[mark] = {"tag": mark, "width_m": _value(width_index), "height_m": _value(height_index)}
+        return items
+
+    def _synthesize_reconciliation_response(self, state: GraphState, multi_plan: MultiQueryPlan) -> dict:
+        """SPEC-M2 §4D: join the IFC and PDF door/window sides on Tag/Mark.
+
+        Every item found in either source is classified `matched`,
+        `dimension_mismatch`, `missing_in_pdf`, or `missing_in_ifc` --
+        never fabricated in either direction (§7). A reconciliation that
+        executes to completion (both sides were read) is `answered`
+        regardless of any individual item's status (§4G, OD-16): the
+        item-level breakdown lives in `reconciliation_items`, not in the
+        disposition.
+        """
+        ifc_items = self._reconciliation_ifc_items()
+        pdf_items = self._reconciliation_pdf_items()
+        counts = {"matched": 0, "dimension_mismatch": 0, "missing_in_pdf": 0, "missing_in_ifc": 0}
+        reconciliation_items: list[dict[str, Any]] = []
+        evidence: list[Evidence] = []
+        for tag in sorted(set(ifc_items) | set(pdf_items)):
+            ifc_item, pdf_item = ifc_items.get(tag), pdf_items.get(tag)
+            if ifc_item and not pdf_item:
+                status, detail = "missing_in_pdf", f"{tag} is present in the IFC model but has no matching row on the PDF schedule."
+            elif pdf_item and not ifc_item:
+                status, detail = "missing_in_ifc", f"{tag} is present on the PDF schedule but has no matching IFC element."
+            else:
+                width_delta = abs((ifc_item["width_m"] or 0.0) - (pdf_item["width_m"] or 0.0))
+                height_delta = abs((ifc_item["height_m"] or 0.0) - (pdf_item["height_m"] or 0.0))
+                if width_delta <= self._RECONCILIATION_TOLERANCE_M and height_delta <= self._RECONCILIATION_TOLERANCE_M:
+                    status = "matched"
+                    detail = f"{tag}: IFC and PDF dimensions agree within tolerance (±{self._RECONCILIATION_TOLERANCE_M} m)."
+                else:
+                    status = "dimension_mismatch"
+                    detail = (f"{tag}: IFC {ifc_item['width_m']}×{ifc_item['height_m']} m vs PDF "
+                               f"{pdf_item['width_m']}×{pdf_item['height_m']} m differ beyond the "
+                               f"±{self._RECONCILIATION_TOLERANCE_M} m tolerance.")
+            counts[status] += 1
+            reconciliation_items.append({
+                "tag": tag,
+                "entity_type": (ifc_item or {}).get("entity_type"),
+                "storey": (ifc_item or {}).get("storey"),
+                "ifc_width_m": (ifc_item or {}).get("width_m"),
+                "ifc_height_m": (ifc_item or {}).get("height_m"),
+                "pdf_width_m": (pdf_item or {}).get("width_m"),
+                "pdf_height_m": (pdf_item or {}).get("height_m"),
+                "status": status,
+                "detail": detail,
+            })
+            if ifc_item:
+                evidence.append(Evidence(source_type=SourceType.IFC, source_file=self.container.ifc_repository.path.name,
+                    summary=f"IFC {ifc_item['entity_type']} Tag={tag}.", locator={"global_id": ifc_item["global_id"], "express_id": ifc_item["express_id"], "tag": tag}))
+            if pdf_item:
+                evidence.append(Evidence(source_type=SourceType.PDF, source_file=self.container.document_analyzer.pdf_path.name,
+                    summary=f"PDF schedule row Mark={tag}.", locator={"page": 2, "mark": tag}))
+        answer = (
+            "Door/window reconciliation between the IFC model and the PDF schedule (joined on Tag/Mark): "
+            f"**{counts['matched']} matched**, **{counts['dimension_mismatch']} dimension mismatch**, "
+            f"**{counts['missing_in_pdf']} missing from the PDF**, **{counts['missing_in_ifc']} missing from the IFC model**."
+        )
+        citations = self._citations(evidence)
+        verification = VerificationStatus(status="passed", reason="Every item's status was independently derived from the source IFC quantities and the PDF's own table structure; no value was asserted without a matching or explicitly absent counterpart.")
+        self._audit(state, "reconciliation", "synthesized", "Door/window IFC<->drawing reconciliation joined on Tag.", counts)
+        return {
+            "answer": answer, "disposition": "answered", "citations": citations,
+            "verification": verification.model_dump(), "reconciliation_items": reconciliation_items,
+            "subresults": [], "evidence": [item.model_dump() for item in evidence], "tool_call_count_delta": 2,
+        }
 
     @staticmethod
     def _natural_answer(multi_plan: MultiQueryPlan, subresults: list[dict[str, Any]]) -> str:
@@ -1135,6 +1343,7 @@ Return only a corrected MultiQueryPlan JSON object."""
                     },
                 },
                 context_update=result.get("context_update", {}),
+                reconciliation_items=[ReconciliationItem.model_validate(item) for item in result.get("reconciliation_items", [])],
             )
         self._audit(
             state,
