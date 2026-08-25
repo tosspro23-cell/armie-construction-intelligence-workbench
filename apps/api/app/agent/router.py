@@ -19,11 +19,35 @@ ELEMENT_ALIASES = {
 SUPPORTED_ENTITY_TYPES = set(ELEMENT_ALIASES.values())
 
 
+def cross_source_reconciliation_requested(question: str) -> bool:
+    """Detect the narrow IFC<->drawing door/window reconciliation pilot (SPEC-M2 §4A).
+
+    Deliberately conservative: requires a door/window entity term AND a
+    reconciliation-intent verb AND a schedule/drawing reference term, all
+    three together, so this never fires on an ordinary single-source
+    door/window question or on a non-reconciliation cross-source question
+    (for example an electrical-load-vs-room-area join, which has no
+    door/window term and so can never match here).
+    """
+    lowered = " ".join(question.lower().split())
+    entity_marker = re.search(r"\b(door|doors|window|windows)\b|门|窗", lowered)
+    verb_marker = re.search(r"\b(compare|verify|reconcile|check|match|cross-check|cross check|consistent)\b|核对|比对|一致", lowered)
+    drawing_marker = re.search(r"\b(pdf|drawing|schedule)\b|图纸|排程|明细表", lowered)
+    return bool(entity_marker and verb_marker and drawing_marker)
+
+
 def cross_source_join_requested(question: str) -> bool:
     """Detect an explicit request to combine drawing and IFC semantics.
 
     This is an intent-level safety boundary, not a route for either source.
+    SPEC-M2 §4B: the narrow door/window reconciliation pilot is carved out
+    of this refusal at this single, shared definition -- every one of this
+    function's four call sites (one live, three retained-dead per D-010)
+    inherits the carve-out automatically and cannot drift relative to each
+    other again.
     """
+    if cross_source_reconciliation_requested(question):
+        return False
     lowered = " ".join(question.lower().split())
     join_marker = re.search(r"\b(join|combine|merge|link|cross[- ]source|relate)\b|关联|连接|合并", lowered)
     pdf_marker = re.search(r"\b(pdf|drawing|load|connected load|circuit|diversity|schedule)\b|图纸|负载|配电", lowered)
