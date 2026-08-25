@@ -136,11 +136,25 @@ def heuristic_multi_plan(question: str, context: dict, has_viewer_context: bool,
     if source_preference != "auto":
         return None
     normalized = " ".join(question.strip().lower().split())
+    # SPEC-M1.5 §4C: this check is unreachable from the live graph --
+    # AgentService._resolve_context (the graph's single authoritative
+    # cross-source-join gate) evaluates the identical cross_source_join_requested
+    # predicate on the same question and diverts to "refuse" before "route"
+    # (and therefore heuristic_multi_plan) is ever invoked. Retained here,
+    # deliberately not removed, because this function is also called and
+    # tested directly, independent of the graph; fixed to construct a valid
+    # MultiQueryPlan (min_length=1) rather than crash if it is ever reached.
     if cross_source_join_requested(question):
+        reason = "Cross-source joins between engineering-drawing and IFC semantics are outside this release."
         return MultiQueryPlan(
             intent="unsupported", response_language="en", raw_user_message=question,
-            normalized_request=question, interpretation_confidence="high", subplans=[],
-            rationale="Cross-source joins between engineering-drawing and IFC semantics are outside this release.",
+            normalized_request=question, interpretation_confidence="high",
+            rationale=reason,
+            subplans=[QueryPlan(
+                subtask_id="task_1", source="unsupported", intent="unsupported", rationale=reason,
+                planning_mode="heuristic", rule_id="cross_source_join_guard",
+                matched_signals=["intent:cross_source_join"], match_status="complete",
+            )],
         )
     argmax = bool(re.search(r"\b(most|greatest number|highest count)\b", normalized))
     argmin = bool(re.search(r"\b(fewest|lowest count|least)\b", normalized))
@@ -223,6 +237,10 @@ def heuristic_plan(question: str, context: dict, has_viewer_context: bool, sourc
             matched_signals=[f"source_override:{source_preference}"], match_status="complete",
         )
 
+    # SPEC-M1.5 §4C: unreachable from the live graph for the same reason as
+    # heuristic_multi_plan's copy above -- AgentService._resolve_context is
+    # the single authoritative gate and always runs first. Retained,
+    # correct, and directly tested independent of the graph.
     if cross_source_join_requested(question):
         return QueryPlan(
             source="unsupported", intent="unsupported", operation=None,

@@ -3,39 +3,33 @@
 Institutional-knowledge gaps recorded here per SPEC-M1 §12. These are answered by the owner
 over time; they are not inferred or resolved during implementation.
 
-## M1.5 candidate (leading item): disposition collapse / `_refuse` unreachability
+## RESOLVED by M1.5: disposition collapse / `_refuse` unreachability
 
-`error`, `clarification`, and `unsupported` all currently surface as disposition `refused`
-on the semantic-planning failure path, a partial violation of the D-004 honest-failure
-invariant (full mechanism in `docs/decisions/README.md` D-008 "Current conformance"; also
-in `PROJECT_STATE.md`'s known-limitations section). In short: `AgentService._route` sets
-`state["planner_error"]` when parsing fails and bounded repair is exhausted, but only the
-`_refuse` node reads it, and `_refuse` is unreachable once the static `route → execute_multi`
-edge has already run — the only path that ever sets `planner_error`.
-`AgentService._unsupported_subresult` separately hardcodes `disposition="refused"` for any
-`source="unsupported"` subplan. Safety holds throughout (no numeric/factual claim,
-`VerificationStatus.status` never `passed`); only the disposition category is imprecise. The
-fix requires `graph.py` control-flow changes beyond SPEC-M1's "call sites only" scope, so it
-was deliberately not attempted in M1 — regression-protected instead by
-`tests/test_failure_path_evals.py`'s F2, F5, and F6. This is the headline candidate for
-M1.5, ahead of `graph.py` decomposition more broadly, since restructuring should happen with
-this net already in place.
+Previously (through M2P1): `error`, `clarification`, and `unsupported` all surfaced as
+disposition `refused` on the semantic-planning failure path, a partial violation of the
+D-004 honest-failure invariant. SPEC-M1.5 (`docs/specs/SPEC-M1.5-disposition-contract-v1.md`
+§4A, D-010) fixes this: `AgentService._unsupported_subresult` now maps the actual underlying
+cause of a `source="unsupported"` subplan to the correct disposition (`error` /
+`clarification_required` / `unsupported`) instead of hardcoding `refused`, and `_refuse`'s
+own historical `refused` fallback is corrected to `unsupported` for the same reason. See
+D-010 for the full mechanism and `tests/test_disposition_contract.py` for the regression
+coverage.
 
-## M1.5 candidate (latent, low priority): `heuristic_multi_plan` cross-source-join crash
+## RESOLVED by M1.5: `heuristic_multi_plan` cross-source-join crash
 
-`apps/api/app/agent/router.py`'s `heuristic_multi_plan` constructs
+`apps/api/app/agent/router.py`'s `heuristic_multi_plan` constructed
 `MultiQueryPlan(subplans=[], ...)` in its own cross-source-join refusal branch, which
-violates the schema's `min_length=1` and raises a `pydantic` `ValidationError` instead of
-returning gracefully (pinned by
-`tests/test_router_contract.py::test_defect_heuristic_multi_plan_crashes_on_cross_source_join`).
-The underlying issue is duplicated, drifting cross-source-join detection logic across two
-call sites: `AgentService._resolve_context` runs its own independent
-`cross_source_join_requested` check and diverts to the `"refuse"` node before `"route"` (and
-therefore `heuristic_multi_plan`) is ever reached, so this crash has no live user-facing
-impact today — confirmed both by the F9 eval and by mutation evidence (disabling the
-`_resolve_context` guard reproduces the crash end to end). Low priority relative to the
-disposition-collapse item above; worth folding into the same M1.5 pass since both trace back
-to `graph.py`/`router.py`'s cross-source-join handling.
+violated the schema's `min_length=1` and raised a `pydantic` `ValidationError` instead of
+returning gracefully. Fixed in SPEC-M1.5 §4C to construct a valid single
+`source="unsupported"` subplan, matching `heuristic_plan`'s own single-plan pattern. The
+underlying duplication (this check, `heuristic_plan`'s copy, and
+`_synthesize_multi_response`'s copy, alongside `AgentService._resolve_context`'s — the one
+live, authoritative check) is mapped and documented inline at each call site rather than
+removed outright, since `heuristic_plan` and `heuristic_multi_plan` are directly unit-tested
+independent of the graph. `tests/test_disposition_contract.py` proves the reachability
+finding directly rather than leaving it as an assertion; the former crash-pinning test is
+rewritten to assert the fixed, graceful behaviour
+(`test_heuristic_multi_plan_gracefully_refuses_cross_source_join`).
 
 ## Why `qwen3:30b` was selected for escalation, and whether it was ever expected to be installed
 
@@ -87,19 +81,20 @@ unchanged and asserts its equivalence only at the factory-selection/audit-field 
 (`test_provider_seam_invariance.py`); it does not decide whether OpenAI/hybrid is an active
 release target.
 
-## M2P1 live-model finding: vision fallback does not distinguish "no matching record" from "genuinely unclear image"
+## RESOLVED by M1.5: vision fallback did not distinguish "no matching record" from "genuinely unclear image"
 
-Both a structurally unanswerable question (no record named, or a record named but ambiguous
-among several) and a genuinely unclear image trip the same `if result.confidence <
-pdf_confidence_threshold` gate (`graph.py:805`) into the vision fallback, because
-`native_lookup`'s confidence=0.4 ("no record named") and confidence=0.0 ("field absent")
-both fall below the threshold with no distinction from "vision might actually help here."
-Measured live: the intentionally-ambiguous "total connected load" question costs 2 real
-model calls and ~26s post-M2P1, versus 0 calls pre-M2P1 (where a now-removed hardcoded gate
-short-circuited it for free). Candidate fix: an ambiguity-*reason* distinction so a
-record-miss short-circuits to clarification without invoking vision, since vision cannot
-resolve "which record did you mean" from the same rendered page. Evidence:
-`docs/reports/2026-08-24-m2p1-live-model-baseline.md`.
+Previously (M2P1): a structurally unanswerable question (no record named at all) and a
+genuinely unclear image tripped the same `if result.confidence < pdf_confidence_threshold`
+gate into the vision fallback, because `native_lookup`'s confidence=0.4 ("no record named")
+carried no distinction from "vision might actually help here." Measured live: the
+intentionally-ambiguous "total connected load" question cost 2 real model calls and ~26s
+post-M2P1, versus 0 calls pre-M2P1. Fixed in SPEC-M1.5 §4B/OD-14 (D-010):
+`DocumentQueryResult.miss_reason` carries this distinction forward, and `_execute_pdf`
+routes a structural record-miss straight to `clarification_required` at zero model calls.
+Every other below-threshold case (field absent, multiple field or record matches) is
+unchanged. Evidence: `docs/reports/2026-08-24-m2p1-live-model-baseline.md` (the original
+finding) and `tests/test_disposition_contract.py`'s Q7 regression (the fix, asserting
+`fake.calls == []`).
 
 ## Pre-existing: the vision path's `ambiguity` field is surfaced to the user with no validation
 

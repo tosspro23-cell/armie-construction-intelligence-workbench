@@ -23,6 +23,7 @@ class Disposition(str, Enum):
     ANSWERED = "answered"
     PARTIALLY_ANSWERED = "partially_answered"
     CLARIFICATION_REQUIRED = "clarification_required"
+    UNSUPPORTED = "unsupported"
     REFUSED = "refused"
     ERROR = "error"
     TIMEOUT = "timeout"
@@ -279,6 +280,13 @@ class DocumentQueryResult(BaseModel):
     confidence: float
     evidence: list[Evidence]
     ambiguity: str | None = None
+    # SPEC-M1.5 §4B: distinguishes *why* confidence fell below threshold, so a
+    # structural record-miss (no candidate row named -- vision cannot resolve
+    # "which record did you mean" from the same page) can be routed straight
+    # to clarification without a vision round-trip, while every other
+    # below-threshold case (field absent, multiple candidates) keeps falling
+    # through to vision unchanged.
+    miss_reason: Literal["no_matching_record"] | None = None
 
 
 class AuditEvent(BaseModel):

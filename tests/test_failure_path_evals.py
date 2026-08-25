@@ -79,17 +79,12 @@ def test_f1_malformed_output_repair_succeeds(tmp_path: Path) -> None:
 # --- F2: malformed output, repair also fails ---------------------------------------
 
 def test_f2_malformed_output_repair_also_fails(tmp_path: Path) -> None:
-    """DEFECT FINDING (see PR): §4.3 requires disposition=error here. Production
-    graph.py._route sets state["planner_error"] on this path, but that key is
-    only consulted by the _refuse node, which is unreachable once "route" has
-    run (the static edge always goes route -> execute_multi). The resulting
-    MultiQueryPlan(intent="unsupported") is instead processed by
-    _execute_multi/_unsupported_subresult, which hardcodes disposition="refused"
-    for any source="unsupported" subplan. Net effect: still safe (no numeric
-    claim, verification not_applicable), but the disposition category is
-    "refused" rather than the normatively required "error". Not fixed here:
-    the fix would touch graph.py control flow beyond "call sites only"
-    (SPEC-M1 §6).
+    """SPEC-M1.5 §4A: production graph.py._route sets state["planner_error"]
+    on this path; _execute_multi/_unsupported_subresult now consults it
+    before falling back to plan.intent, so this correctly surfaces as
+    disposition="error" per §4.3, instead of collapsing into "refused" as it
+    did through M2P1 (see the former DEFECT FINDING note, now resolved --
+    D-010).
     """
     settings = _settings(tmp_path)
     fake = FakeModelProvider()
@@ -99,7 +94,7 @@ def test_f2_malformed_output_repair_also_fails(tmp_path: Path) -> None:
 
     response = service.invoke(thread_id="f2", question=QUESTION, viewer_context=None)
 
-    assert response.disposition.value == "refused"
+    assert response.disposition.value == "error"
     assert response.verification.status != "passed"
     assert not any(char.isdigit() for char in response.answer_markdown)
 
@@ -161,14 +156,11 @@ def test_f4_semantically_wrong_plan_caught_by_validation_and_repaired(tmp_path: 
 # --- F5: persistent validation failure escalates, escalation unavailable ------------
 
 def test_f5_persistent_failure_escalates_then_clarifies_when_escalation_unavailable(tmp_path: Path) -> None:
-    """DEFECT FINDING (see PR): §4.3 requires disposition=clarification here.
-    Same root cause as F2/F6: the "clarification" intent set on the
-    MultiQueryPlan at graph.py's issues-still-present branch produces a
-    subplan with source="unsupported", which _unsupported_subresult
-    hardcodes to disposition="refused" regardless of the underlying
-    "clarification" vs "unsupported" distinction. Still safe (no numeric
-    claim); disposition category is imprecise. Not fixed here (out of
-    "call sites only" scope, SPEC-M1 §6).
+    """SPEC-M1.5 §4A: the "clarification" intent set on the MultiQueryPlan at
+    graph.py's issues-still-present branch produces a subplan with
+    source="unsupported" and intent="clarification"; _unsupported_subresult
+    now maps that intent to disposition="clarification_required" per §4.3,
+    instead of collapsing into "refused" as it did through M2P1 (D-010).
     """
     settings = _settings(tmp_path, ollama_escalation_model="qwen3:30b-test")
     bad_plan = MultiQueryPlan(response_language="en", rationale="r", subplans=[QueryPlan(
@@ -189,7 +181,7 @@ def test_f5_persistent_failure_escalates_then_clarifies_when_escalation_unavaila
 
     response = service.invoke(thread_id="f5", question="Please describe the situation with the windows in this project.", viewer_context=None)
 
-    assert response.disposition.value == "refused"
+    assert response.disposition.value == "clarification_required"
     assert not any(char.isdigit() for char in response.answer_markdown)
     trace = container.audit_store.by_trace(response.trace_id)
     escalation_events = [event for event in trace if event.event_type in {"model_escalation", "model_failed"} and event.retry_count == 2]
@@ -225,12 +217,12 @@ def test_f5_escalation_skipped_when_not_configured(tmp_path: Path) -> None:
 # --- F6: provider raises a transport error ------------------------------------------
 
 def test_f6_transport_error_produces_a_safe_non_answer(tmp_path: Path) -> None:
-    """DEFECT FINDING (see PR): §4.3 requires disposition=error, distinct from
-    unsupported/clarification. Same root cause as F2: a transport error is
-    caught by the same generic except-and-repair block, and when repair also
-    fails, planner_error is set on state but never consulted after "route"
-    (only _refuse reads it, and _refuse is unreachable from "route"). Net
-    disposition is "refused", not "error". Still safe: no numeric claim.
+    """SPEC-M1.5 §4A: same root cause as F2 -- a transport error is caught by
+    the same generic except-and-repair block, and when repair also fails,
+    planner_error is set on state. _unsupported_subresult now consults it,
+    so this correctly surfaces as disposition="error", distinct from
+    unsupported/clarification, instead of collapsing into "refused" as it
+    did through M2P1 (D-010).
     """
     settings = _settings(tmp_path)
     fake = FakeModelProvider()
@@ -240,7 +232,7 @@ def test_f6_transport_error_produces_a_safe_non_answer(tmp_path: Path) -> None:
 
     response = service.invoke(thread_id="f6", question=QUESTION, viewer_context=None)
 
-    assert response.disposition.value == "refused"
+    assert response.disposition.value == "error"
     assert response.verification.status != "passed"
     assert not any(char.isdigit() for char in response.answer_markdown)
 
@@ -274,6 +266,10 @@ def test_f7_stalled_provider_produces_a_distinct_timeout_disposition(tmp_path: P
 # --- F8: valid-but-unsupported capability -------------------------------------------
 
 def test_f8_unsupported_capability_is_refused_with_rationale_and_no_tool_call(tmp_path: Path) -> None:
+    """SPEC-M1.5 §4A: a genuinely unsupported capability (not a clarification,
+    not a transport/parsing error) now surfaces as its own disposition,
+    "unsupported", distinct from the generic "refused" category (D-010).
+    """
     settings = _settings(tmp_path)
     fake = FakeModelProvider()
     reason = "Nearest-room search across the whole project is not supported."
@@ -287,7 +283,7 @@ def test_f8_unsupported_capability_is_refused_with_rationale_and_no_tool_call(tm
 
     response = service.invoke(thread_id="f8", question="Please describe the situation in this project regarding room adjacency.", viewer_context=None)
 
-    assert response.disposition.value == "refused"
+    assert response.disposition.value == "unsupported"
     assert reason in response.answer_markdown
     assert response.execution_metadata.get("tool_call_count") == 0
 
@@ -304,7 +300,7 @@ def test_f9_cross_source_join_rejected_before_any_tool_call(tmp_path: Path) -> N
         question="Please join the PDF connected load data with the IFC room area.",
     )
 
-    assert response.disposition.value == "refused"
+    assert response.disposition.value == "unsupported"
     assert response.execution_metadata.get("tool_call_count") == 0
     assert response.execution_metadata.get("model_call_count") == 0
     trace = container.audit_store.by_trace(response.trace_id)

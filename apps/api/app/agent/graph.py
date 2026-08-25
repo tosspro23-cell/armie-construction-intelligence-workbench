@@ -186,6 +186,15 @@ class AgentService:
             context["active_snapshot_id"] = viewer["snapshot_id"]
         context["source_preference"] = state.get("source_preference", "auto")
         _, context, clarification = resolve_reference(state["question"], context)
+        # SPEC-M1.5 §4C: this is the single authoritative cross-source-join
+        # gate for the live graph. START -> resolve_context runs
+        # unconditionally before any other node, and this check's outcome
+        # (via _after_context's conditional edge) diverts straight to
+        # "refuse" whenever it fires, before "route" -- and therefore
+        # heuristic_plan/heuristic_multi_plan/_synthesize_multi_response's
+        # own copies of this same check -- ever run. Their checks are
+        # provably unreachable for that reason (see the comments at each),
+        # not merely believed dead.
         if cross_source_join_requested(state["question"]):
             reason = "Cross-source joins between drawing and IFC room-area data are outside this reference implementation. No source tool was executed."
             self._audit(state, "resolve_context", "capability_gate_rejected", "Whole-intent capability gate rejected an unsupported cross-source join.", {"reason": "cross_source_join_unsupported", "target": state["question"]})
@@ -511,7 +520,7 @@ Return only a corrected MultiQueryPlan JSON object."""
             allowed, reason = capability_gate(plan)
             self._audit(state, f"capability_gate[{subtask_id}]", "capability_gate_passed" if allowed else "capability_gate_rejected", reason or "Subplan is within the constrained tool capability boundary.", {"subplan": plan.model_dump()}, planning_mode=plan.planning_mode)
             if not allowed:
-                subresults.append(self._unsupported_subresult(subtask_id, plan, reason or "Unsupported subplan."))
+                subresults.append(self._unsupported_subresult(subtask_id, plan, reason or "Unsupported subplan.", state))
                 continue
             self._audit(state, f"subplan[{subtask_id}]", "subplan_started", "Subplan execution started.", {"subplan": plan.model_dump()}, planning_mode=plan.planning_mode)
             if batch_values and plan.source == "ifc" and plan.operation == "count" and plan.group_by in (None, "none") and plan.expected_result_shape == "scalar_count" and plan.entity_type in batch_values:
@@ -567,14 +576,41 @@ Return only a corrected MultiQueryPlan JSON object."""
             "context_update": {"active_source": SourceType.IFC.value, "active_entity_type": plan.entity_type, "active_filters": plan.filters, "previous_query_plan": plan.model_dump(), "evidence_refs": [item.id for item in result.evidence]},
         }, "evidence": [item.model_dump() for item in result.evidence], "tool_call_count": state.get("tool_call_count", 0) + 1}
 
-    def _unsupported_subresult(self, subtask_id: str, plan: QueryPlan, reason: str) -> dict:
-        return {"subtask_id": subtask_id, "plan": plan.model_dump(), "answer": reason, "disposition": "refused", "citations": [], "verification": VerificationStatus(status="not_applicable", reason=reason).model_dump(), "context_update": {}}
+    def _unsupported_subresult(self, subtask_id: str, plan: QueryPlan, reason: str, state: GraphState) -> dict:
+        """Map a capability-gate rejection to its actual underlying cause (SPEC-M1.5 §4A).
+
+        A ``source="unsupported"`` subplan is not one thing: it can be a
+        genuinely unsupported capability, a request the planner determined
+        needs clarification (``plan.intent == "clarification"``, set at the
+        "issues persisted after repair/escalation" branch in ``_route``), or
+        a transport/parsing failure the planner never recovered from
+        (signalled by ``state["planner_error"]``, set only when bounded
+        repair itself raised). These previously all collapsed into
+        ``disposition="refused"``; the reason string was always correct,
+        only the category was lost.
+        """
+        if state.get("planner_error"):
+            disposition = "error"
+            answer = state["planner_error"]
+        elif plan.intent == "clarification":
+            disposition = "clarification_required"
+            answer = reason
+        else:
+            disposition = "unsupported"
+            answer = reason
+        return {"subtask_id": subtask_id, "plan": plan.model_dump(), "answer": answer, "disposition": disposition, "citations": [], "verification": VerificationStatus(status="not_applicable", reason=reason).model_dump(), "context_update": {}}
 
     def _synthesize_multi_response(self, state: GraphState, multi_plan: MultiQueryPlan, subresults: list[dict[str, Any]], model_calls: int) -> dict:
+        # SPEC-M1.5 §4C: unreachable from the live graph for the same reason
+        # as heuristic_plan/heuristic_multi_plan's copies -- _resolve_context
+        # is the single authoritative gate and always runs first, before
+        # "route" -> "execute_multi" -> this method could ever be reached
+        # with a cross-source-join question. Retained as a defensive
+        # fallback for this method's own direct callers/tests.
         if cross_source_join_requested(state.get("question", "")):
             reason = "Cross-source joins between drawing and IFC room-area data are outside this reference implementation. No numeric partial answer can be finalized."
             self._audit(state, "intent_coverage", "capability_gate_rejected", "Whole-intent coverage rejected a partial cross-source execution.", {"reason": "cross_source_join_unsupported"})
-            return {"answer": reason, "disposition": "refused", "citations": [], "verification": VerificationStatus(status="not_applicable", reason=reason).model_dump(), "model_call_count": model_calls}
+            return {"answer": reason, "disposition": "unsupported", "citations": [], "verification": VerificationStatus(status="not_applicable", reason=reason).model_dump(), "model_call_count": model_calls}
         successful = [item for item in subresults if item.get("disposition") == "answered" and item.get("verification", {}).get("status") == "passed"]
         unresolved = [item for item in subresults if item not in successful]
         citations = [citation for item in subresults for citation in item.get("citations", [])]
@@ -802,7 +838,21 @@ Return only a corrected MultiQueryPlan JSON object."""
                 {"confidence": result.confidence, "extraction_method": result.extraction_method, "ambiguity": result.ambiguity},
             )
 
-            if result.confidence < self.settings.pdf_confidence_threshold:
+            if result.confidence < self.settings.pdf_confidence_threshold and result.miss_reason == "no_matching_record":
+                # SPEC-M1.5 §4B/OD-14: no candidate record was named at all --
+                # a structural miss, not a document-legibility problem. A
+                # vision pass over the same page cannot resolve "which record
+                # did you mean" either, so route straight to clarification
+                # with zero model calls instead of paying a vision round-trip
+                # that cannot help.
+                self._audit(
+                    state,
+                    "execute_pdf",
+                    "clarification_requested",
+                    "No candidate record was named; vision fallback skipped as it cannot resolve a record-identification ambiguity.",
+                    {"native_confidence": result.confidence, "miss_reason": result.miss_reason},
+                )
+            elif result.confidence < self.settings.pdf_confidence_threshold:
                 board = self.container.document_analyzer.target_board(query.question)
                 field = self.container.document_analyzer.target_field(query.question)
                 self._audit(
@@ -1045,7 +1095,7 @@ Return only a corrected MultiQueryPlan JSON object."""
         self._audit(state, "refuse", "refused", "No safe supported tool route.", {"plan": state.get("plan")})
         return {"tool_result": {
             "answer": state.get("planner_error") or state.get("unsupported_reason") or state.get("plan", {}).get("rationale") or "I cannot answer that reliably from the configured IFC, drawing, or current viewer evidence. Please ask a question about a model element, a drawing field, or the visible selected view.",
-            "disposition": "error" if state.get("planner_error") else "refused",
+            "disposition": "error" if state.get("planner_error") else "unsupported",
             "citations": [],
             "verification": VerificationStatus(status="not_applicable").model_dump(),
             "context_update": {},

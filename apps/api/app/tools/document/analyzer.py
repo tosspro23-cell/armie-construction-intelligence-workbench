@@ -307,6 +307,7 @@ class DocumentAnalyzer:
                 extraction_method="native_text", confidence=0.95, evidence=evidence, ambiguity=None,
             )
 
+        miss_reason = None
         if len(column_matches) > 1:
             matched_labels = ", ".join(table.columns[i].label for i in column_matches)
             ambiguity = f"Multiple fields match '{query.field}': {matched_labels}. Please specify one."
@@ -314,13 +315,17 @@ class DocumentAnalyzer:
             column_label = table.columns[column_matches[0]].label
             available_records = ", ".join(identifier for _, identifier in record_candidates)
             ambiguity = f"I could not identify a specific record for {column_label} in your question. Please specify one of: {available_records}."
+            # SPEC-M1.5 §4B/OD-14: no candidate row was named at all -- this is
+            # not a document-legibility problem, so a vision pass over the same
+            # page cannot resolve it either.
+            miss_reason = "no_matching_record"
         else:
             column_label = table.columns[column_matches[0]].label
             matched_records = ", ".join(record_lookup[i] for i in record_matches)
             ambiguity = f"Your question matches multiple records ({matched_records}) for {column_label}; please specify one."
         return DocumentQueryResult(
             value=None, unit=None, page=page_number, bbox=None, extraction_method="native_text",
-            confidence=0.4, evidence=[], ambiguity=ambiguity,
+            confidence=0.4, evidence=[], ambiguity=ambiguity, miss_reason=miss_reason,
         )
 
     @staticmethod
