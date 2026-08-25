@@ -123,6 +123,21 @@ milestone should either fold the `Tag` values and the second schedule page into 
 `make_pdf()` directly, or explicitly document the two-step process (generate, then apply the
 committed fixture edits) as the intended workflow.
 
+## M2: reconciliation responses have no localized (non-English) answer text
+
+`reconciliation_plan` (`router.py`) still detects `response_language="zh-CN"` from a Chinese
+door/window reconciliation question (per its own detector tests), but
+`_synthesize_reconciliation_response`'s answer text (`graph.py`) is a single English-only
+template. Per the PR #6 review fix, the response now honestly reports
+`response_language="en"` unconditionally rather than overclaiming a language the text isn't
+actually written in -- but the underlying gap (no Chinese reconciliation rendering) is
+unresolved, just no longer misreported. Distinct from the CJK PDF-question routing gap below
+(that is source-routing detection; this is answer-text localization for one specific,
+already-routed capability). A future milestone should either implement a Chinese
+reconciliation template, mirroring `_natural_answer`'s existing `chinese = ...` branching
+pattern, or narrow `reconciliation_plan`'s detected `response_language` to match what the
+synthesis path can actually render.
+
 ## Pre-existing: PDF-question routing (`router.py:231`) is English-only
 
 The keyword list gating the PDF-domain heuristic fast path (`"load", "circuit", "diversity",

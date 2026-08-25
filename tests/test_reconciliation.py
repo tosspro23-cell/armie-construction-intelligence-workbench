@@ -15,7 +15,10 @@ from pathlib import Path
 import ifcopenshell
 import pytest
 from app.agent.graph import AgentService
-from app.agent.router import cross_source_join_requested, cross_source_reconciliation_requested
+from app.agent.router import (
+    cross_source_join_requested,
+    cross_source_reconciliation_requested,
+)
 from app.config import Settings
 from app.services import ServiceContainer
 from fakes.fake_provider import FakeModelProvider
@@ -161,6 +164,54 @@ def test_non_reconciliation_cross_source_question_still_refused_end_to_end(tmp_p
     assert response.execution_metadata.get("tool_call_count") == 0
     assert response.execution_metadata.get("model_call_count") == 0
     assert response.reconciliation_items == []
+
+
+def test_pdf_read_failure_is_reported_as_error_not_answered(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Codex P1 finding on PR #6: this reproduces the exact failure shape
+    described -- `_read_table` returns `None` (the PDF is unavailable, or
+    the page's table structure could not be reconstructed at all), not an
+    exception. Before the fix, `_reconciliation_pdf_items` silently turned
+    that `None` into an empty mapping, and synthesis reported every IFC
+    item as "checked, missing from the PDF" with disposition="answered"
+    and verification="passed" -- a fabricated result, since the schedule
+    was never actually read. The IFC side succeeds normally; only the PDF
+    read is broken.
+    """
+    settings = _settings(tmp_path)
+    fake = FakeModelProvider()
+    container, service = _service(settings, fake)
+
+    monkeypatch.setattr(container.document_analyzer, "_read_table", lambda page_number: None)
+
+    response = service.invoke(thread_id="reconcile-pdf-failure", question=RECONCILIATION_QUESTION, viewer_context=None)
+
+    assert response.disposition.value != "answered"
+    assert response.disposition.value == "error"
+    # No item is fabricated as "checked and missing" as a result of the failure.
+    assert response.reconciliation_items == []
+    assert "could not be read" in response.answer_markdown
+    assert fake.calls == []
+
+
+def test_reconciliation_response_language_is_always_english_regardless_of_question_language(tmp_path: Path) -> None:
+    """Codex P2 finding on PR #6: reconciliation_plan detects "zh-CN" from
+    a Chinese question (asserted directly in the detector tests above), but
+    _synthesize_reconciliation_response's answer text is an English-only
+    template with no localized reconciliation rendering yet. Reporting
+    response_language="zh-CN" while the text is English would overclaim
+    what the response actually says -- report the language the answer is
+    actually written in until real localized templates exist (tracked as a
+    REVIEW_REQUIRED.md follow-up, distinct from the already-tracked CJK
+    PDF-routing gap, which is a different subsystem).
+    """
+    settings = _settings(tmp_path)
+    fake = FakeModelProvider()
+    container, service = _service(settings, fake)
+
+    response = service.invoke(thread_id="reconcile-zh", question="核对一下门窗数量和图纸是否一致。", viewer_context=None)
+
+    assert response.disposition.value == "answered"
+    assert response.execution_metadata.get("response_language") == "en"
 
 
 # --- §4E.1/§7: IFC Tag-edit isolation ----------------------------------------

@@ -514,11 +514,39 @@ Return only a corrected MultiQueryPlan JSON object."""
             # both IfcDoor and IfcWindow; the PDF subplan reads the whole
             # page-2 table, not one question-driven record/field). The join
             # is executed and synthesized together in one dedicated path.
-            response = self._synthesize_reconciliation_response(state, multi_plan)
+            try:
+                response = self._synthesize_reconciliation_response(state, multi_plan)
+            except Exception as error:
+                # SPEC-M2 §4G: a genuine failure to read one side (for
+                # example the schedule page's table structure could not be
+                # parsed at all) means the join could not run at all -- a
+                # system-execution failure, not a content disagreement
+                # between sources. Reporting every item "missing" here
+                # would be a fabricated result (Codex P1 finding). Idiom
+                # matches _execute_ifc's own failure handling (this
+                # method's `except Exception as error: self._audit(...)`
+                # sibling above) rather than inventing a second mechanism.
+                self._audit(state, "reconciliation", "error", "Door/window reconciliation could not execute.", {"error": str(error)})
+                response = {
+                    "answer": f"I could not complete the door/window reconciliation: {error}",
+                    "disposition": "error",
+                    "citations": [],
+                    "verification": VerificationStatus(status="failed", reason=str(error)).model_dump(),
+                    "reconciliation_items": [],
+                    "subresults": [],
+                    "evidence": [],
+                    "tool_call_count_delta": 0,
+                }
             evidence = response.pop("evidence", [])
             tool_calls = state.get("tool_call_count", 0) + response.pop("tool_call_count_delta", 0)
             response["context_update"] = self._merge_conversation_context(state.get("conversation_context", {}), multi_plan, response.get("subresults", []))
-            response["response_language"] = multi_plan.response_language
+            # SPEC-M2 Codex P2: this dedicated synthesis path has no
+            # localized reconciliation templates yet, even though
+            # reconciliation_plan may detect "zh-CN" from the question
+            # itself -- report the language the answer text is actually
+            # written in, not the language the question was in, until
+            # localized templates exist (tracked in REVIEW_REQUIRED.md).
+            response["response_language"] = "en"
             self._audit(state, "context_update", "context_updated", "Structured conversational context updated.", {"context_update": response["context_update"]})
             return {"tool_result": response, "evidence": evidence, "tool_call_count": tool_calls, "model_call_count": state.get("model_call_count", 0)}
         subresults: list[dict[str, Any]] = []
@@ -696,11 +724,20 @@ Return only a corrected MultiQueryPlan JSON object."""
         technique (SPEC-M2 §7). `native_lookup` itself is not reused because
         its contract is one question-driven record/field lookup, not "every
         row of this table."
+
+        Raises when the page's table structure could not be read at all
+        (`_read_table` returns `None`: the PDF is unavailable, or the page
+        has no legible text/no header row) -- this is a genuine execution
+        failure, distinct from a legitimately empty table (a header row was
+        found but it names no Mark-like column, or it names one with zero
+        data rows). Collapsing both into an empty mapping would let the
+        caller report "checked, every IFC item missing from the PDF" when
+        the schedule was never actually read (SPEC-M2 §4G).
         """
         table = self.container.document_analyzer._read_table(page_number)
-        items: dict[str, dict[str, Any]] = {}
         if table is None:
-            return items
+            raise RuntimeError(f"The schedule's page {page_number} table structure could not be read.")
+        items: dict[str, dict[str, Any]] = {}
         labels = [column.label.lower() for column in table.columns]
 
         def _index(prefix: str) -> int | None:
