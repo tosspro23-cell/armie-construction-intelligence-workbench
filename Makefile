@@ -1,6 +1,9 @@
 install:
 	python3 -m pip install -e 'apps/api[dev]'
 
+dev:
+	./scripts/dev.sh
+
 test:
 	PYTHONPATH=apps/api python3 -m pytest -q
 
