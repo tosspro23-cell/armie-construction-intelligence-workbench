@@ -108,6 +108,21 @@ No fabricated value is ever presented as verified (disposition stays
 `clarification_required` in every observed case), so this is a message-quality defect, not
 a D-004 violation. Evidence: `docs/reports/2026-08-24-m2p1-live-model-baseline.md`.
 
+## M2: `scripts/generate_demo_data.py` no longer reproduces the committed fixtures byte-for-byte
+
+SPEC-M2's fixture work (`Tag` population on the 8 door/window instances, OD-18; a second
+schedule page, §4E.2) was applied directly to the committed `demo_data/armie_demo.ifc` and
+`demo_data/armie_demo_schedule.pdf`, not to `scripts/generate_demo_data.py`. This was a
+deliberate scope decision, not an oversight: the script is absent from SPEC-M2 §6's affected
+surfaces, no §8 acceptance criterion requires touching it, and running `make_ifc()` would
+regenerate every `GlobalId` from scratch (verified: `ifcopenshell.api.run("root.create_entity",
+...)` assigns a fresh random GUID per run) and silently destroy the Tag edit's fixture identity.
+Re-running the script today would produce a fixture where `Tag` is unset again and the PDF has
+only one page — a real, live drift between the generator and the committed fixtures. A future
+milestone should either fold the `Tag` values and the second schedule page into `make_ifc()`/
+`make_pdf()` directly, or explicitly document the two-step process (generate, then apply the
+committed fixture edits) as the intended workflow.
+
 ## Pre-existing: PDF-question routing (`router.py:231`) is English-only
 
 The keyword list gating the PDF-domain heuristic fast path (`"load", "circuit", "diversity",

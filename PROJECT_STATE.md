@@ -30,6 +30,7 @@ The main orchestration lives in `apps/api/app/agent/graph.py`. Shared contracts 
 - Controlled IFC quantity/property resolution with unit normalization and winner-element evidence.
 - Synthetic PDF schedule lookup resolved deterministically first, from row/column structure reconstructed out of the document's own text layer (`DocumentAnalyzer.native_lookup`), with an Ollama vision path as a bounded fallback only when deterministic extraction fails or is ambiguous. This is characterized against the committed synthetic schedule's layout, not a general table-extraction capability (`docs/decisions/README.md` D-009).
 - Current-view screenshot inspection with target-visibility and sufficient-view checks; clarification is preferred over an unsupported visual claim.
+- A narrow, first-class IFC<->drawing reconciliation for door/window quantities, joined on the IFC `Tag` field against the schedule's Mark column, zero model calls, item-level `matched`/`dimension_mismatch`/`missing_in_pdf`/`missing_in_ifc` results (`docs/decisions/README.md` D-011). Every other cross-source shape remains refused, unchanged.
 - Short-term conversational context, explicit clarification, unsupported/refused dispositions, request cancellation/deadlines, citations, grouped audit stages, and independent verification.
 - Local Ollama provider path using `qwen3:8b` and `qwen3-vl:8b`. OpenAI provider hooks remain in the provider abstraction, but the public release has not been validated end to end with OpenAI.
 - Optional bounded escalation for persistent semantic-plan validation failures: set `OLLAMA_ESCALATION_MODEL` in `.env` to a larger local model to enable it. It is disabled by default; no developer or CI environment is required to hold a large model. Provider access for planning, vision, and escalation goes through factories injected on `ServiceContainer` (`apps/api/app/services.py`), so the probabilistic path can be driven in tests by a fake provider with no live model (see `docs/decisions/README.md` D-007).
@@ -64,11 +65,11 @@ The committed public fixture contains two storeys, four synthetic doors, four sy
 The last local verification for the public workspace was:
 
 ```text
-PYTHONPATH=apps/api python3 -m pytest -q  -> 151 passed
+PYTHONPATH=apps/api python3 -m pytest -q  -> 165 passed
 cd apps/web && npm ci && npm run build    -> passed (Vite chunk-size warning only)
 ```
 
-The 151 tests are: 2 `IfcRepository` fixture tests (`test_public_workspace.py`); deterministic
+The 165 tests are: 2 `IfcRepository` fixture tests (`test_public_workspace.py`); deterministic
 contract tests for `router.py`, `plan_validation.py`, and `verifiers.py` (no provider); 12
 failure-path evals F1-F12 (`test_failure_path_evals.py`) driven by a scripted, no-network fake
 provider, asserting the disposition contract in `docs/specs/SPEC-M1-reliability-foundation-v1.md`
@@ -77,12 +78,17 @@ provider-seam-invariance tests; deterministic document-extraction tests
 (`test_pdf_deterministic_extraction.py`) covering every board/field combination in the fixture
 at the analyzer level and end-to-end with zero model calls, `Panel-A` regressions, content-driven
 ambiguity and miss handling, and the vision-fallback path, per
-`docs/specs/SPEC-M2P1-deterministic-document-extraction-v1.md` §4.7; and disposition-invariant
+`docs/specs/SPEC-M2P1-deterministic-document-extraction-v1.md` §4.7; disposition-invariant
 tests (`test_disposition_contract.py`) covering every terminal disposition against the taxonomy
 in `docs/specs/SPEC-M1.5-disposition-contract-v1.md` §4A, the Q7 zero-model-call regression, and
-the cross-source-join guard's reachability proof. CI (`.github/workflows/ci.yml`)
-runs this suite on Python 3.9, 3.10, 3.11, and 3.12 on every push and pull request, plus a
-frontend build and a `ruff` lint gate. See the SPEC-M1 and SPEC-M2P1 PRs for the runs.
+the cross-source-join guard's reachability proof; and door/window reconciliation tests
+(`test_reconciliation.py`, 14 tests) covering the narrow detector's positive/negative examples,
+the gate carve-out's precision against the existing cross-source-join refusal, all 9
+`docs/specs/SPEC-M2-cross-source-reconciliation-pilot-v1.md` §4E ground-truth items reconciling
+to their exact intended status at zero model calls, and the IFC `Tag` edit's isolation. CI
+(`.github/workflows/ci.yml`) runs this suite on Python 3.9, 3.10, 3.11, and 3.12 on every push
+and pull request, plus a frontend build and a `ruff` lint gate. See the SPEC-M1 and SPEC-M2P1
+PRs for the runs.
 
 The browser screenshots in `docs/images/` are public synthetic-data captures. They are presentation evidence, not a substitute for a fresh browser run after code changes. Live-provider (Ollama/OpenAI) end-to-end behaviour is not exercised by this automated suite; equivalence across `llm_provider` values is asserted at the factory-selection and audit-field level only (`test_provider_seam_invariance.py`).
 
@@ -115,10 +121,12 @@ Both `npm ci` and `npm install` work with no flags (`three` is pinned to `0.149.
 
 **M2 Phase 1 — Deterministic Document Extraction** (`docs/specs/SPEC-M2P1-deterministic-document-extraction-v1.md`, D-009), merged. Replaced line-substring PDF field lookup — which could never succeed by construction — with row/column-aware deterministic extraction from the document's own text layer, demoting the vision provider to a genuine bounded fallback. 142 tests (122 + 20 new). Owner-run live-model baseline (`docs/reports/2026-08-24-m2p1-live-model-baseline.md`) confirmed all six board/field combinations in the fixture answered correctly at zero model calls, and surfaced one measured cost regression (an intentionally-ambiguous question now paying a needless vision round-trip) — recorded as an M1.5 candidate rather than blocking the milestone.
 
-**M1.5 — Disposition Contract & Cross-Source-Join Guard Consolidation** (`docs/specs/SPEC-M1.5-disposition-contract-v1.md`, D-010), implemented on `feat/m1.5-disposition-contract`, pending review. Fixes the D-004/D-008 disposition collapse (`error`/`clarification_required`/`unsupported` are now distinct, correctly-mapped terminal dispositions instead of all collapsing into `refused`); fixes the M2P1 live-model baseline's Q7 finding (a structural PDF record-miss now short-circuits to `clarification_required` at zero model calls instead of paying an unhelpful vision round-trip); and consolidates the cross-source-join guard's four call sites down to one documented live authority (`AgentService._resolve_context`), fixing `heuristic_multi_plan`'s latent crash in the process. 151 tests (142 + 9 new). Does not restructure `graph.py` beyond what these three fixes required, and does not touch the vision-prompt `ambiguity`-field leak or the CJK PDF-routing gap — both remain open `REVIEW_REQUIRED.md` items.
+**M1.5 — Disposition Contract & Cross-Source-Join Guard Consolidation** (`docs/specs/SPEC-M1.5-disposition-contract-v1.md`, D-010), merged. Fixes the D-004/D-008 disposition collapse (`error`/`clarification_required`/`unsupported` are now distinct, correctly-mapped terminal dispositions instead of all collapsing into `refused`); fixes the M2P1 live-model baseline's Q7 finding (a structural PDF record-miss now short-circuits to `clarification_required` at zero model calls instead of paying an unhelpful vision round-trip); and consolidates the cross-source-join guard's four call sites down to one documented live authority (`AgentService._resolve_context`), fixing `heuristic_multi_plan`'s latent crash in the process. 151 tests (142 + 9 new). Does not restructure `graph.py` beyond what these three fixes required, and does not touch the vision-prompt `ambiguity`-field leak or the CJK PDF-routing gap — both remain open `REVIEW_REQUIRED.md` items.
 
-## Deferred beyond M1.5
+**M2 — Cross-Source Reconciliation Pilot** (`docs/specs/SPEC-M2-cross-source-reconciliation-pilot-v1.md`, D-011), implemented on `feat/m2-cross-source-reconciliation-pilot`, pending review. Opens one narrow, owner-authorized exception (OD-15) to the cross-source-join refusal D-010 documented as unconditional: IFC<->drawing door/window quantity reconciliation, joined on the IFC `Tag` field (OD-18) against the schedule's Mark column, at zero model calls. `cross_source_reconciliation_requested` carves the gate's single shared definition (`cross_source_join_requested`) out for this narrow shape only, so all four existing call sites (one live, three retained-dead per D-010) inherit the carve-out automatically; every other cross-source shape remains refused, unchanged, regression-tested. A dedicated join (`_synthesize_reconciliation_response`) classifies each of the fixture's 9 door/window items `matched`/`dimension_mismatch`/`missing_in_pdf`/`missing_in_ifc` at ±0.01m tolerance, surfaced in a new `reconciliation_items` response field; a completed reconciliation is `answered` regardless of any item's status (OD-16) — `partially_answered` keeps its existing, unrelated meaning (a subplan itself failing to execute). Fixture work: `Tag` populated on the 8 existing door/window instances (previously unset; no new entities, no geometry change, isolation verified by diffing) and a second schedule page added to the existing PDF, reusing M2P1's deterministic extraction unmodified. 165 tests (151 + 14 new). Does not touch `scripts/generate_demo_data.py` (absent from SPEC-M2 §6's affected surfaces and not required by any acceptance criterion; running it would regenerate the IFC from scratch and destroy the Tag edit) — the generation script no longer reproduces the committed fixtures byte-for-byte, a flagged, deliberate drift.
 
-Dead `web-ifc`/`web-ifc-three` removal, `graph.py` decomposition more broadly, the `ResponseLanguage` (`pt-PT`/`fr`/`es`) contract decision, the deployment/security boundary, the vision-path `ambiguity`-field validation gap, and the English-only PDF-question routing gap — all tracked in `docs/decisions/REVIEW_REQUIRED.md`.
+## Deferred beyond M2
+
+Dead `web-ifc`/`web-ifc-three` removal, `graph.py` decomposition more broadly, the `ResponseLanguage` (`pt-PT`/`fr`/`es`) contract decision, the deployment/security boundary, the vision-path `ambiguity`-field validation gap, the English-only PDF-question routing gap, `scripts/generate_demo_data.py` drift from the committed fixtures (no `Tag` population, no schedule page 2), and any cross-source shape beyond door/window reconciliation — all tracked in `docs/decisions/REVIEW_REQUIRED.md`.
 
 No scope beyond what is explicitly stated above is approved by this document; product scope and acceptance criteria must be agreed before implementation.
