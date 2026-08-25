@@ -99,6 +99,7 @@ class QueryPlan(BaseModel):
         "visual_inspection",
         "clarification",
         "unsupported",
+        "reconciliation",
     ]
     operation: Literal[
         "count",
@@ -139,7 +140,7 @@ class QueryPlan(BaseModel):
 class MultiQueryPlan(BaseModel):
     """Language-neutral, typed decomposition of one conversational turn."""
 
-    intent: Literal["single_query", "multi_query", "clarification", "unsupported"] = "single_query"
+    intent: Literal["single_query", "multi_query", "clarification", "unsupported", "reconciliation"] = "single_query"
     response_language: str = "en"
     subplans: list[QueryPlan] = Field(min_length=1, max_length=8)
     rationale: str = ""

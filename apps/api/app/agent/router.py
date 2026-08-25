@@ -226,6 +226,43 @@ def heuristic_multi_plan(question: str, context: dict, has_viewer_context: bool,
     )
 
 
+def reconciliation_plan(question: str, context: dict) -> MultiQueryPlan | None:
+    """SPEC-M2 §4C: narrow IFC<->drawing door/window reconciliation plan.
+
+    The two subplans below are a typed, audited record of intent -- they
+    are not executed through the generic per-subplan tool contract. The IFC
+    side must cover both `IfcDoor` and `IfcWindow` together (the generic
+    executor is single-entity-type), and the PDF side must read every row
+    of the schedule's page 2 rather than one question-driven record/field
+    (the generic executor's `native_lookup` contract). `intent="reconciliation"`
+    is exactly the signal `AgentService._execute_multi` uses to route to the
+    dedicated join in `_synthesize_reconciliation_response` instead of
+    executing these subplans generically.
+    """
+    if not cross_source_reconciliation_requested(question):
+        return None
+    reason = "IFC<->drawing door/window reconciliation, joined on the IFC Tag / schedule Mark field."
+    response_language = "zh-CN" if any("\u4e00" <= char <= "\u9fff" for char in question) else "en"
+    subplans = [
+        QueryPlan(
+            subtask_id="task_1", source="ifc", intent="reconciliation", operation="list",
+            entity_type=None, filters={}, group_by="none", expected_result_shape="list",
+            rationale=reason, planning_mode="heuristic", rule_id="door_window_reconciliation",
+            matched_signals=["intent:reconciliation", "entity:IfcDoor", "entity:IfcWindow"], match_status="complete",
+        ),
+        QueryPlan(
+            subtask_id="task_2", source="pdf", intent="reconciliation", operation="extract_field",
+            filters={"page_hint": 2}, group_by="none", expected_result_shape="list",
+            rationale=reason, planning_mode="heuristic", rule_id="door_window_reconciliation",
+            matched_signals=["intent:reconciliation", "source:pdf_schedule_page_2"], match_status="complete",
+        ),
+    ]
+    return MultiQueryPlan(
+        intent="reconciliation", response_language=response_language, raw_user_message=question,
+        normalized_request=question, interpretation_confidence="high", subplans=subplans, rationale=reason,
+    )
+
+
 def _signals(question: str, entity_type: str | None, operation: str, group_by: str | None) -> list[str]:
     lowered = question.lower()
     signals = []
