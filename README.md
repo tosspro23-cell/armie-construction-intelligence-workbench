@@ -85,7 +85,7 @@ The following screenshots were captured locally from the synthetic public fixtur
 - Short-term conversational context, clarification, unsupported-operation handling, citations, and independent verification.
 - Narrow, explicitly scoped IFC<->drawing cross-source reconciliation: door and window quantities checked against a drawing schedule, joined on each element's `Tag`, reporting per-item matches, dimension mismatches, and omissions on either side (see "Known limitations" for what remains out of scope).
 
-The active release supports one IFC, one PDF, and one local project workspace. Multi-project registries, arbitrary property languages, nearest-room search, compliance reasoning, and autonomous geometry exploration are future work. Cross-source reconciliation exists only for the one door/window case described above; every other cross-source request is still declined by design.
+The active release supports one IFC, one PDF, and one local project workspace. Multi-project registries, arbitrary property languages, nearest-room search, compliance reasoning, and autonomous geometry exploration are future work. Cross-source reconciliation always compares only door/window width and height, regardless of what attribute a question names; see "Known limitations" for how its routing trigger is actually scoped.
 
 ## Local setup
 
@@ -124,7 +124,7 @@ Use `npm ci` instead of `npm install` for a reproducible install from the commit
 5. `What is the diversity factor for Panel-A?`
 6. `What is the connected load for DB-L1-A?`
 7. Capture a viewer snapshot and ask: `Is the target element clearly visible?`
-8. `Verify the door schedule against the IFC model.`
+8. `Verify the door and window schedule against the IFC model.`
 
 ## Evaluation
 
@@ -146,7 +146,7 @@ This public repository contains no original recruitment, customer, or proprietar
 - Visual conclusions depend on the captured view and may require clarification.
 - Document field lookup is deterministic-first, with vision as a genuine fallback rather than the primary path; vision is slower and used only when deterministic extraction fails or is ambiguous.
 - The deterministic document extractor uses tolerance-based row/column clustering characterized against the committed synthetic schedule's layout. This is **not** a general table-extraction capability: it is not claimed to work on an arbitrary drawing, a multi-page document, a scanned/OCR-required document, or a ruled-line table. A different document layout needs its own characterization before this path can be trusted on it.
-- Cross-source reconciliation is limited to one explicitly scoped case (door/window quantities against a drawing schedule); no general IFC/PDF cross-source join capability or compliance engine.
+- Cross-source reconciliation is limited to one explicitly scoped case (door/window quantities against a drawing schedule); no general IFC/PDF cross-source join capability or compliance engine. Its routing trigger is keyword-level (a door/window term, a comparison verb, and a drawing/schedule reference), not semantic understanding of the requested attribute -- a question about an unsupported attribute (for example door fire ratings) that happens to use this phrasing still routes into reconciliation and is answered with width/height data rather than declined.
 - No multi-tenancy, enterprise SLOs, or large-scale throughput claim.
 - No autonomous camera planning or arbitrary geometry reasoning.
 
