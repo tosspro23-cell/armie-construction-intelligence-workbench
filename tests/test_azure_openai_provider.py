@@ -35,19 +35,32 @@ class _Echo(BaseModel):
     value: str
 
 
-class _FakeResponses:
-    def __init__(self, output_text: str) -> None:
-        self._output_text = output_text
+class _FakeCompletions:
+    """Mimics ``client.chat.completions``, not the Responses API (SPEC-M3's
+    first real deployment found the Responses API route returns 404 on a
+    real Azure OpenAI resource; Chat Completions is the surface both
+    OpenAIProvider and AzureOpenAIProvider now use -- see
+    azure_openai_provider.py's docstring for the live-verified evidence).
+    """
+
+    def __init__(self, content: str) -> None:
+        self._content = content
         self.calls: list[dict] = []
 
     async def create(self, **kwargs):
         self.calls.append(kwargs)
-        return SimpleNamespace(output_text=self._output_text)
+        message = SimpleNamespace(content=self._content)
+        return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+
+class _FakeChat:
+    def __init__(self, content: str) -> None:
+        self.completions = _FakeCompletions(content)
 
 
 class _FakeAzureClient:
-    def __init__(self, output_text: str) -> None:
-        self.responses = _FakeResponses(output_text)
+    def __init__(self, content: str) -> None:
+        self.chat = _FakeChat(content)
 
 
 @pytest.mark.asyncio
@@ -63,7 +76,7 @@ async def test_structured_returns_parsed_response_model_with_mocked_client() -> 
     result = await provider.structured(prompt="hello", response_model=_Echo, purpose="test")
 
     assert result == _Echo(value="ok")
-    assert fake_client.responses.calls[0]["model"] == "gpt-4o-mini"
+    assert fake_client.chat.completions.calls[0]["model"] == "gpt-4o-mini"
 
 
 @pytest.mark.asyncio
@@ -81,9 +94,9 @@ async def test_vision_structured_returns_parsed_response_model_with_mocked_clien
     )
 
     assert result == _Echo(value="seen")
-    call = fake_client.responses.calls[0]
+    call = fake_client.chat.completions.calls[0]
     assert call["model"] == "gpt-4o-mini-vision"
-    assert call["input"][0]["content"][1]["type"] == "input_image"
+    assert call["messages"][0]["content"][1]["type"] == "image_url"
 
 
 @pytest.mark.asyncio

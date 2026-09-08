@@ -31,11 +31,35 @@ def _build_managed_identity_client(endpoint: str, api_version: str):
 class AzureOpenAIProvider:
     """Azure OpenAI provider, authenticated via Managed Identity only.
 
-    Mirrors ``OpenAIProvider``'s request shape (the Responses API with a
-    strict JSON schema) so the typed-plan contract this system depends on
-    (D-001/D-002) is unaffected by which OpenAI-compatible endpoint answers
-    the call. A ``client_factory`` seam is accepted so tests can substitute a
-    fake client with no live Azure call and no ``azure-identity`` import,
+    Mirrors ``OpenAIProvider``'s request shape (Chat Completions with a
+    JSON-schema `response_format`, non-strict) so the typed-plan contract
+    this system depends on (D-001/D-002) is unaffected by which
+    OpenAI-compatible endpoint answers the call. Two things were found live
+    during SPEC-M3's first real deployment, neither exercisable through
+    `FakeModelProvider`, which bypasses real schema/transport behaviour
+    entirely:
+
+    1. Both providers originally used the newer Responses API; switched to
+       Chat Completions after that route returned 404 on this Azure OpenAI
+       resource (verified directly with a raw REST call against both
+       `/openai/deployments/{deployment}/responses` and `/openai/responses`,
+       independent of API version -- `/chat/completions` returned 401
+       PermissionDenied for an unauthorized caller in the same probe,
+       proving that route exists and this was never an auth problem).
+    2. `strict: true` in `response_format` was tried first and rejected
+       (400: "'additionalProperties' is required... to be false") because
+       `QueryPlan.filters` is a free-form `dict` field -- OpenAI's Structured
+       Outputs strict mode does not support arbitrary-key dict/mapping
+       types at all, and `QueryPlan` is a protected, must-remain-stable
+       contract (AGENT_HANDOFF.md), not something this milestone may
+       restructure to fit strict mode's constraints. Non-strict JSON-schema
+       guidance plus this system's existing `model_validate_json` (and its
+       semantic-repair retry path for a mismatch) was already the exact
+       reliability model the local Ollama provider uses, so this makes
+       OpenAI/Azure consistent with it rather than introducing a new one.
+
+    A ``client_factory`` seam is accepted so tests can substitute a fake
+    client with no live Azure call and no ``azure-identity`` import,
     matching this repository's existing discipline of injecting factories
     rather than instances (D-007).
     """
@@ -64,28 +88,30 @@ class AzureOpenAIProvider:
 
     async def structured(self, *, prompt: str, response_model: type[T], purpose: str) -> T:
         client = self._client()
-        response = await client.responses.create(
+        response = await client.chat.completions.create(
             model=self.model,
-            input=prompt,
-            text={"format": {"type": "json_schema", "name": response_model.__name__,
-                             "schema": response_model.model_json_schema(), "strict": True}},
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_schema", "json_schema": {
+                "name": response_model.__name__,
+                "schema": response_model.model_json_schema()}},
         )
-        return response_model.model_validate_json(response.output_text)
+        return response_model.model_validate_json(response.choices[0].message.content)
 
     async def vision_structured(
         self, *, prompt: str, image_base64: str, response_model: type[T], purpose: str
     ) -> T:
         client = self._client()
-        response = await client.responses.create(
+        response = await client.chat.completions.create(
             model=self.model,
-            input=[{
+            messages=[{
                 "role": "user",
                 "content": [
-                    {"type": "input_text", "text": prompt},
-                    {"type": "input_image", "image_url": f"data:image/png;base64,{image_base64}"},
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_base64}"}},
                 ],
             }],
-            text={"format": {"type": "json_schema", "name": response_model.__name__,
-                             "schema": response_model.model_json_schema(), "strict": True}},
+            response_format={"type": "json_schema", "json_schema": {
+                "name": response_model.__name__,
+                "schema": response_model.model_json_schema()}},
         )
-        return response_model.model_validate_json(response.output_text)
+        return response_model.model_validate_json(response.choices[0].message.content)
