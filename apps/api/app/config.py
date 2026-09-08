@@ -6,9 +6,31 @@ from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def _default_env_file(config_file: Path) -> Path:
+    """Repo-root ``.env``, robust to how deep this file sits on disk.
+
+    Four chained ``.parent`` hops from ``config_file`` never raise --
+    unlike the ``.parents[3]`` indexing this replaces, which raised
+    ``IndexError`` and crashed the API container at import time
+    (SPEC-M3 §6 addendum): ``apps/api/Dockerfile``'s ``WORKDIR /app`` +
+    ``COPY apps/api /app`` puts this file at ``/app/app/config.py``, only 3
+    directories below the container's filesystem root, one short of the 4
+    the local dev checkout layout (``.../apps/api/app/config.py``) always
+    has. At that shallow a depth, chained ``.parent`` simply stops at the
+    filesystem root (whose own ``.parent`` is itself) instead of raising --
+    the resulting ``.env`` path won't exist there, which pydantic-settings
+    already treats as "no file to load", the correct behaviour for a
+    container that gets its configuration from real environment variables.
+    """
+    root = config_file.resolve()
+    for _ in range(4):
+        root = root.parent
+    return root / ".env"
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=Path(__file__).resolve().parents[3] / ".env",
+        env_file=_default_env_file(Path(__file__)),
         extra="ignore",
     )
 
