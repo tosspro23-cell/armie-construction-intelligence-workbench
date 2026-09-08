@@ -255,18 +255,17 @@ per this repository's PR/merge-is-owner-only rule.
   lightweight, non-primary Azure Pipelines YAML artifact may be added in a later
   phase purely as breadth evidence for the target job description; Terraform is
   not planned.
-- **OD-22 — Phase 1 replica count. OPEN — needs explicit owner sign-off before
-  infrastructure is applied.** Recommend pinning Container Apps `minReplicas:
-  maxReplicas: 1` for Phase 1, because `apps/api/app/main.py`'s conversation and
-  request-tracking state (`app.state.conversations`, `app.state.requests`) is
-  in-process memory and would silently fragment across replicas with no error.
-  This should be documented as a known limitation (matching `PROJECT_STATE.md`'s
-  existing "Known limitations" style) rather than left implicit, since it
-  directly bounds any "production-grade" claim about this phase.
-- **OD-23 — Azure auth fallback policy. OPEN — needs explicit owner sign-off.**
-  This milestone adds only a Managed-Identity auth path for Azure OpenAI, no
-  API-key fallback. If the target Azure subscription cannot grant the Container
-  App's managed identity the `Cognitive Services OpenAI User` role in time (org
-  policy, RBAC propagation delay), should implementation (a) stop and report, or
-  (b) accept a temporary, explicitly-flagged Key-Vault-brokered API-key exception?
-  Recommend (a). Flagging in advance rather than deciding mid-implementation.
+- **OD-22 — Phase 1 replica count. RESOLVED (owner conversation, 2026-09-08;
+  recommended option accepted).** Container Apps `minReplicas: maxReplicas: 1`
+  for Phase 1, because `apps/api/app/main.py`'s conversation and request-tracking
+  state (`app.state.conversations`, `app.state.requests`) is in-process memory and
+  would silently fragment across replicas with no error. Documented as a known
+  limitation (matching `PROJECT_STATE.md`'s existing "Known limitations" style)
+  rather than left implicit, since it directly bounds any "production-grade"
+  claim about this phase.
+- **OD-23 — Azure auth fallback policy. RESOLVED (owner conversation, 2026-09-08;
+  recommended option accepted).** Managed Identity only, no API-key fallback path.
+  If the target Azure subscription cannot grant the Container App's managed
+  identity the `Cognitive Services OpenAI User` role in time (org policy, RBAC
+  propagation delay), implementation stops and reports rather than silently
+  accepting a temporary Key-Vault-brokered API-key exception.
