@@ -33,8 +33,13 @@ var logAnalyticsName = '${namePrefix}-logs'
 var appInsightsName = '${namePrefix}-insights'
 
 // Built-in role definition IDs (fixed GUIDs, documented by Microsoft):
-// AcrPull, and Cognitive Services OpenAI User.
-var acrPullRoleId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a904-db99a3d2a1b5')
+// AcrPull, and Cognitive Services OpenAI User. Verified directly against a
+// real subscription (`az role definition list --name "AcrPull"`) during
+// SPEC-M3's first real deployment: the AcrPull GUID originally written here
+// was wrong (a transcription slip, not a formatting issue) and failed
+// deployment with RoleDefinitionDoesNotExist -- not assumed correct from
+// memory a second time.
+var acrPullRoleId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')
 var openAiUserRoleId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '5e0bd9bd-7b93-4f28-af87-19fc36ad61bd')
 
 resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2022-10-01' = {
