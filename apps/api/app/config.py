@@ -21,6 +21,15 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     openai_text_model: str = "gpt-4.1-mini"
     openai_vision_model: str = "gpt-4.1-mini"
+    # Azure OpenAI (SPEC-M3): Managed Identity only (OD-23), no API-key path.
+    # ``azure_openai_endpoint`` is required only when llm_provider="azure".
+    azure_openai_endpoint: str | None = None
+    azure_openai_api_version: str = "2024-10-21"
+    azure_openai_text_deployment: str = "gpt-4o-mini"
+    azure_openai_vision_deployment: str = "gpt-4o-mini"
+    # Empty by default: OpenTelemetry exports nowhere unless explicitly set,
+    # the same opt-in pattern as ollama_escalation_model below.
+    otel_exporter_connection_string: str | None = None
     # ``localhost`` makes the native macOS development path work. Docker users
     # override this with host.docker.internal in their local .env.
     ollama_base_url: str = "http://127.0.0.1:11434"
