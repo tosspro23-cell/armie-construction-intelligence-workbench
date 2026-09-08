@@ -19,11 +19,13 @@ from app.schemas.models import (
     VerificationStatus,
 )
 from app.services import ServiceContainer
+from app.telemetry import configure_telemetry
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
+    configure_telemetry(app, settings)
     app.state.container = ServiceContainer(settings)
     app.state.agent = AgentService(app.state.container)
     app.state.conversations = {}
