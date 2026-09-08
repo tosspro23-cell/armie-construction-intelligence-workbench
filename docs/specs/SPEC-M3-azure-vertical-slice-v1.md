@@ -158,6 +158,22 @@ new `apps/web/default.conf.template` (nginx), new `infra/bicep/*.bicep`, new
 `AzureOpenAIProvider` and any existing test fixtures needed to mock Azure
 credentials/token acquisition.
 
+**Addendum, found during §4E verification (owner-confirmed, out-of-band of
+the original scope, treated as its own logical unit per §10):**
+`apps/api/app/config.py`'s `Settings.model_config` computes `env_file` as
+`Path(__file__).resolve().parents[3] / ".env"`. This raises `IndexError` --
+crashing the API container at import time, before any request can be served
+-- because `apps/api/Dockerfile`'s `WORKDIR /app` + `COPY apps/api /app`
+puts this file at `/app/app/config.py`, only 3 directories below the
+container's filesystem root, one short of the 4 the local dev checkout
+layout (`.../apps/api/app/config.py`) always has. Found by actually running
+the built `apps/api/Dockerfile` image (`docker build` + `docker run`), not
+assumed -- exactly the class of gap this repository's own docs already
+flagged the Dockerfile as unvalidated for. Fix: replace the `.parents[3]`
+index with four chained `.parent` calls, which never raises regardless of
+depth (it simply stops at the filesystem root), preserving the exact same
+resolved path for the local dev layout.
+
 ## 7. Invariants
 
 - D-001 (deterministic facts remain authoritative), D-002 (typed plan + capability
