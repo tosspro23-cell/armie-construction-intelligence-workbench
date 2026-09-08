@@ -62,7 +62,19 @@ resource containerAppsEnv 'Microsoft.App/managedEnvironments@2024-03-01' = {
 // environment's internal DNS, computable here without a second deployment
 // pass because Container Apps' internal hostname pattern is deterministic
 // from the app name and the environment's default domain.
-var apiInternalUrl = 'http://${apiAppName}.internal.${containerAppsEnv.properties.defaultDomain}'
+//
+// https, not http (verified live during SPEC-M3's first real deployment,
+// not assumed): Container Apps' Envoy-based ingress edge terminates TLS
+// for both internal and external apps uniformly -- the internal FQDN is
+// only reachable over HTTPS at the ingress layer regardless of this app's
+// own `ingress.transport`/`allowInsecure` settings below, which control
+// the separate hop from that edge to the container's own port 8000, not
+// what scheme a caller (nginx, here) must use to reach the edge itself.
+// Using http here produced Azure's own "stopped or does not exist" 404
+// page instead of a connection error -- confirmed the request reached
+// Azure's platform routing, which then rejected the plain-HTTP internal
+// request rather than failing to resolve/connect.
+var apiInternalUrl = 'https://${apiAppName}.internal.${containerAppsEnv.properties.defaultDomain}'
 
 resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
   name: apiAppName
