@@ -166,3 +166,16 @@ require the attribute mentioned to be width/height-shaped before matching, or ha
 `_synthesize_reconciliation_response` name the attribute it actually compared in the answer
 text so the substitution is visible rather than implicit. Not scheduled; flagging for a
 future milestone's scope decision.
+
+## M3: `checkpoint_db_path` is dead configuration
+
+Found during SPEC-M3's pre-implementation tech-debt scan (`docs/specs/SPEC-M3-azure-vertical-slice-v1.md`
+§3): `apps/api/app/config.py` declares `checkpoint_db_path: Path = Path("./runtime/checkpoints.sqlite")`,
+and `.env.example` documents `CHECKPOINT_DB_PATH` alongside it, but a repository-wide search of
+`apps/api/app` finds no second reference to it anywhere. No LangGraph checkpointer is actually
+wired to this path -- the setting exists but nothing reads it. SPEC-M3 deliberately left this
+unfixed (`docs/specs/SPEC-M3-azure-vertical-slice-v1.md` §5): removing or wiring up unrelated
+dead configuration was out of that milestone's scope, which was about making the existing system
+deployable to Azure, not about LangGraph persistence. A future milestone should either remove
+`checkpoint_db_path`/`CHECKPOINT_DB_PATH` as dead weight, or decide this is where a real
+checkpointer belongs and wire one up -- both are live options; neither is decided here.
