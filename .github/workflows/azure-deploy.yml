@@ -1,0 +1,110 @@
+name: Azure deploy (manual)
+
+# SPEC-M3 §4G: manual-only (workflow_dispatch). Never on push to main --
+# this repository's ongoing local development must not trigger cloud spend
+# or a deployment on every commit. Bootstrap order matches the split
+# between infra/bicep/platform.bicep and infra/bicep/apps.bicep: the
+# registry has to exist before an image can be built into it, and the
+# Container Apps need the built image tags as parameters.
+on:
+  workflow_dispatch:
+    inputs:
+      resource_group:
+        description: "Target Azure resource group (must already exist)"
+        required: true
+      azure_openai_account_name:
+        description: "Name of an EXISTING Azure OpenAI account in that resource group (SPEC-M3 infra/bicep/platform.bicep is not authorized to create one -- see its header comment)"
+        required: true
+      name_prefix:
+        description: "Short resource-name prefix (lowercase alphanumeric, 3-11 chars)"
+        required: false
+        default: "armiem3"
+      image_tag:
+        description: "Tag to build and deploy (blank = the triggering commit SHA)"
+        required: false
+        default: ""
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy Phase 1 vertical slice
+    runs-on: ubuntu-latest
+    env:
+      # workflow_dispatch input defaults can't reference expressions like
+      # github.sha directly, so the fallback lives here instead.
+      IMAGE_TAG: ${{ inputs.image_tag || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # OIDC federated login: no client secret is stored anywhere in this
+      # repository, matching this milestone's Managed-Identity-only
+      # invariant (SPEC-M3 §7) at the CI/CD layer too. The federated
+      # credential trusting this workflow must be set up once, out-of-band,
+      # by whoever owns the target subscription.
+      - name: Log in to Azure (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy platform prerequisites (registry, identity, monitoring, role assignments)
+        id: platform
+        run: |
+          az deployment group create \
+            --resource-group "${{ inputs.resource_group }}" \
+            --template-file infra/bicep/platform.bicep \
+            --parameters namePrefix="${{ inputs.name_prefix }}" \
+                         azureOpenAiAccountName="${{ inputs.azure_openai_account_name }}" \
+            --query properties.outputs -o json > platform-outputs.json
+          cat platform-outputs.json
+          echo "acr_login_server=$(jq -r .acrLoginServer.value platform-outputs.json)" >> "$GITHUB_OUTPUT"
+          echo "acr_name=$(jq -r .acrName.value platform-outputs.json)" >> "$GITHUB_OUTPUT"
+          echo "identity_id=$(jq -r .identityId.value platform-outputs.json)" >> "$GITHUB_OUTPUT"
+          echo "identity_client_id=$(jq -r .identityClientId.value platform-outputs.json)" >> "$GITHUB_OUTPUT"
+          echo "log_analytics_name=$(jq -r .logAnalyticsName.value platform-outputs.json)" >> "$GITHUB_OUTPUT"
+          echo "app_insights_connection_string=$(jq -r .appInsightsConnectionString.value platform-outputs.json)" >> "$GITHUB_OUTPUT"
+          echo "azure_openai_endpoint=$(jq -r .azureOpenAiEndpoint.value platform-outputs.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push API image (az acr build)
+        run: |
+          az acr build \
+            --registry "${{ steps.platform.outputs.acr_name }}" \
+            --file apps/api/Dockerfile \
+            --image "armie-api:${{ env.IMAGE_TAG }}" \
+            .
+
+      - name: Build and push web image (az acr build)
+        run: |
+          az acr build \
+            --registry "${{ steps.platform.outputs.acr_name }}" \
+            --file apps/web/Dockerfile \
+            --image "armie-web:${{ env.IMAGE_TAG }}" \
+            .
+
+      - name: Deploy Container Apps
+        id: apps
+        run: |
+          az deployment group create \
+            --resource-group "${{ inputs.resource_group }}" \
+            --template-file infra/bicep/apps.bicep \
+            --parameters namePrefix="${{ inputs.name_prefix }}" \
+                         acrLoginServer="${{ steps.platform.outputs.acr_login_server }}" \
+                         identityId="${{ steps.platform.outputs.identity_id }}" \
+                         identityClientId="${{ steps.platform.outputs.identity_client_id }}" \
+                         logAnalyticsName="${{ steps.platform.outputs.log_analytics_name }}" \
+                         appInsightsConnectionString="${{ steps.platform.outputs.app_insights_connection_string }}" \
+                         azureOpenAiEndpoint="${{ steps.platform.outputs.azure_openai_endpoint }}" \
+                         apiImage="${{ steps.platform.outputs.acr_login_server }}/armie-api:${{ env.IMAGE_TAG }}" \
+                         webImage="${{ steps.platform.outputs.acr_login_server }}/armie-web:${{ env.IMAGE_TAG }}" \
+            --query properties.outputs -o json > apps-outputs.json
+          cat apps-outputs.json
+
+      - name: Print deployment summary
+        run: |
+          echo "### Deployed" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Web app: https://$(jq -r .webAppFqdn.value apps-outputs.json)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- API (internal only, not publicly reachable): $(jq -r .apiInternalUrl.value apps-outputs.json)" >> "$GITHUB_STEP_SUMMARY"
