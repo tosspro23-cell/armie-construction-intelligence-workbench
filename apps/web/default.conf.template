@@ -13,9 +13,21 @@ server {
     location /api/ {
         proxy_pass ${API_BACKEND_URL}/api/;
         proxy_http_version 1.1;
-        proxy_set_header Host $host;
+        # $proxy_host, not $host: Azure Container Apps' ingress edge routes
+        # an internal-only app's HTTPS traffic by the target app's own
+        # hostname (SNI + Host header), not the caller's -- forwarding this
+        # web app's own $host here made the edge unable to route to the API
+        # app at all (verified live during SPEC-M3's first real deployment:
+        # this and the missing SNI below were the actual cause of a 502,
+        # not a DNS or connectivity problem).
+        proxy_set_header Host $proxy_host;
+        proxy_set_header X-Forwarded-Host $host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+        # Required because API_BACKEND_URL is https: nginx does not send
+        # the TLS SNI extension by default, and Azure's Envoy-based ingress
+        # edge needs it to route to the correct internal Container App.
+        proxy_ssl_server_name on;
     }
 
     location / {
