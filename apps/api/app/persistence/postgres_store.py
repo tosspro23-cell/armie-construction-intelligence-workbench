@@ -5,6 +5,7 @@ import threading
 import time
 from typing import Any
 
+from psycopg.conninfo import make_conninfo
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
@@ -27,6 +28,21 @@ _POSTGRES_AAD_SCOPE = "https://ossrdbms-aad.database.windows.net/.default"
 # milliseconds of blocking DB I/O per request without a dedicated thread hop,
 # consistent with how they call the (equally synchronous) JsonlAuditStore
 # today.
+
+
+def _conninfo_with_password(base_conninfo: str, password: str) -> str:
+    """Merge a fresh token into ``base_conninfo`` as its password.
+
+    Not string concatenation: ``database_url`` is a ``postgresql://`` URI
+    (documented in .env.example), and a bare ``"password=..."``
+    keyword/value fragment does not combine with a URI by string-pasting --
+    an earlier version of this module did exactly that and silently
+    produced an invalid combined conninfo, never exercised by a test until
+    this was run against a real Postgres. ``make_conninfo`` understands
+    both URI and keyword/value forms and merges the override correctly
+    regardless of which one the base conninfo is in.
+    """
+    return make_conninfo(base_conninfo, password=password)
 
 
 def _build_managed_identity_token_provider() -> Any:
@@ -64,7 +80,8 @@ class _TokenRefreshingPool:
                 if self._pool is not None:
                     self._pool.close()
                 token = self._token_provider()
-                self._pool = ConnectionPool(f"{self._conninfo} password={token}", min_size=1, max_size=5, open=True)
+                conninfo = _conninfo_with_password(self._conninfo, token)
+                self._pool = ConnectionPool(conninfo, min_size=1, max_size=5, open=True)
                 self._issued_at = time.monotonic()
             return self._pool
 
