@@ -13,6 +13,15 @@ server {
     location /api/ {
         proxy_pass ${API_BACKEND_URL}/api/;
         proxy_http_version 1.1;
+        # nginx's own default (60s) is shorter than the backend's
+        # request_timeout_seconds (180s, apps/api/app/config.py) -- a
+        # legitimate slow model/vision call would get a 504 from nginx
+        # while the backend was still working and would have returned its
+        # own structured timeout/answer. Independent review finding;
+        # matched to the backend's default, not just raised arbitrarily.
+        proxy_connect_timeout 180s;
+        proxy_send_timeout 180s;
+        proxy_read_timeout 180s;
         # $proxy_host, not $host: Azure Container Apps' ingress edge routes
         # an internal-only app's HTTPS traffic by the target app's own
         # hostname (SNI + Host header), not the caller's -- forwarding this

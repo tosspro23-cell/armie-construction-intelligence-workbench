@@ -9,7 +9,7 @@ T = TypeVar("T", bound=BaseModel)
 _COGNITIVE_SERVICES_SCOPE = "https://cognitiveservices.azure.com/.default"
 
 
-def _build_managed_identity_client(endpoint: str, api_version: str):
+def _build_managed_identity_client(endpoint: str, api_version: str, timeout_seconds: float):
     """Construct the real Azure OpenAI client, Managed Identity only (OD-23).
 
     No API-key code path exists here: the only credential mechanism is an
@@ -25,6 +25,7 @@ def _build_managed_identity_client(endpoint: str, api_version: str):
         azure_endpoint=endpoint,
         api_version=api_version,
         azure_ad_token_provider=token_provider,
+        timeout=timeout_seconds,
     )
 
 
@@ -72,11 +73,16 @@ class AzureOpenAIProvider:
         endpoint: str | None,
         api_version: str,
         deployment: str,
+        timeout_seconds: float = 90.0,
         client_factory: Callable[[], object] | None = None,
     ) -> None:
         self.endpoint = endpoint
         self.api_version = api_version
         self.model = deployment
+        # Independent review finding: never threaded through -- this
+        # provider silently used openai's SDK default (600s), far past this
+        # system's own request_timeout_seconds (180s, config.py).
+        self.timeout_seconds = timeout_seconds
         self._client_factory = client_factory
 
     def _client(self):
@@ -84,7 +90,7 @@ class AzureOpenAIProvider:
             raise RuntimeError("AZURE_OPENAI_ENDPOINT is required for Azure OpenAI provider calls.")
         if self._client_factory is not None:
             return self._client_factory()
-        return _build_managed_identity_client(self.endpoint, self.api_version)
+        return _build_managed_identity_client(self.endpoint, self.api_version, self.timeout_seconds)
 
     async def structured(self, *, prompt: str, response_model: type[T], purpose: str) -> T:
         client = self._client()

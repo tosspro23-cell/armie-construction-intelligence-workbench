@@ -179,3 +179,35 @@ dead configuration was out of that milestone's scope, which was about making the
 deployable to Azure, not about LangGraph persistence. A future milestone should either remove
 `checkpoint_db_path`/`CHECKPOINT_DB_PATH` as dead weight, or decide this is where a real
 checkpointer belongs and wire one up -- both are live options; neither is decided here.
+
+## M3: the public API has no authentication, authorization, or rate limiting
+
+Found by an independent review of PR #9/#10 (2026-09-09, D-012), confirmed directly: any
+internet caller can reach `armiem3-web`'s public FQDN and call `/api/v1/chat`, consuming Azure
+OpenAI quota with no owner check, and can query or cancel *any* request by ID (`/api/v1/requests/
+{id}`, `/api/v1/requests/{id}/cancel`) with no check that they originated it -- `apps/api/app/
+main.py`'s route handlers take no auth dependency, and the reverse proxy (`apps/web/
+default.conf.template`) adds none either. The `minReplicas: maxReplicas: 1` limit (OD-22) bounds
+container count, not request volume, token spend, or per-caller abuse.
+
+This is a real, architectural gap, not a quick patch -- SPEC-M3 never claimed to have solved it
+(it was scoped as a demo vertical slice), but it should not be left running unattended or shared
+publicly without at least a minimal mitigation (an access-restricted ingress rule, or Entra ID
+authentication on the Container App) until real authorization is designed. A future milestone
+should design who the caller model even is (anonymous demo? authenticated per-project user?)
+before picking a mechanism -- this is Phase 2 scope, not a one-line fix.
+
+## M3: audit/evidence is not persisted across Container App revisions
+
+Found by the same independent review, confirmed directly: `audit_store_path` and `evidence_dir`
+(`apps/api/app/config.py`) are local container filesystem paths with no volume or external store
+configured in `infra/bicep/apps.bicep`. `PROJECT_STATE.md`'s existing claim that "the audit trail
+persists to a local JSONL file... so audit history survives a restart" is true for a local dev
+machine's persistent disk, but does not carry over to a Container App revision replacement (any
+redeploy) -- the entire audit/evidence history for that container instance is lost, including any
+`trace_id` a user might have saved. `AppDependencies` telemetry in Application Insights is not a
+substitute: it has no domain-level audit content, only dependency call metadata.
+
+Not a quick fix -- needs real persistence (Phase 2's already-planned PostgreSQL direction, OD-20),
+not a bolted-on volume mount as a workaround. Until then, this milestone's own documentation
+should not imply audit continuity survives a deployment, which it does not.

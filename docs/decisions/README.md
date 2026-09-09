@@ -126,6 +126,91 @@ All five were found only by actually deploying to a real Azure subscription and 
   assignments on them) rather than the unrestricted superset `Owner` would grant.
 
 With both fixed, `workflow_dispatch` ran end to end on `main` for the first time (build, push,
-deploy) in 3m7s, and the resulting revisions answered both a deterministic question and a real
-Azure-OpenAI-backed question correctly, with citations and `verification.status="passed"` —
-the CI/CD path is no longer a written-but-unexercised claim.
+deploy) in 3m7s. **Correction, found by an independent review (below): the claim originally
+written here — that the resulting revisions "answered both a deterministic question and a real
+Azure-OpenAI-backed question correctly" — was wrong.** Only the deterministic question was
+actually re-tested after that run; the semantic/model-backed path was not, and was in fact
+broken (see the independent-review section below, finding 3). The CI/CD path's build/push/
+deploy mechanics were genuinely proven working by that run; the claim that the *deployed
+application* was fully verified afterward was not, and should not have been written without
+re-checking it.
+
+## Independent review of PR #9/#10 (2026-09-09): nine findings, all verified before acting on any of them
+
+The owner had an independent model (a different vendor, not Claude) review the public repository
+after PR #9 and PR #10 merged. Per this project's own verification discipline, every finding was
+checked against the real code and the real live Azure state before being accepted — some in a
+literal, isolated reproduction — rather than trusted or dismissed on the reviewer's word alone.
+All nine were confirmed accurate. Fixed in `fix/spec-m3-independent-review-findings`:
+
+1. **No authentication or rate limiting on the public API** (via the web app's reverse proxy).
+   Confirmed: any internet caller can invoke `/api/v1/chat`, consuming Azure OpenAI quota, or
+   query/cancel another user's request by ID. Genuinely architectural, not a quick patch — **not
+   fixed in this pass, tracked in `docs/decisions/REVIEW_REQUIRED.md` as a Phase 2 item**, and
+   the milestone's own claims were checked to confirm none of them overstated this as solved.
+2. **The GitHub deploy identity's `Role Based Access Control Administrator` role assignment had
+   no `condition`**, meaning a compromised deploy identity could grant itself (or anything else)
+   `Owner` on the resource group — confirmed directly (`condition: null` in the live assignment).
+   Fixed: recreated with an ABAC condition restricting it to creating/deleting role assignments
+   for exactly the two roles `platform.bicep` actually uses (`AcrPull`, `Cognitive Services
+   OpenAI User`) — verified live that it can no longer assign anything else.
+3. **CRITICAL, confirmed live-broken**: `azure-deploy.yml` never passed
+   `azureOpenAiTextDeployment`/`azureOpenAiVisionDeployment` to `apps.bicep`, so Bicep's own
+   defaults (`gpt-4o-mini`) silently deployed against a model that does not exist on this
+   account (only `gpt-5-mini` does). Confirmed by querying the live Container App's env vars
+   (`gpt-4o-mini`) against the account's actual deployment list (`gpt-5-mini` only), then by
+   reproducing the user-visible failure directly: `disposition="error"`, `model_call_count=0`
+   on the real deployed app. This is *why* the paragraph above needed correcting — the workflow
+   run that "succeeded" never actually exercised the model path it silently broke. Fixed: both
+   parameters are now required (no default) on `apps.bicep` and as workflow inputs; the workflow
+   verifies both deployments exist on the account before deploying anything; a new post-deploy
+   smoke test exercises both the deterministic and the model-backed answer path and fails the
+   workflow if either comes back `error` — the direct fix for how this went unnoticed.
+4. **`Settings.model_call_timeout_seconds` was never threaded into `OpenAIProvider`/
+   `AzureOpenAIProvider`** — only `OllamaProvider` ever respected it; the other two silently used
+   `openai`'s own SDK default (600s). Confirmed by inspection (no `timeout=` anywhere in either
+   file). Fixed: both now accept and pass through `timeout_seconds`. **Not fixed, and correctly
+   flagged as a separate, deeper issue**: `main.py`'s `chat()` handler runs `agent.invoke()` via
+   `asyncio.to_thread`, and cancelling the outer `asyncio.wait_for` on timeout does not stop an
+   already-running thread — it keeps executing after the client sees a timeout response. This
+   predates this milestone and needs its own design work.
+5. **Shell injection**: `azure-deploy.yml` interpolated `${{ inputs.* }}` directly into `run:`
+   script bodies. GitHub Actions performs plain text substitution of `${{ }}` before bash ever
+   sees the script, so an input containing a command substitution would execute with this
+   workflow's Azure permissions — confirmed live with a harmless probe input containing `$(...)`.
+   Practical exploitability today is bounded (only someone who can already dispatch this workflow
+   could exploit it, and that person can already deploy arbitrary images into this resource group
+   anyway), but it is a well-documented anti-pattern and cheap to fix. Fixed: every input now goes
+   through a job-level `env:` var and is referenced as a shell variable, never as a raw `${{ }}`
+   inside a script.
+6. **The web and API Container Apps shared one managed identity**, which held `Cognitive
+   Services OpenAI User` — the web app's nginx never calls Azure OpenAI, so a code-execution bug
+   in the (public-facing) web container could have used that identity to call the model directly,
+   bypassing planning, verification, and any future rate limiting. Fixed: `platform.bicep` now
+   provisions a second identity (`AcrPull` only) for the web app; verified live afterward that the
+   web identity holds only `AcrPull`, scoped to the registry.
+7. **The `AppRequests`-empty gap (open since the original M3 deployment) had a real, findable
+   root cause**, not just an unexplained gap: `FastAPIInstrumentor.instrument_app()` was called
+   from inside the `lifespan` context manager. Independently reproduced in an isolated subprocess
+   (`TestClient` + `InMemorySpanExporter`, no network): instrumenting inside `lifespan` exported
+   zero spans for a real request; instrumenting right after `FastAPI()` construction correctly
+   exported the expected `SERVER` span. Fixed: `configure_telemetry()` now runs at module level in
+   `main.py`, immediately after `app = FastAPI(...)`, not inside `lifespan`.
+8. **nginx's default `proxy_read_timeout` (60s) was shorter than the backend's own
+   `request_timeout_seconds` (180s)** — confirmed by inspection (no `proxy_*_timeout` directives
+   existed at all). A legitimate 70–170s model/vision call would get nginx's own 504 while the
+   backend was still working. Fixed: set to 180s, matching the backend's default.
+9. **Audit/evidence is written only to the container's local filesystem**, with no volume or
+   external store in `apps.bicep` — confirmed by inspection. A new Container Apps revision (any
+   redeploy) loses the entire audit/evidence history, contradicting the local-dev framing in
+   `PROJECT_STATE.md` ("the audit trail... persists to a local JSONL file... so audit history
+   survives a restart") once the "restart" in question is a revision replacement, not a process
+   restart on a persistent disk. **Not fixed in this pass** — needs real persistence (Phase 2,
+   OD-20's already-planned PostgreSQL direction), not a workaround; tracked in
+   `docs/decisions/REVIEW_REQUIRED.md`.
+
+The review also confirmed, matching what this repository already believed to be true, that no
+API key/secret was hardcoded anywhere in the reviewed diff, that ACR's admin user was correctly
+disabled, and that the reviewed PRs never touched `graph.py`'s planning/verification code — the
+non-strict-JSON-schema decision (D-012, above) does not mean the LLM bypasses deterministic
+computation; `QueryPlan`'s own Pydantic validation and the existing capability gate are unchanged.

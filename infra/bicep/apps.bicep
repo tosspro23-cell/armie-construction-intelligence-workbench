@@ -18,14 +18,22 @@ param identityId string
 @description('platform.bicep output: that identity\'s client ID. DefaultAzureCredential needs AZURE_CLIENT_ID set to this value to pick the right identity for a user-assigned Managed Identity (SPEC-M3 §4A/OD-23).')
 param identityClientId string
 
+@description('platform.bicep output: the web-only identity (AcrPull only, no Azure OpenAI role) -- independent review finding: the web and API apps must not share an identity, since the web container never calls Azure OpenAI and a code-execution bug in it should not be able to.')
+param webIdentityId string
+
 @description('platform.bicep output: the Log Analytics workspace name. Referenced here via `existing` and listKeys() so its shared key never has to cross a template boundary as a plain parameter value.')
 param logAnalyticsName string
 
 param appInsightsConnectionString string
 
 param azureOpenAiEndpoint string
-param azureOpenAiTextDeployment string = 'gpt-4o-mini'
-param azureOpenAiVisionDeployment string = 'gpt-4o-mini'
+
+@description('Name of an EXISTING deployment on the Azure OpenAI account. No default on purpose (independent review finding): a prior version defaulted to \'gpt-4o-mini\', which does not exist on every account, and Bicep applied that default silently when a caller forgot to pass this -- the deployment "succeeded" while the model-backed answer path was actually broken.')
+param azureOpenAiTextDeployment string
+
+@description('Name of an EXISTING deployment on the Azure OpenAI account, used for vision-grounded calls. No default, for the same reason as azureOpenAiTextDeployment.')
+param azureOpenAiVisionDeployment string
+
 param azureOpenAiApiVersion string = '2024-10-21'
 
 @description('Full ACR image reference for the API container, e.g. <acrLoginServer>/armie-api:<tag>. No default: azure-deploy.yml supplies it after building the image.')
@@ -141,7 +149,7 @@ resource webApp 'Microsoft.App/containerApps@2024-03-01' = {
   identity: {
     type: 'UserAssigned'
     userAssignedIdentities: {
-      '${identityId}': {}
+      '${webIdentityId}': {}
     }
   }
   properties: {
@@ -151,7 +159,7 @@ resource webApp 'Microsoft.App/containerApps@2024-03-01' = {
       registries: [
         {
           server: acrLoginServer
-          identity: identityId
+          identity: webIdentityId
         }
       ]
       ingress: {

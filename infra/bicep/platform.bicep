@@ -29,6 +29,7 @@ param azureOpenAiAccountName string
 var uniqueSuffix = uniqueString(resourceGroup().id)
 var acrName = '${namePrefix}acr${uniqueSuffix}'
 var identityName = '${namePrefix}-identity'
+var webIdentityName = '${namePrefix}-web-identity'
 var logAnalyticsName = '${namePrefix}-logs'
 var appInsightsName = '${namePrefix}-insights'
 
@@ -76,8 +77,21 @@ resource acr 'Microsoft.ContainerRegistry/registries@2023-07-01' = {
   }
 }
 
+// Two identities, not one (independent review finding, SPEC-M3): the web
+// app's nginx only ever pulls its own image and reverse-proxies HTTP -- it
+// never calls Azure OpenAI -- so it must not hold `Cognitive Services
+// OpenAI User`. Sharing one identity between both apps meant a code-
+// execution bug in the (public-facing) web container could use that
+// identity to call the model directly, bypassing the API's planning,
+// verification, and any future rate limiting entirely. `identity` (api)
+// gets both roles below; `webIdentity` gets only AcrPull.
 resource identity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
   name: identityName
+  location: location
+}
+
+resource webIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
+  name: webIdentityName
   location: location
 }
 
@@ -87,6 +101,16 @@ resource acrPullAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' 
   properties: {
     roleDefinitionId: acrPullRoleId
     principalId: identity.properties.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+resource webAcrPullAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(acr.id, webIdentity.id, acrPullRoleId)
+  scope: acr
+  properties: {
+    roleDefinitionId: acrPullRoleId
+    principalId: webIdentity.properties.principalId
     principalType: 'ServicePrincipal'
   }
 }
@@ -109,6 +133,8 @@ output acrName string = acr.name
 output acrLoginServer string = acr.properties.loginServer
 output identityId string = identity.id
 output identityClientId string = identity.properties.clientId
+output webIdentityId string = webIdentity.id
+output webIdentityClientId string = webIdentity.properties.clientId
 // The workspace *name* only, never its keys: apps.bicep looks the workspace
 // up again with `existing` and calls listKeys() itself, so a Log Analytics
 // shared key never has to cross a template boundary as a plain output.

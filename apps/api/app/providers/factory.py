@@ -16,8 +16,9 @@ def get_text_provider(settings: Settings) -> ModelProvider:
             endpoint=settings.azure_openai_endpoint,
             api_version=settings.azure_openai_api_version,
             deployment=settings.azure_openai_text_deployment,
+            timeout_seconds=settings.model_call_timeout_seconds,
         )
-    return OpenAIProvider(settings.openai_api_key, settings.openai_text_model)
+    return OpenAIProvider(settings.openai_api_key, settings.openai_text_model, settings.model_call_timeout_seconds)
 
 
 def get_vision_provider(settings: Settings) -> ModelProvider:
@@ -29,10 +30,11 @@ def get_vision_provider(settings: Settings) -> ModelProvider:
             endpoint=settings.azure_openai_endpoint,
             api_version=settings.azure_openai_api_version,
             deployment=settings.azure_openai_vision_deployment,
+            timeout_seconds=settings.model_call_timeout_seconds,
         )
     if settings.llm_provider == "hybrid":
-        return OpenAIProvider(settings.openai_api_key, settings.openai_vision_model)
-    return OpenAIProvider(settings.openai_api_key, settings.openai_vision_model)
+        return OpenAIProvider(settings.openai_api_key, settings.openai_vision_model, settings.model_call_timeout_seconds)
+    return OpenAIProvider(settings.openai_api_key, settings.openai_vision_model, settings.model_call_timeout_seconds)
 
 
 def get_escalation_provider(settings: Settings) -> ModelProvider | None:
