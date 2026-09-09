@@ -7,6 +7,15 @@ on:
 # No Ollama, no model downloads, no secrets, no network egress beyond
 # package registries (SPEC-M1 §4.8/21). Any test requiring a live model is
 # out of scope for this milestone.
+#
+# The `postgres` service container below (SPEC-M4) is a documented,
+# deliberate exception, not silently added: it runs as a plain sibling
+# container on the runner's own localhost network -- once started, it makes
+# no outbound network calls of its own -- and the owner explicitly decided
+# pulling `postgres:16-alpine` from Docker Hub fits this policy's intent
+# the same way pulling from PyPI/npm does, given GitHub Actions' own
+# service-container images always come from a container registry, not an
+# arbitrary network endpoint (docs/decisions/REVIEW_REQUIRED.md, resolved).
 permissions:
   contents: read
 
@@ -18,6 +27,26 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.9", "3.10", "3.11", "3.12"]
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: armie
+          POSTGRES_PASSWORD: armie
+          POSTGRES_DB: armie
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # Exercises PostgresConversationStore/PostgresAuditStore for real in
+      # CI (SPEC-M4 §F) -- previously only ever checked by a developer
+      # manually running `docker compose up postgres` locally, so CI never
+      # actually verified the live-database path at all.
+      TEST_DATABASE_URL: postgresql://armie:armie@localhost:5432/armie
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -25,6 +54,8 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Install apps/api
         run: pip install -e 'apps/api[dev]'
+      - name: Apply Postgres schema migration
+        run: psql "$TEST_DATABASE_URL" -f apps/api/migrations/0001_conversations_and_audit_events.sql
       - name: Run backend test suite
         run: PYTHONPATH=apps/api python3 -m pytest -q
 

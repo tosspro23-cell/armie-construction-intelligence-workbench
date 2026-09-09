@@ -31,11 +31,30 @@ dependencies = [
   "opentelemetry-instrumentation-fastapi>=0.48b0",
   "opentelemetry-instrumentation-httpx>=0.48b0",
   "azure-monitor-opentelemetry-exporter>=1.0.0b30",
+  # SPEC-M4: sync driver, not asyncpg -- AuditStore.append() is called
+  # throughout app/agent/graph.py's AgentService._audit(), which runs
+  # synchronously inside the worker thread main.py's chat() hands work to
+  # via asyncio.to_thread(agent.invoke, ...); an async-only driver has no
+  # event loop to run on there. See app/persistence/postgres_store.py.
+  "psycopg[binary]>=3.1,<4",
+  "psycopg_pool>=3.2,<4",
 ]
 
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
+
+# Explicit, not setuptools' flat-layout auto-discovery (SPEC-M4 defect,
+# found only by a clean install -- an already-populated local venv/egg-info
+# from before apps/api/migrations/ existed masked this): adding that
+# directory alongside app/ gave setuptools two flat-layout top-level
+# package candidates ("Multiple top-level packages discovered in a
+# flat-layout: ['app', 'migrations']"), which it refuses to build rather
+# than guess. migrations/ holds a plain .sql file, not importable Python --
+# it was never meant to be a package -- so app is named explicitly instead
+# of trying to get auto-discovery to exclude it correctly.
+[tool.setuptools.packages.find]
+include = ["app*"]
 
 [project.optional-dependencies]
 dev = [

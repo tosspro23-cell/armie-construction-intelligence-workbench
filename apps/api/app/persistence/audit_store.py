@@ -1,11 +1,30 @@
+from __future__ import annotations
+
 import json
 from pathlib import Path
 from threading import Lock
+from typing import Protocol
 
 from app.schemas.models import AuditEvent
 
 
-class AuditStore:
+class AuditStore(Protocol):
+    """The append-only audit trail behind ``/api/v1/traces/{trace_id}`` (D-010).
+
+    ``JsonlAuditStore`` is this project's original implementation (was
+    ``app.audit.store.AuditStore``, moved here unchanged in behaviour --
+    SPEC-M4 §A), kept as the local-development/test default.
+    ``PostgresAuditStore`` (persistence/postgres_store.py) is the
+    production-durable implementation. Both satisfy this exact two-method
+    interface so call sites in main.py/graph.py never change.
+    """
+
+    def append(self, event: AuditEvent) -> AuditEvent: ...
+
+    def by_trace(self, trace_id: str) -> list[AuditEvent]: ...
+
+
+class JsonlAuditStore:
     def __init__(self, path: Path) -> None:
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -28,4 +47,3 @@ class AuditStore:
                 if item.get("trace_id") == trace_id:
                     events.append(AuditEvent.model_validate(item))
         return events
-

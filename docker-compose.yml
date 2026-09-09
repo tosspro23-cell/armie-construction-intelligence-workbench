@@ -1,0 +1,22 @@
+services:
+  # Optional, opt-in local Postgres for exercising SPEC-M4's
+  # PostgresConversationStore/PostgresAuditStore path without touching
+  # Azure. Local development and CI both continue to default to the
+  # in-memory conversation store + local JSONL audit file when DATABASE_URL
+  # is unset -- nothing here is required to run or test the API.
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: armie
+      POSTGRES_PASSWORD: armie
+      POSTGRES_DB: armie
+    ports:
+      # Loopback-only (independent review): a bare "5432:5432" binds
+      # 0.0.0.0, exposing this fixed dev-password database to the rest of
+      # the local network, not just this machine.
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - armie_postgres_data:/var/lib/postgresql/data
+
+volumes:
+  armie_postgres_data:

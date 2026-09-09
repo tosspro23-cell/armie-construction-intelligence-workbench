@@ -167,7 +167,7 @@ require the attribute mentioned to be width/height-shaped before matching, or ha
 text so the substitution is visible rather than implicit. Not scheduled; flagging for a
 future milestone's scope decision.
 
-## M3: `checkpoint_db_path` is dead configuration
+## RESOLVED by M4: `checkpoint_db_path` is dead configuration
 
 Found during SPEC-M3's pre-implementation tech-debt scan (`docs/specs/SPEC-M3-azure-vertical-slice-v1.md`
 §3): `apps/api/app/config.py` declares `checkpoint_db_path: Path = Path("./runtime/checkpoints.sqlite")`,
@@ -179,6 +179,11 @@ dead configuration was out of that milestone's scope, which was about making the
 deployable to Azure, not about LangGraph persistence. A future milestone should either remove
 `checkpoint_db_path`/`CHECKPOINT_DB_PATH` as dead weight, or decide this is where a real
 checkpointer belongs and wire one up -- both are live options; neither is decided here.
+
+**Resolved by SPEC-M4** (`docs/decisions/README.md` D-014): removed outright, not repurposed.
+SPEC-M4's `ConversationStore`/`AuditStore` persistence is a different, bespoke mechanism (not a
+LangGraph checkpointer), so reusing this setting's name for it would have been more confusing than
+deleting the four lines that referenced it (`config.py`, `.env.example`).
 
 ## M3: the public API has no authentication, authorization, or rate limiting
 
@@ -197,7 +202,7 @@ authentication on the Container App) until real authorization is designed. A fut
 should design who the caller model even is (anonymous demo? authenticated per-project user?)
 before picking a mechanism -- this is Phase 2 scope, not a one-line fix.
 
-## M3: audit/evidence is not persisted across Container App revisions
+## PARTIALLY RESOLVED by M4: audit/evidence is not persisted across Container App revisions
 
 Found by the same independent review, confirmed directly: `audit_store_path` and `evidence_dir`
 (`apps/api/app/config.py`) are local container filesystem paths with no volume or external store
@@ -211,3 +216,58 @@ substitute: it has no domain-level audit content, only dependency call metadata.
 Not a quick fix -- needs real persistence (Phase 2's already-planned PostgreSQL direction, OD-20),
 not a bolted-on volume mount as a workaround. Until then, this milestone's own documentation
 should not imply audit continuity survives a deployment, which it does not.
+
+**Partially resolved by SPEC-M4** (`docs/decisions/README.md` D-014): `AuditStore`/
+`ConversationStore` now have a Postgres-backed implementation (`apps/api/app/persistence/
+postgres_store.py`), used whenever `DATABASE_URL` is set -- audit history and conversation
+context both survive a revision replacement once the (separately provisioned, not automatic)
+Postgres data tier is deployed and configured. **Still open**: `evidence_dir` (rendered PDF crops)
+was explicitly excluded from SPEC-M4's scope (owner-confirmed, OD-24) and remains local-filesystem
+only -- needs Azure Data Lake Storage Gen2, its own, larger milestone. Also still open: this fix
+is inert until an owner deliberately deploys `infra/bicep/data.bicep` and sets `DATABASE_URL`
+(SPEC-M4's cost note) -- a deployment that leaves it unset is in exactly the pre-M4 state.
+
+## M4: request-tracking/cancellation state has no cross-replica representation
+
+Identified while scoping SPEC-M4 (`docs/decisions/README.md` D-014), not fixed: `app.state.requests`
+(`apps/api/app/main.py`) stores `{"task": asyncio.current_task(), ...}` per in-flight request,
+and `POST /api/v1/requests/{id}/cancel` calls `task.cancel()` directly on that in-process
+coroutine object. A live `asyncio.Task` has no meaningful representation outside the event loop
+that created it -- it cannot be serialized to Postgres, Redis, or anything else -- so this state
+stays in-memory-only regardless of how durable conversations/audit become.
+
+Consequence, stated plainly for the owner: OD-22's `minReplicas: maxReplicas: 1` pin
+(`infra/bicep/apps.bicep`) cannot be lifted by persisting more state to a database. Doing so would
+need a different cancellation *mechanism* -- e.g. a polling-based `cancel_requested` flag in a
+shared store that each replica's own request-handling loop checks periodically, replacing direct
+`task.cancel()` entirely -- which is real design work, not scheduled, and would also need to
+reconcile with the pre-existing `asyncio.to_thread` cancellation gap (D-012/`docs/reports/
+2026-09-09-m3-independent-review-and-fixes.md`: cancelling the awaited future does not stop the
+worker thread already running `agent.invoke`).
+
+## RESOLVED by owner decision: should CI run a real Postgres, and does a service container fit the "no network egress" policy?
+
+Raised by a second independent review of SPEC-M4 (D-014 addendum): `tests/test_postgres_persistence.py`
+and `tests/test_chat_persistence_failure_handling.py`'s live-database cases are skipped in CI
+(gated behind `TEST_DATABASE_URL`, unset there), verified only by a developer manually running
+`docker compose up postgres` locally -- which this session did, repeatedly, but CI itself never
+exercises the real Postgres-backed store implementations at all.
+
+The straightforward fix is a GitHub Actions `services: postgres:` block on the `backend` job
+(runs on the runner itself, no external network reachability once started). Whether that is
+consistent with `.github/workflows/ci.yml`'s own documented policy ("No Ollama, no model
+downloads, no secrets, no network egress beyond package registries") is genuinely ambiguous:
+pulling the `postgres:16-alpine` image is a Docker Hub fetch, which is arguably outside "package
+registries" read literally, even though the running container itself then makes no further
+network calls. Not decided here -- this needs an explicit owner call on how strictly that policy
+clause is meant to be read, not a unilateral interpretation in either direction.
+
+**Owner decision (2026-09-09): a `services: postgres:` block does not violate this policy.** The
+owner's stated reasoning: a GitHub Actions service-container image comes from a container
+registry the same way PyPI/npm packages come from a package registry, and once started the
+container itself makes no further outbound network calls -- consistent with this policy's actual
+intent (no live external services, no secrets, no model downloads), not a loophole in it.
+Implemented in `.github/workflows/ci.yml`: the `backend` job now runs a `postgres:16-alpine`
+service container, applies `apps/api/migrations/0001_conversations_and_audit_events.sql`, and
+runs the full suite (including the previously `TEST_DATABASE_URL`-gated tests) against it on
+every push and pull request, on all four Python versions.

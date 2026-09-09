@@ -244,3 +244,153 @@ resolves both to the `0.149.0` D-006 pin after the upgrade, and `npm ci`/`npm in
 succeed with no `ERESOLVE` conflict). No owner decision was needed: this is a routine dependency
 security fix with no product-capability or scope question, unlike the OD-numbered decisions
 elsewhere in this log.
+
+## D-014 — Conversation/audit persistence via Postgres, with an explicit boundary on what it does not fix
+
+SPEC-M4 (`docs/specs/SPEC-M4-postgres-state-persistence-v1.md`) closes D-012 Finding 9: audit
+history and per-thread conversation context were process-local (a bare dict at
+`app.state.conversations`, a local-filesystem JSONL file behind `AuditStore`), so a Container App
+revision replacement silently lost both. `ConversationStore`/`AuditStore` (`apps/api/app/
+persistence/`) are now explicit interfaces with two implementations each, mirroring D-007's
+provider-factory seam exactly: `InMemoryConversationStore`/`JsonlAuditStore` (today's behaviour,
+unchanged, the default when `DATABASE_URL` is unset) and `PostgresConversationStore`/
+`PostgresAuditStore` (opt-in, Azure Database for PostgreSQL). `ServiceContainer` gained
+`conversation_store_factory`/`audit_store_factory` injection parameters (`persistence/factory.py`
+centralizes the selection logic, the same way `providers/factory.py` does for `llm_provider`).
+
+**Sync driver, not async, by design (found while implementing).** `AuditStore.append()` is called
+throughout `AgentService._audit()` (`apps/api/app/agent/graph.py`), which runs synchronously
+inside the worker thread `main.py`'s `chat()` hands work to via `asyncio.to_thread(agent.invoke,
+...)` — there is no event loop in that thread for an async-only driver (`asyncpg`) to run on.
+`psycopg` (v3, sync) is used instead, callable from exactly the context `AuditStore` has always
+been called from. Postgres access in Azure authenticates with an Entra ID token via
+`DefaultAzureCredential` (`DATABASE_USE_MANAGED_IDENTITY`, OD-26) — the Flexible Server
+(`infra/bicep/data.bicep`) has `passwordAuth: 'Disabled'` outright, continuing OD-23's
+zero-stored-secret posture as a platform guarantee, not an application convention, onto this
+project's second Azure-managed data resource.
+
+**What this milestone explicitly does not fix.** `app.state.requests` (`main.py`) stores a live
+`asyncio.Task` reference per in-flight request, used by `POST /api/v1/requests/{id}/cancel` to
+call `task.cancel()` directly on the in-process coroutine. This has no serializable representation
+outside the event loop that created it and is unchanged by this milestone — durable conversations
+and audit history do not, by themselves, make it safe to lift OD-22's `minReplicas: maxReplicas: 1`
+pin (`infra/bicep/apps.bicep`'s inline comment says so directly). Cross-replica cancellation would
+need a different mechanism entirely (e.g. a polling-based cancel flag each replica checks, instead
+of one replica reaching into another's event loop) and is not scheduled.
+
+**Two real bugs found only by running this against a live Postgres** (`docker compose up
+postgres`), neither reachable by a mock: `PostgresAuditStore.by_trace` failed `AuditEvent`
+validation because `psycopg` deserializes a `UUID` column into a native `uuid.UUID` object, and
+`AuditEvent.id` is a plain `str` field (pydantic accepts a native `datetime` for the timestamp
+column without complaint, which is why this wasn't obvious from the schema alone) — fixed by
+casting to `str` before validation. And `_TokenRefreshingPool` built its Managed-Identity
+connection string as `f"{conninfo} password={token}"`, string-concatenated onto a `postgresql://`
+URI — which does not produce valid `libpq` conninfo, since a URI and a keyword/value fragment
+don't combine by pasting; no test caught this because the `TEST_DATABASE_URL`-gated suite only
+exercised the non-Managed-Identity path. Fixed with `psycopg.conninfo.make_conninfo`, which merges
+either conninfo form correctly, extracted into a pure `_conninfo_with_password` function so it is
+now covered by a test that needs no real connection.
+
+**`checkpoint_db_path` removed, not repurposed.** `docs/decisions/REVIEW_REQUIRED.md` had flagged
+this dead LangGraph-checkpointer setting (found during SPEC-M3's tech-debt scan) as needing a
+future milestone's decision: remove it, or decide this is where real persistence belongs. It is a
+different mechanism from `ConversationStore`/`AuditStore` (a LangGraph checkpoint vs. this
+project's own bespoke stores) — reusing the name for an unrelated thing would be more confusing
+than deleting four lines, so it, and `CHECKPOINT_DB_PATH` in `.env.example`, are gone.
+
+**Verification.** `tests/test_postgres_persistence.py::test_a_second_independent_store_instance_
+reads_back_what_the_first_wrote` reproduces D-012 Finding 9 directly: two independently
+constructed store instances — no shared Python object — stand in for two container processes; the
+second reads back exactly what the first wrote, run against a real local Postgres (`TEST_DATABASE_URL`,
+skipped by default so CI's no-network-egress policy is unaffected). 186 tests pass; `ruff check
+--select F,E9,I,F401` is clean. `infra/bicep/data.bicep`/`apps.bicep`/`platform.bicep` all validated
+with `az bicep build`; **not run against a real Azure subscription this session** — a Postgres
+Flexible Server bills continuously once created (unlike Container Apps), so `azure-deploy.yml`
+does not provision it automatically; that remains a deliberate, separate step pending the owner's
+explicit cost go-ahead.
+
+**Correction, found the same day by an independent review (below): "186 tests pass" above was
+true only against this session's own local `.venv`, which predated `apps/api/migrations/`. GitHub
+CI on this branch was actually red on every push up to and including the commit that added the
+paragraph above — the claim of a clean, verified state was wrong at the moment it was written,
+not something that regressed afterward. Corrected in place, per this repository's own discipline
+against unflagged release-claim changes (D-012 set the precedent); see the independent-review
+addendum immediately below for the full account.**
+
+### Independent review, 2026-09-09 (same day, second pass)
+
+A second independent review (GPT) audited the pushed branch's actual remote state — not the
+working tree — and, unlike the first-round M3 review, this one caught something the M3 process
+didn't have a mechanism to catch: **GitHub's own CI for this branch was red**, contradicting the
+"186 tests pass" claim above, which had only ever been checked against a local `.venv` created
+before `apps/api/migrations/` existed. Every claim below was independently re-verified before
+being acted on (this repository's standing rule), not taken on the reviewer's word:
+
+1. **Critical, confirmed via a genuinely clean `python3 -m venv` + `pip install -e apps/api[dev]`,
+   not just by reading the CI log**: adding `apps/api/migrations/` gave setuptools two flat-layout
+   top-level package candidates (`app`, `migrations`), which it refuses to build rather than
+   guess — `pip install` failed outright on every Python version. Fixed with an explicit
+   `[tool.setuptools.packages.find] include = ["app*"]`.
+2. **Confirmed by fault injection** (fake `ConversationStore`s that raise or stall on command,
+   `tests/test_chat_persistence_failure_handling.py`, each test independently verified to fail
+   against the pre-fix `main.py` and pass after): `chat()`'s initial `conversations.get()` call
+   ran synchronously and outside the endpoint's own error handling — an unreachable Postgres there
+   produced an unhandled exception instead of this system's normal `error` disposition
+   (D-004/D-010), and every store call ran directly on the event loop, which with a real Postgres
+   configured blocks every other concurrent request on this OD-22 single-replica deployment for
+   the duration of each DB round trip. A separate bug, also confirmed live-broken and fixed in the
+   same pass: `record.update(status="completed", ...)` ran before the final context-persistence
+   attempt, so a write failure there could leave `app.state.requests` reporting `"completed"`
+   while the actual response was failing.
+3. **Confirmed by design review, not live-tested (no Azure Postgres deployed)**:
+   `infra/bicep/data.bicep` made the API's own runtime managed identity the Flexible Server's AAD
+   administrator — full database-admin privilege for a container whose actual job is two
+   INSERT/SELECT/UPDATE statements, meaning a compromised API process could tamper with or delete
+   audit records outright. Fixed by separating "who administers the server" (the CI/CD deploy
+   principal, which already holds elevated resource-group permissions) from "what the running app
+   can do" (a new, unverified-against-live-Azure `apps/api/migrations/0002_grant_api_runtime_role.sql`
+   granting a plain, non-admin role exactly `SELECT/INSERT/UPDATE` on `conversations` and
+   `SELECT/INSERT` — no `UPDATE`, no `DELETE` — on `audit_events`).
+4. **Confirmed by code inspection**: `azure-deploy.yml`'s `database_url` input defaulted to
+   blank, so a routine redeploy that omitted it would silently revert a persistence-enabled API
+   back to in-memory/JSONL mode with no warning. Fixed with a pre-flight check that refuses to
+   proceed unless a new `allow_disabling_persistence` input explicitly confirms the downgrade.
+5. **P2, confirmed via Microsoft's own documentation for the exact firewall rule name used**: the
+   `0.0.0.0`-`0.0.0.0` rule's comment overstated it as scoped to this project's own resources; it
+   actually permits any Azure resource in any subscription. Corrected in place, not silently
+   edited. Also fixed: `docker-compose.yml`'s local Postgres published on `0.0.0.0` instead of
+   `127.0.0.1`; `_TokenRefreshingPool` closed its old connection pool before confirming the
+   replacement worked (a token-refresh failure destroyed a still-good pool); no
+   connect/pool-wait/statement timeout existed anywhere, so a stalled database could block a
+   caller (and, per finding 2, a shared worker thread) indefinitely; the persistence smoke test in
+   `azure-deploy.yml` only asserted `disposition != "error"`, which a response that never actually
+   inherited context could still satisfy.
+6. **A second, distinct CI break, found only because CI was actually re-run after the fixes
+   above**, not caught by this session's own local testing (no Python 3.9/3.10/3.11 interpreter
+   available on this machine): two `str | None` annotations added to `main.py` during fix #2 above
+   crashed on Python 3.9 (`TypeError: unsupported operand type(s) for |: 'type' and 'NoneType'`),
+   which needs `from __future__ import annotations` for that syntax — already present in
+   `config.py`/`postgres_store.py` for the same reason, just missing from this one file. Diagnosed
+   directly from CI's own failure output (isolating it to exactly two lines and confirming the
+   other three Python versions passed unaffected), not guessed at.
+
+**What was not changed**: `pgaadauth_create_principal_with_oid`'s exact argument order/name in
+`0002_grant_api_runtime_role.sql` (finding 3) could not be verified against a live Azure Postgres
+Flexible Server this session (that extension function does not exist on the local docker-compose
+Postgres everything else here was verified against, and no Flexible Server was deployed) — flagged
+explicitly in the script itself rather than presented as verified. Also not addressed: whether
+adding a GitHub Actions Postgres *service container* to `ci.yml` (to run the `TEST_DATABASE_URL`-
+gated tests in CI, not just locally) is compatible with this repository's own stated CI policy
+("no network egress beyond package registries") — pulling `postgres:16-alpine` from Docker Hub is
+arguably outside that literal scope even though the container itself then runs with no further
+network access. Not decided here; needs an explicit owner call, not a unilateral interpretation —
+tracked in `docs/decisions/REVIEW_REQUIRED.md`.
+
+**Verification after all fixes above**: a second, real GitHub Actions run
+(`https://github.com/tosspro23-cell/armie-construction-intelligence-workbench/actions`, branch
+`feat/m4-postgres-persistence`) passed on all five jobs (`lint`, `backend` × Python 3.9-3.12,
+`frontend`) — checked directly via `gh run view --json jobs`, not inferred from a local run. 189
+tests pass locally (186 + 3 new fault-injection tests, `tests/test_chat_persistence_failure_handling.py`).
+The Managed-Identity connection-string bug from the first pass (already fixed and tested before
+this second review) and the two live-Postgres bugs above were all re-verified against a real local
+Postgres (`docker compose up postgres`) after these additional changes, confirming no regression.
