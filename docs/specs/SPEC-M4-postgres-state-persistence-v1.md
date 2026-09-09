@@ -170,7 +170,7 @@ real subscription).**
   user-visible behaviour this spec is for.
 
 **H. Documentation.**
-`AGENT_HANDOFF.md` code map, `docs/decisions/README.md` (new `D-013`), `PROJECT_STATE.md`.
+`AGENT_HANDOFF.md` code map, `docs/decisions/README.md` (new `D-014`), `PROJECT_STATE.md`.
 
 ## Explicitly excluded scope
 
@@ -234,7 +234,7 @@ deterministic-first computation). New to this spec:
 
 ## Documentation requirements
 
-`D-013` (architecture decision record) recording: the `ConversationStore`/`AuditStore`
+`D-014` (architecture decision record) recording: the `ConversationStore`/`AuditStore`
 seam and its two implementations; the `checkpoint_db_path` removal and why (not a
 repurpose); the explicit `app.state.requests`/cancellation non-serializability boundary and
 its consequence for OD-22. `PROJECT_STATE.md` M4 milestone entry. `REVIEW_REQUIRED.md`'s

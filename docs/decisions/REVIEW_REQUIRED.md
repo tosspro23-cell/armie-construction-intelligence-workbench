@@ -180,7 +180,7 @@ deployable to Azure, not about LangGraph persistence. A future milestone should 
 `checkpoint_db_path`/`CHECKPOINT_DB_PATH` as dead weight, or decide this is where a real
 checkpointer belongs and wire one up -- both are live options; neither is decided here.
 
-**Resolved by SPEC-M4** (`docs/decisions/README.md` D-013): removed outright, not repurposed.
+**Resolved by SPEC-M4** (`docs/decisions/README.md` D-014): removed outright, not repurposed.
 SPEC-M4's `ConversationStore`/`AuditStore` persistence is a different, bespoke mechanism (not a
 LangGraph checkpointer), so reusing this setting's name for it would have been more confusing than
 deleting the four lines that referenced it (`config.py`, `.env.example`).
@@ -217,7 +217,7 @@ Not a quick fix -- needs real persistence (Phase 2's already-planned PostgreSQL 
 not a bolted-on volume mount as a workaround. Until then, this milestone's own documentation
 should not imply audit continuity survives a deployment, which it does not.
 
-**Partially resolved by SPEC-M4** (`docs/decisions/README.md` D-013): `AuditStore`/
+**Partially resolved by SPEC-M4** (`docs/decisions/README.md` D-014): `AuditStore`/
 `ConversationStore` now have a Postgres-backed implementation (`apps/api/app/persistence/
 postgres_store.py`), used whenever `DATABASE_URL` is set -- audit history and conversation
 context both survive a revision replacement once the (separately provisioned, not automatic)
@@ -229,7 +229,7 @@ is inert until an owner deliberately deploys `infra/bicep/data.bicep` and sets `
 
 ## M4: request-tracking/cancellation state has no cross-replica representation
 
-Identified while scoping SPEC-M4 (`docs/decisions/README.md` D-013), not fixed: `app.state.requests`
+Identified while scoping SPEC-M4 (`docs/decisions/README.md` D-014), not fixed: `app.state.requests`
 (`apps/api/app/main.py`) stores `{"task": asyncio.current_task(), ...}` per in-flight request,
 and `POST /api/v1/requests/{id}/cancel` calls `task.cancel()` directly on that in-process
 coroutine object. A live `asyncio.Task` has no meaningful representation outside the event loop
@@ -247,7 +247,7 @@ worker thread already running `agent.invoke`).
 
 ## RESOLVED by owner decision: should CI run a real Postgres, and does a service container fit the "no network egress" policy?
 
-Raised by a second independent review of SPEC-M4 (D-013 addendum): `tests/test_postgres_persistence.py`
+Raised by a second independent review of SPEC-M4 (D-014 addendum): `tests/test_postgres_persistence.py`
 and `tests/test_chat_persistence_failure_handling.py`'s live-database cases are skipped in CI
 (gated behind `TEST_DATABASE_URL`, unset there), verified only by a developer manually running
 `docker compose up postgres` locally -- which this session did, repeatedly, but CI itself never

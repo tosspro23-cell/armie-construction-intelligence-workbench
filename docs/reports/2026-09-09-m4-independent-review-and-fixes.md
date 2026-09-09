@@ -2,7 +2,7 @@
 
 A second independent model (GPT) reviewed the pushed `feat/m4-postgres-persistence` branch at the
 owner's request, auditing the actual remote commit rather than the working tree. Full findings are
-recorded in the D-013 addendum (`docs/decisions/README.md`); this report records the verification
+recorded in the D-014 addendum (`docs/decisions/README.md`); this report records the verification
 process and end state, mirroring `docs/reports/2026-09-09-m3-independent-review-and-fixes.md`'s
 pattern of evidencing a claim rather than just asserting it.
 
@@ -10,7 +10,7 @@ pattern of evidencing a claim rather than just asserting it.
 
 Unlike SPEC-M3's independent review (which audited a real Azure deployment), this review caught
 something purely mechanical but more basic: **GitHub's own CI for this branch was red**, on every
-push, contradicting this session's own "186 tests pass" claim in D-013. That claim was true only
+push, contradicting this session's own "186 tests pass" claim in D-014. That claim was true only
 against a local `.venv` created before `apps/api/migrations/` existed -- `pip install -e` was
 never re-run from a clean environment after that directory was added, so the defect it introduced
 was invisible locally the entire time.
