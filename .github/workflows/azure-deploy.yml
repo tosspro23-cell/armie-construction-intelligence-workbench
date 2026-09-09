@@ -30,9 +30,13 @@ on:
         required: false
         default: ""
       database_url:
-        description: "SPEC-M4: postgresql:// DSN (no password -- AAD-only, OD-26) for the already-provisioned Postgres data tier, e.g. postgresql://<identityName>@<serverFqdn>:5432/armie?sslmode=require. Blank (the default) keeps the in-memory conversation store + local JSONL audit file, exactly like every deployment before this milestone. This workflow does NOT provision infra/bicep/data.bicep itself -- unlike Container Apps, a Postgres Flexible Server bills continuously once created (see that file's header), so creating it is a deliberate, separate `az deployment group create --template-file infra/bicep/data.bicep ...` run, not something a routine app deploy should trigger as a side effect."
+        description: "SPEC-M4: postgresql:// DSN (no password -- AAD-only, OD-26) for the already-provisioned Postgres data tier, e.g. postgresql://<identityName>@<serverFqdn>:5432/armie?sslmode=require. Blank (the default) keeps the in-memory conversation store + local JSONL audit file, exactly like every deployment before this milestone. This workflow does NOT provision infra/bicep/data.bicep itself -- unlike Container Apps, a Postgres Flexible Server bills continuously once created (see that file's header), so creating it is a deliberate, separate `az deployment group create --template-file infra/bicep/data.bicep ...` run, not something a routine app deploy should trigger as a side effect. IMPORTANT: once you have deployed with a real value here, every later redeploy must repeat it -- leaving this blank on a later run does not leave persistence untouched, it turns it back off (see allow_disabling_persistence below, which this workflow requires if you actually mean to do that)."
         required: false
         default: ""
+      allow_disabling_persistence:
+        description: "Independent-review fix: leaving database_url blank on a redeploy of an API that currently has persistence enabled used to silently revert it to in-memory/JSONL mode, with no warning. This workflow now refuses that outright unless you set this to 'yes', confirming the downgrade is deliberate. Irrelevant (ignored) on a first deploy, or any deploy where database_url is set."
+        required: false
+        default: "no"
 
 permissions:
   id-token: write
@@ -65,6 +69,7 @@ jobs:
       # github.sha directly, so the fallback lives here instead.
       IMAGE_TAG: ${{ inputs.image_tag || github.sha }}
       DATABASE_URL: ${{ inputs.database_url }}
+      ALLOW_DISABLING_PERSISTENCE: ${{ inputs.allow_disabling_persistence }}
     steps:
       - uses: actions/checkout@v4
 
@@ -145,6 +150,29 @@ jobs:
             -t "${{ steps.platform.outputs.acr_login_server }}/armie-web:$IMAGE_TAG" \
             .
           docker push "${{ steps.platform.outputs.acr_login_server }}/armie-web:$IMAGE_TAG"
+
+      # Independent-review fix: a routine redeploy that simply left
+      # database_url blank (e.g. a caller who forgot it was ever set)
+      # previously reverted a persistence-enabled API straight back to
+      # in-memory/JSONL mode with no warning at all -- conversations/audit
+      # from that point on would be silently non-durable again, while the
+      # old Postgres data (and its cost) kept sitting there unused. This
+      # step queries what the *currently deployed* API app actually has
+      # configured and refuses to proceed if that would be a silent
+      # downgrade, mirroring the existing "verify the model deployments
+      # exist" pre-flight check's shape (fail closed, not fail quiet).
+      - name: Refuse to silently disable persistence on a redeploy
+        run: |
+          set -euo pipefail
+          current=$(az containerapp show \
+            --name "${NAME_PREFIX}-api" \
+            --resource-group "$RESOURCE_GROUP" \
+            --query "properties.template.containers[0].env[?name=='DATABASE_URL'].value | [0]" \
+            -o tsv 2>/dev/null || true)
+          if [ -n "$current" ] && [ "$current" != "None" ] && [ -z "$DATABASE_URL" ] && [ "$ALLOW_DISABLING_PERSISTENCE" != "yes" ]; then
+            echo "::error::The currently deployed ${NAME_PREFIX}-api has DATABASE_URL set (persistence enabled), but this run's database_url input is blank. Refusing to silently revert conversations/audit to in-memory/JSONL mode. Pass the existing (or a new) database_url to keep persistence enabled, or set allow_disabling_persistence=yes if this downgrade is actually intentional."
+            exit 1
+          fi
 
       - name: Deploy Container Apps
         id: apps
