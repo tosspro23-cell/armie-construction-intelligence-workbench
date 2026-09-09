@@ -227,6 +227,14 @@ only -- needs Azure Data Lake Storage Gen2, its own, larger milestone. Also stil
 is inert until an owner deliberately deploys `infra/bicep/data.bicep` and sets `DATABASE_URL`
 (SPEC-M4's cost note) -- a deployment that leaves it unset is in exactly the pre-M4 state.
 
+**Update, 2026-09-09: deployed and live-verified.** The owner authorized the real deployment
+(`docs/reports/2026-09-09-m4-azure-deployment-baseline.md`) -- `armiem3-api` now runs with
+`DATABASE_URL` set against a live Azure Database for PostgreSQL Flexible Server. A real follow-up
+question against the deployed app correctly used conversation context from the prior turn, and a
+direct query against the live database (independent of the app) shows real `conversations`/
+`audit_events` rows written by it. `evidence_dir` remains the one open item above (still
+local-filesystem only, unchanged).
+
 ## M4: request-tracking/cancellation state has no cross-replica representation
 
 Identified while scoping SPEC-M4 (`docs/decisions/README.md` D-014), not fixed: `app.state.requests`
