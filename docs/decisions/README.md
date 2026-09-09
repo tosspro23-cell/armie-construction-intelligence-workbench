@@ -102,3 +102,30 @@ SPEC-M3 (`docs/specs/SPEC-M3-azure-vertical-slice-v1.md`) is the first milestone
 - `apps/api/Dockerfile` never bundled `demo_data/`, so a deployed API container could reach Azure OpenAI and reason about a question but always failed at tool execution with an honest "IFC file not found" (D-004 working correctly, just not a useful demo). `demo_data/` is synthetic, public-safe fixture data (`SECURITY_AND_DATA.md`) already served from the same files in local dev, so bundling it into the image changes no data-boundary invariant.
 
 All five were found only by actually deploying to a real Azure subscription and driving real requests through the real path — none is reachable through `FakeModelProvider`, which exists specifically to test the *seam*, not real transport/schema/platform-routing behaviour. End-to-end proof after all fixes: a natural-language question against the real deployment produced 2 real Azure OpenAI model calls, a correctly-decomposed `MultiQueryPlan`, and a final `disposition="answered"` response with real IFC evidence citations and `verification.status="passed"`.
+
+**Two more, found running `.github/workflows/azure-deploy.yml` for real (not reachable by writing/compiling the YAML — only an actual GitHub-triggered run surfaces platform-specific auth/authorization behaviour):**
+
+- `azure/login@v2`'s OIDC token had a subject of
+  `repo:tosspro23-cell@231253569/armie-construction-intelligence-workbench@1334122128:ref:refs/heads/main` —
+  GitHub's org/repo *names* with their immutable numeric IDs appended via `@`, not the plain
+  `repo:owner/name:ref:...` format most OIDC federation tutorials show. The federated
+  credential created with the plain-name subject failed with `AADSTS700213: No matching
+  federated identity record found`. Fixed by recreating the federated credential with the
+  exact subject GitHub's own token actually presents (copied from the error message, not
+  guessed) — one credential per trusted branch (`main`, and the feature branch this milestone
+  was developed on).
+- The GitHub deploy app's service principal had `Contributor` on the resource group (scoped
+  deliberately, not subscription-wide), which is not sufficient to create the
+  `Microsoft.Authorization/roleAssignments` resources `platform.bicep` defines (`AcrPull`,
+  `Cognitive Services OpenAI User`) — `Contributor`'s built-in role definition explicitly
+  excludes `Microsoft.Authorization/*/write`, by Azure's own design, as a privilege-escalation
+  guardrail. Fixed by adding `Role Based Access Control Administrator`
+  (`f58310d9-a9f6-439a-9e8d-f62e7b41a168`, verified against the real subscription, not assumed)
+  scoped to the same resource group — deliberately not `Owner`, to keep the deploy identity's
+  privilege bounded to exactly what this pipeline does (manage resources, manage role
+  assignments on them) rather than the unrestricted superset `Owner` would grant.
+
+With both fixed, `workflow_dispatch` ran end to end on `main` for the first time (build, push,
+deploy) in 3m7s, and the resulting revisions answered both a deterministic question and a real
+Azure-OpenAI-backed question correctly, with citations and `verification.status="passed"` —
+the CI/CD path is no longer a written-but-unexercised claim.
