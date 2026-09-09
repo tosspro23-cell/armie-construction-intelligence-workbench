@@ -1,0 +1,29 @@
+version: 2
+updates:
+  # apps/api's Python dependencies (pyproject.toml)
+  - package-ecosystem: "pip"
+    directory: "/apps/api"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+
+  # apps/web's npm dependencies (package.json / package-lock.json)
+  - package-ecosystem: "npm"
+    directory: "/apps/web"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    # three is intentionally pinned to 0.149.0 to match web-ifc-three's peer
+    # requirement (D-006, docs/decisions/README.md) -- do not let Dependabot
+    # silently bump past it and reintroduce the ERESOLVE conflict that
+    # milestone fixed.
+    ignore:
+      - dependency-name: "three"
+      - dependency-name: "@types/three"
+
+  # The GitHub Actions workflow files themselves (ci.yml, azure-deploy.yml)
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
