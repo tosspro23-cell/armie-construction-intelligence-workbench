@@ -129,13 +129,28 @@ def project_viewer_elements() -> dict:
     }
 
 
-def _terminal_response(request: ChatRequest, request_id: str, disposition: Disposition, message: str) -> AgentResponse:
+def _terminal_response(request: ChatRequest, request_id: str, disposition: Disposition, message: str, **extra_metadata) -> AgentResponse:
     thread_id = request.thread_id or request_id
     return AgentResponse(
         thread_id=thread_id, trace_id=request_id, disposition=disposition, answer_markdown=message,
         verification=VerificationStatus(status="not_applicable", reason=message),
-        execution_metadata={"request_id": request_id, "terminal": disposition.value},
+        execution_metadata={"request_id": request_id, "terminal": disposition.value, **extra_metadata},
     )
+
+
+async def _safe_audit_append(audit_store, event: AuditEvent) -> str | None:
+    """Best-effort audit write for a terminal branch (cancelled/timeout):
+    the response's disposition is already fully determined by this point,
+    so a persistence failure here (e.g. Postgres unreachable, SPEC-M4) must
+    not turn an honest cancelled/timeout response into an unhandled 500.
+    Returns an error string (surfaced in execution_metadata, never silently
+    dropped) on failure, None on success.
+    """
+    try:
+        await asyncio.to_thread(audit_store.append, event)
+        return None
+    except Exception as error:
+        return str(error)
 
 
 @app.post("/api/v1/chat")
@@ -145,7 +160,21 @@ async def chat(request: ChatRequest):
     request_id = request.request_id or str(uuid4())
     record = {"status": "running", "stage": "queued", "task": asyncio.current_task(), "trace_id": request_id}
     app.state.requests[request_id] = record
-    context = conversations.get(request.thread_id or "") or {}
+    try:
+        # await asyncio.to_thread, not a direct call: with SPEC-M4's
+        # Postgres-backed ConversationStore configured, this is a real
+        # network round trip -- a direct synchronous call here would block
+        # this process's single event loop (and therefore every other
+        # concurrent request, health check, and cancellation) for as long
+        # as the database takes to respond. Also inside this try, unlike
+        # before: an unreachable/erroring store must produce this
+        # endpoint's normal honest `error` disposition (D-004/D-010), not
+        # an unhandled exception that bypasses it entirely -- confirmed by
+        # fault injection in tests/test_chat_persistence_failure_handling.py.
+        context = await asyncio.to_thread(conversations.get, request.thread_id or "") or {}
+    except Exception as error:
+        record.update(status="error", stage="context_read_error", error=str(error))
+        return _terminal_response(request, request_id, Disposition.ERROR, f"The request failed safely: could not read conversation context: {error}")
     record["stage"] = "agent_execution"
     started = time.perf_counter()
     try:
@@ -159,16 +188,18 @@ async def chat(request: ChatRequest):
         ), timeout=app.state.container.settings.request_timeout_seconds)
     except asyncio.CancelledError:
         record.update(status="cancelled", stage="cancelled")
-        app.state.container.audit_store.append(AuditEvent(trace_id=request_id, thread_id=request.thread_id or request_id, step="request", event_type="cancelled", summary="Request was cancelled before a terminal response.", payload={"request_id": request_id}))
-        return _terminal_response(request, request_id, Disposition.CANCELLED, "Request cancelled. No result was committed to the conversation context.")
+        audit_error = await _safe_audit_append(app.state.container.audit_store, AuditEvent(trace_id=request_id, thread_id=request.thread_id or request_id, step="request", event_type="cancelled", summary="Request was cancelled before a terminal response.", payload={"request_id": request_id}))
+        extra = {"audit_persist_error": audit_error} if audit_error else {}
+        return _terminal_response(request, request_id, Disposition.CANCELLED, "Request cancelled. No result was committed to the conversation context.", **extra)
     except asyncio.TimeoutError:
         record.update(status="timeout", stage="timeout")
-        app.state.container.audit_store.append(AuditEvent(trace_id=request_id, thread_id=request.thread_id or request_id, step="request", event_type="timeout", summary="Request exceeded the bounded request deadline.", payload={"request_id": request_id, "timeout_seconds": app.state.container.settings.request_timeout_seconds}))
-        return _terminal_response(request, request_id, Disposition.TIMEOUT, "The request exceeded its time limit. Partial audit events were preserved; please retry with a narrower question.")
+        audit_error = await _safe_audit_append(app.state.container.audit_store, AuditEvent(trace_id=request_id, thread_id=request.thread_id or request_id, step="request", event_type="timeout", summary="Request exceeded the bounded request deadline.", payload={"request_id": request_id, "timeout_seconds": app.state.container.settings.request_timeout_seconds}))
+        extra = {"audit_persist_error": audit_error} if audit_error else {}
+        return _terminal_response(request, request_id, Disposition.TIMEOUT, "The request exceeded its time limit. Partial audit events were preserved; please retry with a narrower question.", **extra)
     except Exception as error:
         record.update(status="error", stage="error", error=str(error))
         return _terminal_response(request, request_id, Disposition.ERROR, f"The request failed safely: {error}")
-    record.update(status="completed", stage="completed", trace_id=response.trace_id)
+
     response = response.model_copy(update={
         "execution_metadata": {
             **response.execution_metadata,
@@ -176,27 +207,52 @@ async def chat(request: ChatRequest):
             "latency_ms": round((time.perf_counter() - started) * 1000, 1),
         }
     })
+    context_persist_error: str | None = None
     if response.disposition.value in {"answered", "clarification_required"}:
-        context_update = response.context_update
-        if context_update:
-            conversations.set(response.thread_id, context_update)
-        else:
-            trace = app.state.container.audit_store.by_trace(response.trace_id)
-            latest_plan = next((event.payload.get("plan") for event in reversed(trace) if event.event_type == "route_selected"), None)
-            conversations.set(response.thread_id, {
-                "previous_query_plan": latest_plan,
-                "active_entity_type": latest_plan.get("entity_type") if latest_plan else None,
-                "active_filters": latest_plan.get("filters", {}) if latest_plan else {},
-                "active_group_by": latest_plan.get("group_by") if latest_plan else None,
-                "evidence_refs": [citation.evidence_id for citation in response.citations],
-            })
+        # A conversation-context persistence failure here must not discard
+        # an already-correctly-computed, already-verified answer (the
+        # response object above is complete and valid) -- losing
+        # conversational continuity for the *next* turn is a strictly
+        # lesser failure than a 500 on this one. Surfaced via
+        # context_persist_error in execution_metadata rather than silently
+        # dropped, so it is at least observable.
+        try:
+            context_update = response.context_update
+            if context_update:
+                await asyncio.to_thread(conversations.set, response.thread_id, context_update)
+            else:
+                trace = await asyncio.to_thread(app.state.container.audit_store.by_trace, response.trace_id)
+                latest_plan = next((event.payload.get("plan") for event in reversed(trace) if event.event_type == "route_selected"), None)
+                await asyncio.to_thread(conversations.set, response.thread_id, {
+                    "previous_query_plan": latest_plan,
+                    "active_entity_type": latest_plan.get("entity_type") if latest_plan else None,
+                    "active_filters": latest_plan.get("filters", {}) if latest_plan else {},
+                    "active_group_by": latest_plan.get("group_by") if latest_plan else None,
+                    "evidence_refs": [citation.evidence_id for citation in response.citations],
+                })
+        except Exception as error:
+            context_persist_error = str(error)
+    # Recorded as the terminal state only after every persistence attempt
+    # above has actually completed (successfully or not) -- previously this
+    # was set before those calls, so a persistence failure could leave
+    # app.state.requests reporting "completed" while the client-facing call
+    # was still in flight or about to raise.
+    record.update(status="completed", stage="completed", trace_id=response.trace_id)
+    if context_persist_error:
+        response = response.model_copy(update={
+            "execution_metadata": {**response.execution_metadata, "context_persist_error": context_persist_error}
+        })
     return response
 
 
 @app.post("/api/v1/chat/{thread_id}/resume")
 async def resume(thread_id: str, request: ClarificationResumeRequest):
     conversations: ConversationStore = app.state.container.conversation_store
-    if conversations.get(thread_id) is None:
+    try:
+        existing = await asyncio.to_thread(conversations.get, thread_id)
+    except Exception as error:
+        raise HTTPException(status_code=503, detail=f"Could not read conversation state: {error}") from error
+    if existing is None:
         raise HTTPException(status_code=404, detail="No resumable conversation was found for this thread.")
     return await chat(ChatRequest(thread_id=thread_id, question=request.answer))
 
