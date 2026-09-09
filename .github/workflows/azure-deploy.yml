@@ -69,21 +69,29 @@ jobs:
           echo "app_insights_connection_string=$(jq -r .appInsightsConnectionString.value platform-outputs.json)" >> "$GITHUB_OUTPUT"
           echo "azure_openai_endpoint=$(jq -r .azureOpenAiEndpoint.value platform-outputs.json)" >> "$GITHUB_OUTPUT"
 
-      - name: Build and push API image (az acr build)
-        run: |
-          az acr build \
-            --registry "${{ steps.platform.outputs.acr_name }}" \
-            --file apps/api/Dockerfile \
-            --image "armie-api:${{ env.IMAGE_TAG }}" \
-            .
+      # `az acr build` (ACR Tasks / cloud build) is used by default on a lot
+      # of tutorials, but new subscriptions often have it blocked outright
+      # (TasksOperationsNotAllowed -- an anti-abuse restriction, found live
+      # during SPEC-M3's manual deployment). ubuntu-latest runners are
+      # amd64 already (Azure Container Apps doesn't run arm64), so a plain
+      # local `docker build` + push needs no cross-platform flag here,
+      # unlike the Apple Silicon dev machine this was first deployed from.
+      - name: Log in to the registry (az acr login)
+        run: az acr login --name "${{ steps.platform.outputs.acr_name }}"
 
-      - name: Build and push web image (az acr build)
+      - name: Build and push API image
         run: |
-          az acr build \
-            --registry "${{ steps.platform.outputs.acr_name }}" \
-            --file apps/web/Dockerfile \
-            --image "armie-web:${{ env.IMAGE_TAG }}" \
+          docker build -f apps/api/Dockerfile \
+            -t "${{ steps.platform.outputs.acr_login_server }}/armie-api:${{ env.IMAGE_TAG }}" \
             .
+          docker push "${{ steps.platform.outputs.acr_login_server }}/armie-api:${{ env.IMAGE_TAG }}"
+
+      - name: Build and push web image
+        run: |
+          docker build -f apps/web/Dockerfile \
+            -t "${{ steps.platform.outputs.acr_login_server }}/armie-web:${{ env.IMAGE_TAG }}" \
+            .
+          docker push "${{ steps.platform.outputs.acr_login_server }}/armie-web:${{ env.IMAGE_TAG }}"
 
       - name: Deploy Container Apps
         id: apps
