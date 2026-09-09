@@ -133,6 +133,15 @@ output acrName string = acr.name
 output acrLoginServer string = acr.properties.loginServer
 output identityId string = identity.id
 output identityClientId string = identity.properties.clientId
+// Consumed by data.bicep (SPEC-M4 §G) to make this same identity the
+// Postgres Flexible Server's Microsoft Entra administrator -- one identity,
+// already trusted for Azure OpenAI, reused rather than minting a second one
+// for the data tier the way webIdentity was split out for isolation (that
+// split was about *not* sharing OpenAI access with the public-facing web
+// container; there is no equivalent isolation concern between the API's
+// own two data dependencies).
+output identityPrincipalId string = identity.properties.principalId
+output identityName string = identity.name
 output webIdentityId string = webIdentity.id
 output webIdentityClientId string = webIdentity.properties.clientId
 // The workspace *name* only, never its keys: apps.bicep looks the workspace

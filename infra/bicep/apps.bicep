@@ -42,9 +42,26 @@ param apiImage string
 @description('Full ACR image reference for the web container, e.g. <acrLoginServer>/armie-web:<tag>.')
 param webImage string
 
+@description('SPEC-M4: postgresql:// DSN for ConversationStore/AuditStore, with no password (AAD-only, OD-26) -- e.g. postgresql://<identityName>@<data.bicep serverFqdn>:5432/<databaseName>?sslmode=require. Empty (the default) keeps the in-memory conversation store + local JSONL audit file, exactly like every deployment before this milestone; the Postgres data tier (infra/bicep/data.bicep) is deployed as a deliberate, separate step, not automatically by this template, because unlike Container Apps it bills continuously once created (SPEC-M4 cost note) -- mirrors how azureOpenAiAccountName above is never auto-created either.')
+param databaseUrl string = ''
+
 var containerAppsEnvName = '${namePrefix}-env'
 var apiAppName = '${namePrefix}-api'
 var webAppName = '${namePrefix}-web'
+
+// Conditionally appended (not a fixed-length env array with an empty
+// value): an empty DATABASE_URL env var would still satisfy Settings'
+// `str | None = None` field as the *string* "", not None, which is not the
+// same opt-out this project's other opt-in settings rely on (compare
+// otel_exporter_connection_string, which is genuinely absent, not "").
+var databaseEnv = empty(databaseUrl) ? [] : [
+  { name: 'DATABASE_URL', value: databaseUrl }
+  // Always true when a URL is supplied: this project's only supported
+  // Postgres auth path in Azure is Entra ID/Managed Identity (OD-26) --
+  // there is no scenario in this deployment template where a databaseUrl
+  // is set but should be treated as password-based.
+  { name: 'DATABASE_USE_MANAGED_IDENTITY', value: 'true' }
+]
 
 resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2022-10-01' existing = {
   name: logAnalyticsName
@@ -111,9 +128,13 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
       }
     }
     template: {
-      // Pinned to exactly one replica (OD-22, SPEC-M3 §11): main.py's
-      // conversation/request-tracking state is in-process memory and would
-      // silently fragment across replicas.
+      // Pinned to exactly one replica (OD-22, SPEC-M3 §11). SPEC-M4 (OD-25)
+      // makes conversation context and audit events durable via Postgres
+      // when databaseUrl is set above, but does not lift this pin:
+      // app.state.requests still holds live, in-process asyncio.Task
+      // references used for request cancellation, which have no
+      // serializable cross-replica representation and would still silently
+      // fragment across replicas.
       scale: {
         minReplicas: 1
         maxReplicas: 1
@@ -126,7 +147,7 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
             cpu: json('0.5')
             memory: '1Gi'
           }
-          env: [
+          env: concat([
             { name: 'LLM_PROVIDER', value: 'azure' }
             { name: 'AZURE_OPENAI_ENDPOINT', value: azureOpenAiEndpoint }
             { name: 'AZURE_OPENAI_API_VERSION', value: azureOpenAiApiVersion }
@@ -136,7 +157,7 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
             // Managed Identity only (OD-23): no API-key env var exists
             // anywhere in this template.
             { name: 'AZURE_CLIENT_ID', value: identityClientId }
-          ]
+          ], databaseEnv)
         }
       ]
     }

@@ -29,6 +29,10 @@ on:
         description: "Tag to build and deploy (blank = the triggering commit SHA)"
         required: false
         default: ""
+      database_url:
+        description: "SPEC-M4: postgresql:// DSN (no password -- AAD-only, OD-26) for the already-provisioned Postgres data tier, e.g. postgresql://<identityName>@<serverFqdn>:5432/armie?sslmode=require. Blank (the default) keeps the in-memory conversation store + local JSONL audit file, exactly like every deployment before this milestone. This workflow does NOT provision infra/bicep/data.bicep itself -- unlike Container Apps, a Postgres Flexible Server bills continuously once created (see that file's header), so creating it is a deliberate, separate `az deployment group create --template-file infra/bicep/data.bicep ...` run, not something a routine app deploy should trigger as a side effect."
+        required: false
+        default: ""
 
 permissions:
   id-token: write
@@ -60,6 +64,7 @@ jobs:
       # workflow_dispatch input defaults can't reference expressions like
       # github.sha directly, so the fallback lives here instead.
       IMAGE_TAG: ${{ inputs.image_tag || github.sha }}
+      DATABASE_URL: ${{ inputs.database_url }}
     steps:
       - uses: actions/checkout@v4
 
@@ -159,6 +164,7 @@ jobs:
                          azureOpenAiVisionDeployment="$AZURE_OPENAI_VISION_DEPLOYMENT" \
                          apiImage="${{ steps.platform.outputs.acr_login_server }}/armie-api:$IMAGE_TAG" \
                          webImage="${{ steps.platform.outputs.acr_login_server }}/armie-web:$IMAGE_TAG" \
+                         databaseUrl="$DATABASE_URL" \
             --query properties.outputs -o json > apps-outputs.json
           cat apps-outputs.json
           echo "web_app_fqdn=$(jq -r .webAppFqdn.value apps-outputs.json)" >> "$GITHUB_OUTPUT"
@@ -191,6 +197,35 @@ jobs:
           disposition=$(echo "$semantic" | jq -r .disposition)
           if [ "$disposition" = "error" ]; then
             echo "::error::Model-backed smoke question returned disposition=error -- the Azure OpenAI path is broken (check the deployment names actually exist and match what was just verified above)."
+            exit 1
+          fi
+
+      # Only meaningful once a Postgres data tier has been deployed
+      # separately and DATABASE_URL was passed in (see that input's
+      # description above) -- proves conversation context actually round-
+      # trips through the configured ConversationStore via the real running
+      # app. This does not restart the Container App mid-test to prove
+      # cross-*process* durability the way tests/test_postgres_persistence.py
+      # does directly against Postgres; doing that safely inside a workflow
+      # run needs its own design (SPEC-M4's acceptance criteria calls that
+      # out as a manual verification step, not an automated one, for now).
+      - name: Post-deploy smoke test (conversation persistence, only if DATABASE_URL is set)
+        if: ${{ inputs.database_url != '' }}
+        run: |
+          set -euo pipefail
+          base="https://${{ steps.apps.outputs.web_app_fqdn }}"
+          thread_id="smoke-test-$(date +%s)"
+
+          first=$(curl -sf -X POST "$base/api/v1/chat" -H "Content-Type: application/json" \
+            -d "{\"thread_id\": \"$thread_id\", \"question\": \"How many doors are on Level 01?\"}")
+          echo "$first" | jq .
+
+          second=$(curl -sf -X POST "$base/api/v1/chat" -H "Content-Type: application/json" \
+            -d "{\"thread_id\": \"$thread_id\", \"question\": \"And how many on Level 02?\"}")
+          echo "$second" | jq .
+          disposition=$(echo "$second" | jq -r .disposition)
+          if [ "$disposition" = "error" ]; then
+            echo "::error::Follow-up question on the same thread_id returned disposition=error -- conversation context did not round-trip through the configured ConversationStore."
             exit 1
           fi
 
