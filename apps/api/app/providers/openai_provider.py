@@ -19,13 +19,14 @@ class OpenAIProvider:
             raise RuntimeError("OPENAI_API_KEY is required for OpenAI provider calls.")
         from openai import AsyncOpenAI
         client = AsyncOpenAI(api_key=self.api_key)
-        response = await client.responses.create(
+        response = await client.chat.completions.create(
             model=self.model,
-            input=prompt,
-            text={"format": {"type": "json_schema", "name": response_model.__name__,
-                             "schema": response_model.model_json_schema(), "strict": True}},
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_schema", "json_schema": {
+                "name": response_model.__name__,
+                "schema": response_model.model_json_schema()}},
         )
-        return response_model.model_validate_json(response.output_text)
+        return response_model.model_validate_json(response.choices[0].message.content)
 
     async def vision_structured(
         self, *, prompt: str, image_base64: str, response_model: type[T], purpose: str
@@ -34,17 +35,18 @@ class OpenAIProvider:
             raise RuntimeError("OPENAI_API_KEY is required for OpenAI provider calls.")
         from openai import AsyncOpenAI
         client = AsyncOpenAI(api_key=self.api_key)
-        response = await client.responses.create(
+        response = await client.chat.completions.create(
             model=self.model,
-            input=[{
+            messages=[{
                 "role": "user",
                 "content": [
-                    {"type": "input_text", "text": prompt},
-                    {"type": "input_image", "image_url": f"data:image/png;base64,{image_base64}"},
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_base64}"}},
                 ],
             }],
-            text={"format": {"type": "json_schema", "name": response_model.__name__,
-                             "schema": response_model.model_json_schema(), "strict": True}},
+            response_format={"type": "json_schema", "json_schema": {
+                "name": response_model.__name__,
+                "schema": response_model.model_json_schema()}},
         )
-        return response_model.model_validate_json(response.output_text)
+        return response_model.model_validate_json(response.choices[0].message.content)
 

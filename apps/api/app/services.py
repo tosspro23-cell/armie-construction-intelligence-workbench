@@ -51,7 +51,7 @@ class ServiceContainer:
                 "ifc_query": self.settings.ifc_path.exists(),
                 "pdf_native_extraction": self.settings.pdf_path.exists(),
                 "viewer_snapshot": True,
-                "providers": ["openai", "ollama", "hybrid"],
+                "providers": ["openai", "ollama", "hybrid", "azure"],
             },
         }
 

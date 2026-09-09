@@ -28,14 +28,18 @@ This is a cold-start guide for a new vendor or frontier coding agent. Read this 
 | Fast-path semantics and source/intent detection | `apps/api/app/agent/router.py` |
 | Plan canonicalization and cross-field validation | `apps/api/app/agent/plan_validation.py` |
 | Typed request/plan/response/evidence contracts | `apps/api/app/schemas/models.py`, `apps/api/app/schemas/vision.py` |
-| Ollama/OpenAI provider boundary; centralized provider selection | `apps/api/app/providers/`, `apps/api/app/providers/factory.py` |
+| Ollama/OpenAI/Azure OpenAI provider boundary; centralized provider selection | `apps/api/app/providers/`, `apps/api/app/providers/factory.py` |
+| Azure OpenAI provider, Managed Identity only -- no API-key path (SPEC-M3, D-012) | `apps/api/app/providers/azure_openai_provider.py` |
 | Provider **factory** injection seam (text/vision/escalation), audit store, tool services | `apps/api/app/services.py` (`ServiceContainer`) |
+| OpenTelemetry -> Application Insights wiring, opt-in and inert by default (SPEC-M3) | `apps/api/app/telemetry.py` |
 | IFC deterministic adapter | `apps/api/app/tools/ifc/repository.py` |
 | PDF rendering/native lookup/vision preparation | `apps/api/app/tools/document/analyzer.py` |
 | Independent and invariant verification | `apps/api/app/verification/verifiers.py` |
 | Browser state, viewer, citations, audit grouping, cancellation | `apps/web/src/main.tsx`, `apps/web/src/IfcViewer.tsx`, `apps/web/src/styles.css` |
 | Deterministic-contract, failure-path, characterization, and seam-invariance tests | `tests/` (see `docs/specs/SPEC-M1-reliability-foundation-v1.md`) |
 | The only fake used to drive the probabilistic path in tests | `tests/fakes/fake_provider.py` (`FakeModelProvider`) |
+| Phase 1 Azure infrastructure: registry/identity/monitoring, then Container Apps (SPEC-M3) | `infra/bicep/platform.bicep`, `infra/bicep/apps.bicep` |
+| Manual-only (`workflow_dispatch`) build-and-deploy pipeline (SPEC-M3) | `.github/workflows/azure-deploy.yml` |
 
 ## End-to-end lifecycle
 

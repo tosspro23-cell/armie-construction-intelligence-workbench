@@ -6,9 +6,31 @@ from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def _default_env_file(config_file: Path) -> Path:
+    """Repo-root ``.env``, robust to how deep this file sits on disk.
+
+    Four chained ``.parent`` hops from ``config_file`` never raise --
+    unlike the ``.parents[3]`` indexing this replaces, which raised
+    ``IndexError`` and crashed the API container at import time
+    (SPEC-M3 §6 addendum): ``apps/api/Dockerfile``'s ``WORKDIR /app`` +
+    ``COPY apps/api /app`` puts this file at ``/app/app/config.py``, only 3
+    directories below the container's filesystem root, one short of the 4
+    the local dev checkout layout (``.../apps/api/app/config.py``) always
+    has. At that shallow a depth, chained ``.parent`` simply stops at the
+    filesystem root (whose own ``.parent`` is itself) instead of raising --
+    the resulting ``.env`` path won't exist there, which pydantic-settings
+    already treats as "no file to load", the correct behaviour for a
+    container that gets its configuration from real environment variables.
+    """
+    root = config_file.resolve()
+    for _ in range(4):
+        root = root.parent
+    return root / ".env"
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=Path(__file__).resolve().parents[3] / ".env",
+        env_file=_default_env_file(Path(__file__)),
         extra="ignore",
     )
 
@@ -21,6 +43,15 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     openai_text_model: str = "gpt-4.1-mini"
     openai_vision_model: str = "gpt-4.1-mini"
+    # Azure OpenAI (SPEC-M3): Managed Identity only (OD-23), no API-key path.
+    # ``azure_openai_endpoint`` is required only when llm_provider="azure".
+    azure_openai_endpoint: str | None = None
+    azure_openai_api_version: str = "2024-10-21"
+    azure_openai_text_deployment: str = "gpt-4o-mini"
+    azure_openai_vision_deployment: str = "gpt-4o-mini"
+    # Empty by default: OpenTelemetry exports nowhere unless explicitly set,
+    # the same opt-in pattern as ollama_escalation_model below.
+    otel_exporter_connection_string: str | None = None
     # ``localhost`` makes the native macOS development path work. Docker users
     # override this with host.docker.internal in their local .env.
     ollama_base_url: str = "http://127.0.0.1:11434"

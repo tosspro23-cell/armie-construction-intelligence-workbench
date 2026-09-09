@@ -33,7 +33,7 @@ def _settings(tmp_path: Path, llm_provider: str) -> Settings:
     return settings
 
 
-@pytest.mark.parametrize("llm_provider", ["ollama", "hybrid", "openai"])
+@pytest.mark.parametrize("llm_provider", ["ollama", "hybrid", "openai", "azure"])
 def test_seam_resolves_text_provider_identically_to_the_pre_refactor_factory(llm_provider: str, tmp_path: Path) -> None:
     settings = _settings(tmp_path, llm_provider)
     container = ServiceContainer(settings)  # default factories: the seam under test
@@ -46,7 +46,7 @@ def test_seam_resolves_text_provider_identically_to_the_pre_refactor_factory(llm
     assert getattr(seam_provider, "timeout_seconds", None) == getattr(direct_provider, "timeout_seconds", None)
 
 
-@pytest.mark.parametrize("llm_provider", ["ollama", "hybrid", "openai"])
+@pytest.mark.parametrize("llm_provider", ["ollama", "hybrid", "openai", "azure"])
 def test_seam_resolves_vision_provider_identically_to_the_pre_refactor_factory(llm_provider: str, tmp_path: Path) -> None:
     settings = _settings(tmp_path, llm_provider)
     container = ServiceContainer(settings)
