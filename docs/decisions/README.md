@@ -214,3 +214,33 @@ API key/secret was hardcoded anywhere in the reviewed diff, that ACR's admin use
 disabled, and that the reviewed PRs never touched `graph.py`'s planning/verification code — the
 non-strict-JSON-schema decision (D-012, above) does not mean the LLM bypasses deterministic
 computation; `QueryPlan`'s own Pydantic validation and the existing capability gate are unchanged.
+
+## D-013 — Vite security upgrade targets the minimum patched major, not npm's suggested latest
+
+GitHub Dependabot flagged four alerts against `apps/web`'s `vite@5.4.21` (and its bundled
+`esbuild@0.21.5`): one high (`server.fs.deny` bypass on Windows alternate paths, GHSA `vite`
+advisory, patched `6.4.2`), two moderate (`.map`-handling path traversal, patched `6.4.2`; a
+`launch-editor` NTLMv2 hash-disclosure issue, patched `6.4.3`), and one moderate (`esbuild`'s dev
+server accepting arbitrary-origin requests, patched `0.25.0`). All four affect the Vite/esbuild
+dev server only; the deployed app is served as a static build behind nginx (D-012), so none of
+these were live-exploitable in production, but an open, tool-reported alert is still worth
+clearing.
+
+`npm audit fix --force` proposes `vite@8.2.2` (npm's own "latest," a 5→8 jump across three major
+versions, flagged by npm itself as breaking). Checked against the actual GitHub advisories
+(`gh api .../dependabot/alerts`), the real fix only requires `vite>=6.4.3` — one major version,
+not three. `@vitejs/plugin-react@^4.3.4`'s existing peer range already covers `vite@^6.0.0`
+unmodified; only `@vitejs/plugin-react@^8.0.0`-compatible releases (`6.x` of the plugin itself)
+force a separate, unrelated architecture change (a `rolldown`/`oxc`-based rewrite requiring new
+peer packages). Upgrading to `vite@^6.4.3` + `@vitejs/plugin-react@^4.7.0` (the last `4.x`
+release, still on the pre-rolldown architecture) clears all four alerts (`npm audit` → 0
+vulnerabilities) with a materially smaller blast radius than the tool-suggested default, and
+Vite 6's own migration guide has no breaking change applicable to this repo's minimal
+`vite.config.ts` (no `worker.plugins`, no legacy Sass API usage, no CJS `require('vite')`, no SSR
+build).
+
+`three`/`@types/three` are unaffected — verified directly (`npm ls three @types/three` still
+resolves both to the `0.149.0` D-006 pin after the upgrade, and `npm ci`/`npm install` both
+succeed with no `ERESOLVE` conflict). No owner decision was needed: this is a routine dependency
+security fix with no product-capability or scope question, unlike the OD-numbered decisions
+elsewhere in this log.
