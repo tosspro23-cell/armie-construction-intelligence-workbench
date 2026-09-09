@@ -10,15 +10,23 @@ T = TypeVar("T", bound=BaseModel)
 class OpenAIProvider:
     name = "openai"
 
-    def __init__(self, api_key: str | None, model: str) -> None:
+    def __init__(self, api_key: str | None, model: str, timeout_seconds: float = 90.0) -> None:
         self.api_key = api_key
         self.model = model
+        # Independent review finding: this was never threaded through --
+        # Settings.model_call_timeout_seconds existed but only
+        # OllamaProvider actually respected it. openai's SDK default
+        # timeout is 600s, far past this system's own request_timeout_seconds
+        # (180s, config.py), so a stalled call here would never surface as
+        # this provider's own timeout -- only the coarser, thread-level
+        # outer deadline in main.py's chat() handler would eventually fire.
+        self.timeout_seconds = timeout_seconds
 
     async def structured(self, *, prompt: str, response_model: type[T], purpose: str) -> T:
         if not self.api_key:
             raise RuntimeError("OPENAI_API_KEY is required for OpenAI provider calls.")
         from openai import AsyncOpenAI
-        client = AsyncOpenAI(api_key=self.api_key)
+        client = AsyncOpenAI(api_key=self.api_key, timeout=self.timeout_seconds)
         response = await client.chat.completions.create(
             model=self.model,
             messages=[{"role": "user", "content": prompt}],
@@ -34,7 +42,7 @@ class OpenAIProvider:
         if not self.api_key:
             raise RuntimeError("OPENAI_API_KEY is required for OpenAI provider calls.")
         from openai import AsyncOpenAI
-        client = AsyncOpenAI(api_key=self.api_key)
+        client = AsyncOpenAI(api_key=self.api_key, timeout=self.timeout_seconds)
         response = await client.chat.completions.create(
             model=self.model,
             messages=[{
