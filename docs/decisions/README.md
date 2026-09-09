@@ -214,3 +214,67 @@ API key/secret was hardcoded anywhere in the reviewed diff, that ACR's admin use
 disabled, and that the reviewed PRs never touched `graph.py`'s planning/verification code — the
 non-strict-JSON-schema decision (D-012, above) does not mean the LLM bypasses deterministic
 computation; `QueryPlan`'s own Pydantic validation and the existing capability gate are unchanged.
+
+## D-013 — Conversation/audit persistence via Postgres, with an explicit boundary on what it does not fix
+
+SPEC-M4 (`docs/specs/SPEC-M4-postgres-state-persistence-v1.md`) closes D-012 Finding 9: audit
+history and per-thread conversation context were process-local (a bare dict at
+`app.state.conversations`, a local-filesystem JSONL file behind `AuditStore`), so a Container App
+revision replacement silently lost both. `ConversationStore`/`AuditStore` (`apps/api/app/
+persistence/`) are now explicit interfaces with two implementations each, mirroring D-007's
+provider-factory seam exactly: `InMemoryConversationStore`/`JsonlAuditStore` (today's behaviour,
+unchanged, the default when `DATABASE_URL` is unset) and `PostgresConversationStore`/
+`PostgresAuditStore` (opt-in, Azure Database for PostgreSQL). `ServiceContainer` gained
+`conversation_store_factory`/`audit_store_factory` injection parameters (`persistence/factory.py`
+centralizes the selection logic, the same way `providers/factory.py` does for `llm_provider`).
+
+**Sync driver, not async, by design (found while implementing).** `AuditStore.append()` is called
+throughout `AgentService._audit()` (`apps/api/app/agent/graph.py`), which runs synchronously
+inside the worker thread `main.py`'s `chat()` hands work to via `asyncio.to_thread(agent.invoke,
+...)` — there is no event loop in that thread for an async-only driver (`asyncpg`) to run on.
+`psycopg` (v3, sync) is used instead, callable from exactly the context `AuditStore` has always
+been called from. Postgres access in Azure authenticates with an Entra ID token via
+`DefaultAzureCredential` (`DATABASE_USE_MANAGED_IDENTITY`, OD-26) — the Flexible Server
+(`infra/bicep/data.bicep`) has `passwordAuth: 'Disabled'` outright, continuing OD-23's
+zero-stored-secret posture as a platform guarantee, not an application convention, onto this
+project's second Azure-managed data resource.
+
+**What this milestone explicitly does not fix.** `app.state.requests` (`main.py`) stores a live
+`asyncio.Task` reference per in-flight request, used by `POST /api/v1/requests/{id}/cancel` to
+call `task.cancel()` directly on the in-process coroutine. This has no serializable representation
+outside the event loop that created it and is unchanged by this milestone — durable conversations
+and audit history do not, by themselves, make it safe to lift OD-22's `minReplicas: maxReplicas: 1`
+pin (`infra/bicep/apps.bicep`'s inline comment says so directly). Cross-replica cancellation would
+need a different mechanism entirely (e.g. a polling-based cancel flag each replica checks, instead
+of one replica reaching into another's event loop) and is not scheduled.
+
+**Two real bugs found only by running this against a live Postgres** (`docker compose up
+postgres`), neither reachable by a mock: `PostgresAuditStore.by_trace` failed `AuditEvent`
+validation because `psycopg` deserializes a `UUID` column into a native `uuid.UUID` object, and
+`AuditEvent.id` is a plain `str` field (pydantic accepts a native `datetime` for the timestamp
+column without complaint, which is why this wasn't obvious from the schema alone) — fixed by
+casting to `str` before validation. And `_TokenRefreshingPool` built its Managed-Identity
+connection string as `f"{conninfo} password={token}"`, string-concatenated onto a `postgresql://`
+URI — which does not produce valid `libpq` conninfo, since a URI and a keyword/value fragment
+don't combine by pasting; no test caught this because the `TEST_DATABASE_URL`-gated suite only
+exercised the non-Managed-Identity path. Fixed with `psycopg.conninfo.make_conninfo`, which merges
+either conninfo form correctly, extracted into a pure `_conninfo_with_password` function so it is
+now covered by a test that needs no real connection.
+
+**`checkpoint_db_path` removed, not repurposed.** `docs/decisions/REVIEW_REQUIRED.md` had flagged
+this dead LangGraph-checkpointer setting (found during SPEC-M3's tech-debt scan) as needing a
+future milestone's decision: remove it, or decide this is where real persistence belongs. It is a
+different mechanism from `ConversationStore`/`AuditStore` (a LangGraph checkpoint vs. this
+project's own bespoke stores) — reusing the name for an unrelated thing would be more confusing
+than deleting four lines, so it, and `CHECKPOINT_DB_PATH` in `.env.example`, are gone.
+
+**Verification.** `tests/test_postgres_persistence.py::test_a_second_independent_store_instance_
+reads_back_what_the_first_wrote` reproduces D-012 Finding 9 directly: two independently
+constructed store instances — no shared Python object — stand in for two container processes; the
+second reads back exactly what the first wrote, run against a real local Postgres (`TEST_DATABASE_URL`,
+skipped by default so CI's no-network-egress policy is unaffected). 186 tests pass; `ruff check
+--select F,E9,I,F401` is clean. `infra/bicep/data.bicep`/`apps.bicep`/`platform.bicep` all validated
+with `az bicep build`; **not run against a real Azure subscription this session** — a Postgres
+Flexible Server bills continuously once created (unlike Container Apps), so `azure-deploy.yml`
+does not provision it automatically; that remains a deliberate, separate step pending the owner's
+explicit cost go-ahead.
