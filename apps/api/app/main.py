@@ -25,7 +25,6 @@ from app.telemetry import configure_telemetry
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
-    configure_telemetry(app, settings)
     app.state.container = ServiceContainer(settings)
     app.state.agent = AgentService(app.state.container)
     app.state.conversations = {}
@@ -38,6 +37,16 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+# Must run here, right after construction -- not from inside `lifespan` --
+# or FastAPIInstrumentor's added middleware never takes effect. Independent
+# review finding, confirmed with an isolated reproduction (TestClient +
+# InMemorySpanExporter, no network): instrumenting from inside `lifespan`
+# exported zero spans for a real request; instrumenting here exported the
+# expected SERVER span. This was the actual root cause of AppRequests
+# showing zero rows in Application Insights despite AppDependencies/
+# AppMetrics receiving data correctly (previously an open, undiagnosed
+# gap -- see D-012/PROJECT_STATE.md's M3 entry).
+configure_telemetry(app, get_settings())
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:3000"],
