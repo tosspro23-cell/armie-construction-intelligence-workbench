@@ -37,6 +37,16 @@ async def lifespan(app: FastAPI):
     # DATABASE_URL.
     app.state.requests = {}
     yield
+    # Independent-review addition: PostgresConversationStore/PostgresAuditStore
+    # (SPEC-M4) hold open psycopg connection pools; InMemoryConversationStore/
+    # JsonlAuditStore hold none, so they don't define close() at all -- this
+    # stays duck-typed rather than adding a no-op close() to the
+    # ConversationStore/AuditStore Protocols, so those interfaces stay
+    # exactly the two methods D-013 documents them as.
+    for store in (app.state.container.conversation_store, app.state.container.audit_store):
+        close = getattr(store, "close", None)
+        if close is not None:
+            close()
 
 
 app = FastAPI(

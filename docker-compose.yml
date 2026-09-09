@@ -11,7 +11,10 @@ services:
       POSTGRES_PASSWORD: armie
       POSTGRES_DB: armie
     ports:
-      - "5432:5432"
+      # Loopback-only (independent review): a bare "5432:5432" binds
+      # 0.0.0.0, exposing this fixed dev-password database to the rest of
+      # the local network, not just this machine.
+      - "127.0.0.1:5432:5432"
     volumes:
       - armie_postgres_data:/var/lib/postgresql/data
 

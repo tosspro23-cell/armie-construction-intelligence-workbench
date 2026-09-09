@@ -45,6 +45,30 @@ def _conninfo_with_password(base_conninfo: str, password: str) -> str:
     return make_conninfo(base_conninfo, password=password)
 
 
+# Independent-review finding: none of these were bounded before, so a
+# stalled network path or an overloaded server could block a caller
+# indefinitely -- and since every store call in main.py's async handlers
+# runs via asyncio.to_thread, "indefinitely" meant tying up a worker thread
+# from asyncio's shared default executor for that whole time, not just the
+# one request that triggered it. connect_timeout bounds the TCP-connect +
+# auth handshake; statement_timeout (a session GUC, set via conninfo
+# options) bounds any single SQL statement once connected.
+_CONNECT_TIMEOUT_SECONDS = 10
+_STATEMENT_TIMEOUT_MS = 15_000
+# How long a caller waits for a pooled connection to become available
+# before psycopg_pool raises PoolTimeout, distinct from connect_timeout
+# above (which bounds establishing a brand new connection).
+_POOL_WAIT_TIMEOUT_SECONDS = 10.0
+
+
+def _with_bounded_timeouts(conninfo: str) -> str:
+    return make_conninfo(
+        conninfo,
+        connect_timeout=_CONNECT_TIMEOUT_SECONDS,
+        options=f"-c statement_timeout={_STATEMENT_TIMEOUT_MS}",
+    )
+
+
 def _build_managed_identity_token_provider() -> Any:
     from azure.identity import DefaultAzureCredential
 
@@ -77,21 +101,37 @@ class _TokenRefreshingPool:
     def _current_pool(self) -> ConnectionPool:
         with self._lock:
             if self._pool is None or (time.monotonic() - self._issued_at) > self._refresh_seconds:
-                if self._pool is not None:
-                    self._pool.close()
+                # Build and open the replacement pool BEFORE closing the
+                # old one (independent review finding): the previous order
+                # closed self._pool first, so a token-provider failure or a
+                # new-pool connection error left this store with no working
+                # pool at all -- destroying a still-valid resource before
+                # confirming its replacement actually works. Every request
+                # arriving during that window failed even though the old
+                # pool would have kept working fine for a while longer.
                 token = self._token_provider()
-                conninfo = _conninfo_with_password(self._conninfo, token)
-                self._pool = ConnectionPool(conninfo, min_size=1, max_size=5, open=True)
+                conninfo = _with_bounded_timeouts(_conninfo_with_password(self._conninfo, token))
+                new_pool = ConnectionPool(conninfo, min_size=1, max_size=5, timeout=_POOL_WAIT_TIMEOUT_SECONDS, open=True)
+                old_pool, self._pool = self._pool, new_pool
                 self._issued_at = time.monotonic()
+                if old_pool is not None:
+                    old_pool.close()
             return self._pool
 
     def connection(self):
         return self._current_pool().connection()
 
+    def close(self) -> None:
+        with self._lock:
+            if self._pool is not None:
+                self._pool.close()
+                self._pool = None
+
 
 def _make_pool(database_url: str, *, use_managed_identity: bool) -> ConnectionPool | _TokenRefreshingPool:
     if not use_managed_identity:
-        return ConnectionPool(database_url, min_size=1, max_size=5, open=True)
+        conninfo = _with_bounded_timeouts(database_url)
+        return ConnectionPool(conninfo, min_size=1, max_size=5, timeout=_POOL_WAIT_TIMEOUT_SECONDS, open=True)
     return _TokenRefreshingPool(database_url, _build_managed_identity_token_provider())
 
 
@@ -122,6 +162,9 @@ class PostgresConversationStore:
                 (thread_id, json.dumps(context)),
             )
             conn.commit()
+
+    def close(self) -> None:
+        self._pool.close()
 
 
 class PostgresAuditStore:
@@ -171,3 +214,6 @@ class PostgresAuditStore:
             data["id"] = str(data["id"])
             events.append(AuditEvent.model_validate(data))
         return events
+
+    def close(self) -> None:
+        self._pool.close()
