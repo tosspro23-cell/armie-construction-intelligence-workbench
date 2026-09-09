@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import { withAuthHeader } from "./apiClient";
 
 type SelectedElement = {
   globalId?: string;
@@ -77,7 +78,7 @@ export function IfcViewer({ onSelection, onSnapshot, onStatus, focusGlobalId }: 
     const loadProjection = async () => {
       try {
         publishStatus({ phase: "loading", message: "Loading the ARMIE synthetic IFC demo through the local adapter…" });
-        const response = await fetch("/api/v1/project/viewer-elements");
+        const response = await fetch("/api/v1/project/viewer-elements", withAuthHeader());
         if (!response.ok) throw new Error(`Viewer source request failed (${response.status}).`);
         publishStatus({ phase: "parsing", message: "Building browser geometry from synthetic IFC elements…", progress: 20 });
         const payload = await response.json() as { elements: ViewerElement[] };

@@ -79,6 +79,14 @@ class Settings(BaseSettings):
     # local development against a local Postgres uses a plain password.
     database_use_managed_identity: bool = False
     evidence_dir: Path = Path("./runtime/evidence")
+    # Shared-secret auth for the public API (SPEC-M5, OD-28): unset (the
+    # local-development default) means every route stays exactly as open as
+    # it is today -- no developer needs a key to run this project locally.
+    # Setting it requires "Authorization: Bearer <secret>" on every
+    # /api/v1/* request (app/security.py). Not Managed Identity: that
+    # authenticates this service to other Azure resources, not a browser
+    # caller to this service -- a genuinely different problem (D-015).
+    api_shared_secret: str | None = None
     route_confidence_threshold: float = 0.70
     pdf_confidence_threshold: float = 0.75
     max_verification_retries: int = 1

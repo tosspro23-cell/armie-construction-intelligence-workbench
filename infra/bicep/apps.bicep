@@ -45,6 +45,10 @@ param webImage string
 @description('SPEC-M4: postgresql:// DSN for ConversationStore/AuditStore, with no password (AAD-only, OD-26) -- e.g. postgresql://<identityName>@<data.bicep serverFqdn>:5432/<databaseName>?sslmode=require. Empty (the default) keeps the in-memory conversation store + local JSONL audit file, exactly like every deployment before this milestone; the Postgres data tier (infra/bicep/data.bicep) is deployed as a deliberate, separate step, not automatically by this template, because unlike Container Apps it bills continuously once created (SPEC-M4 cost note) -- mirrors how azureOpenAiAccountName above is never auto-created either.')
 param databaseUrl string = ''
 
+@description('SPEC-M5, OD-28: shared secret every /api/v1/* request must present as "Authorization: Bearer <secret>". Required, no default -- unlike databaseUrl above, leaving this blank would silently mean "no auth," which is the exact gap this milestone closes (D-012 Finding 1); azure-deploy.yml requires its own api_shared_secret input for the same reason. Stored as a Container Apps native secret (secretRef below), not a plain env value or Key Vault -- OD-29, disproportionate infrastructure for one shared demo key.')
+@secure()
+param apiSharedSecret string
+
 var containerAppsEnvName = '${namePrefix}-env'
 var apiAppName = '${namePrefix}-api'
 var webAppName = '${namePrefix}-web'
@@ -120,6 +124,15 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
           identity: identityId
         }
       ]
+      // Container Apps stores/redacts this at the platform level (SPEC-M5
+      // §C) -- distinct from a bare `value` env var, which would show the
+      // secret in plain text in `az containerapp show`/Portal output.
+      secrets: [
+        {
+          name: 'api-shared-secret'
+          value: apiSharedSecret
+        }
+      ]
       ingress: {
         external: false
         targetPort: 8000
@@ -157,6 +170,9 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
             // Managed Identity only (OD-23): no API-key env var exists
             // anywhere in this template.
             { name: 'AZURE_CLIENT_ID', value: identityClientId }
+            // secretRef, not value (SPEC-M5 §C): pulls from the Container
+            // Apps secret declared above, never inlined as plain text here.
+            { name: 'API_SHARED_SECRET', secretRef: 'api-shared-secret' }
           ], databaseEnv)
         }
       ]

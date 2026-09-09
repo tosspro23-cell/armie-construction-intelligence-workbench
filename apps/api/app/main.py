@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
@@ -21,6 +21,7 @@ from app.schemas.models import (
     Disposition,
     VerificationStatus,
 )
+from app.security import require_api_key
 from app.services import ServiceContainer
 from app.telemetry import configure_telemetry
 
@@ -55,6 +56,11 @@ app = FastAPI(
     title="ARMIE Construction Intelligence Workbench",
     version="0.1.0",
     lifespan=lifespan,
+    # App-wide, not per-route (SPEC-M5 §A): every route requires this
+    # uniformly, including any added later, with no allowlist of "exempt"
+    # routes to maintain. A no-op locally unless API_SHARED_SECRET is set
+    # (app/security.py).
+    dependencies=[Depends(require_api_key)],
 )
 # Must run here, right after construction -- not from inside `lifespan` --
 # or FastAPIInstrumentor's added middleware never takes effect. Independent

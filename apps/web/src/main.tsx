@@ -1,5 +1,6 @@
 import React, { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { api, ApiAuthError, AuthedImage, setStoredApiKey } from "./apiClient";
 import { IfcViewer, ViewerStatus } from "./IfcViewer";
 import "./styles.css";
 
@@ -14,12 +15,6 @@ type Response = {
 };
 type Selected = { globalId?: string; expressId?: number; type?: string; name?: string };
 type ConversationTurn = { id: string; user: string; assistant: Response; timestamp: string; trace: TraceEvent[] };
-
-const api = async <T,>(path: string, init?: RequestInit): Promise<T> => {
-  const response = await fetch(path, init);
-  if (!response.ok) throw new Error(await response.text());
-  return response.json() as Promise<T>;
-};
 
 function stableCitationKey(citation: Citation) {
   const locator = citation.locator || {};
@@ -84,12 +79,27 @@ function App() {
   const controllerRef = useRef<AbortController | null>(null);
   const cancelledRef = useRef(false);
   const timelineRef = useRef<HTMLDivElement>(null);
+  const [needsApiKey, setNeedsApiKey] = useState(false);
+  const [apiKeyInput, setApiKeyInput] = useState("");
+
+  const loadMetadata = useCallback(() => {
+    api<Record<string, any>>("/api/v1/project/metadata").then((value) => { setMetadata(value); setApiState("ready"); setNeedsApiKey(false); })
+      .catch((error: Error) => {
+        if (error instanceof ApiAuthError) { setNeedsApiKey(true); return; }
+        console.error(error); setApiState("unavailable"); setApiError("The local API is unavailable. Start FastAPI on port 8000 and reload.");
+      });
+  }, []);
 
   const handleSelection = useCallback((element: Selected | null) => { setSelected(element); setSelectionCleared(false); }, []);
-  useEffect(() => {
-    api<Record<string, any>>("/api/v1/project/metadata").then((value) => { setMetadata(value); setApiState("ready"); })
-      .catch((error: Error) => { console.error(error); setApiState("unavailable"); setApiError("The local API is unavailable. Start FastAPI on port 8000 and reload."); });
-  }, []);
+  useEffect(() => { loadMetadata(); }, [loadMetadata]);
+
+  function submitApiKey(event: FormEvent) {
+    event.preventDefault();
+    if (!apiKeyInput.trim()) return;
+    setStoredApiKey(apiKeyInput.trim());
+    setApiKeyInput("");
+    loadMetadata();
+  }
 
   const status = useMemo(() => {
     if (apiState === "loading") return "Loading application…";
@@ -132,7 +142,8 @@ function App() {
       setThreadId(response.thread_id); setTurns((current) => [...current, { id: response.trace_id, user: question.trim(), assistant: response, timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }), trace: responseTrace }]); setQuestion("");
       setTrace(responseTrace);
     } catch (error) {
-      if ((error as Error).name !== "AbortError") { console.error(error); setApiState("unavailable"); setApiError("The chat request could not reach the local API. Check the backend connection and CORS configuration."); }
+      if (error instanceof ApiAuthError) { setNeedsApiKey(true); }
+      else if ((error as Error).name !== "AbortError") { console.error(error); setApiState("unavailable"); setApiError("The chat request could not reach the local API. Check the backend connection and CORS configuration."); }
     } finally { window.clearInterval(progressTimer); controllerRef.current = null; setBusy(false); setActiveRequestId(null); setRequestStage("idle"); }
   }
 
@@ -177,6 +188,17 @@ function App() {
     if (citation.source_type === "viewer_snapshot") setTab("snapshot");
   }
 
+  if (needsApiKey) {
+    return <main className="api-key-gate">
+      <form onSubmit={submitApiKey}>
+        <h1>Access key required</h1>
+        <p>This workbench requires a shared access key (SPEC-M5). Ask the project owner for it.</p>
+        <input type="password" value={apiKeyInput} onChange={(e) => setApiKeyInput(e.target.value)} placeholder="Access key" autoFocus />
+        <button type="submit">Continue</button>
+      </form>
+    </main>;
+  }
+
   return <main>
     <header><div><p className="eyebrow">ARMIE · auditable multi-source project intelligence</p><h1>ARMIE Construction Intelligence Workbench</h1></div><span className="status">{status}</span></header>
     {apiState === "unavailable" && <p className="runtime-error" role="alert">{apiError}</p>}
@@ -187,11 +209,11 @@ function App() {
     <section className="workspace">
       <aside className="viewer"><div className="tabs"><button className={tab === "bim" ? "active" : ""} onClick={() => setTab("bim")}>BIM Model</button><button className={tab === "drawing" ? "active" : ""} onClick={() => setTab("drawing")}>Drawing</button><button className={tab === "snapshot" ? "active" : ""} onClick={() => setTab("snapshot")}>Viewer Snapshot</button></div>
         {tab === "bim" && <><h2>IFC Viewer</h2><IfcViewer onSelection={handleSelection} onSnapshot={(value) => { setSnapshot(value); setSnapshotCleared(false); }} onStatus={setViewerStatus} focusGlobalId={selected?.globalId} /><dl className="selection-details"><div><dt>Element</dt><dd>{selected ? `${selected.type}: ${selected.name}` : "No IFC element selected"}</dd></div><div><dt>IFC type</dt><dd>{selected?.type || "—"}</dd></div><div><dt>ExpressID</dt><dd>{selected?.expressId ?? "—"}</dd></div><div><dt>GlobalId</dt><dd>{selected?.globalId || "—"}</dd></div></dl></>}
-        {tab === "drawing" && <section className="drawing"><h2>Engineering Drawing</h2><p>{metadata?.pdf_file || "synthetic schedule"} · page {drawingEvidence?.page ?? 1}</p><div className="drawing-toolbar"><button type="button" onClick={() => adjustDrawingZoom(drawingZoom - .25)}>−</button><span>{Math.round(drawingZoom * 100)}%</span><button type="button" onClick={() => adjustDrawingZoom(drawingZoom + .25)}>+</button><button type="button" onClick={() => setDrawingZoom(1)}>Fit page</button><button type="button" onClick={() => setDrawingZoom(1.15)}>Fit width</button><button type="button" onClick={() => setDrawingZoom(1)}>100%</button>{drawingEvidence && <button type="button" onClick={() => { setDrawingEvidence(null); setDrawingZoom(1); }}>Clear evidence focus</button>}</div><div className="drawing-stage" aria-label="Zoomable engineering drawing. Pinch to zoom; two-finger scroll pans." onWheel={onDrawingWheel}><div className="drawing-page" style={{ transform: `scale(${drawingZoom})` }}><img src={`/api/v1/project/pdf/pages/${drawingEvidence?.page ?? 1}.png`} alt={`Engineering load schedule page ${drawingEvidence?.page ?? 1}`} />{drawingEvidence?.bbox && <div ref={drawingEvidenceRef} className="drawing-evidence-box" style={{ left: `${(drawingEvidence.bbox[0] / 1191) * 100}%`, top: `${(drawingEvidence.bbox[1] / 842) * 100}%`, width: `${((drawingEvidence.bbox[2] - drawingEvidence.bbox[0]) / 1191) * 100}%`, height: `${((drawingEvidence.bbox[3] - drawingEvidence.bbox[1]) / 842) * 100}%` }} title={`${drawingEvidence.board || "PDF evidence"}${drawingEvidence.field ? ` · ${drawingEvidence.field}` : ""}`} />}</div></div><p className="empty">{drawingEvidence ? `Focused evidence: ${drawingEvidence.board || "drawing region"}${drawingEvidence.field ? ` · ${drawingEvidence.field}` : ""}.` : "Pinch to zoom and use two-finger scrolling to pan; citations focus a cited drawing region."}</p></section>}
+        {tab === "drawing" && <section className="drawing"><h2>Engineering Drawing</h2><p>{metadata?.pdf_file || "synthetic schedule"} · page {drawingEvidence?.page ?? 1}</p><div className="drawing-toolbar"><button type="button" onClick={() => adjustDrawingZoom(drawingZoom - .25)}>−</button><span>{Math.round(drawingZoom * 100)}%</span><button type="button" onClick={() => adjustDrawingZoom(drawingZoom + .25)}>+</button><button type="button" onClick={() => setDrawingZoom(1)}>Fit page</button><button type="button" onClick={() => setDrawingZoom(1.15)}>Fit width</button><button type="button" onClick={() => setDrawingZoom(1)}>100%</button>{drawingEvidence && <button type="button" onClick={() => { setDrawingEvidence(null); setDrawingZoom(1); }}>Clear evidence focus</button>}</div><div className="drawing-stage" aria-label="Zoomable engineering drawing. Pinch to zoom; two-finger scroll pans." onWheel={onDrawingWheel}><div className="drawing-page" style={{ transform: `scale(${drawingZoom})` }}><AuthedImage src={`/api/v1/project/pdf/pages/${drawingEvidence?.page ?? 1}.png`} alt={`Engineering load schedule page ${drawingEvidence?.page ?? 1}`} />{drawingEvidence?.bbox && <div ref={drawingEvidenceRef} className="drawing-evidence-box" style={{ left: `${(drawingEvidence.bbox[0] / 1191) * 100}%`, top: `${(drawingEvidence.bbox[1] / 842) * 100}%`, width: `${((drawingEvidence.bbox[2] - drawingEvidence.bbox[0]) / 1191) * 100}%`, height: `${((drawingEvidence.bbox[3] - drawingEvidence.bbox[1]) / 842) * 100}%` }} title={`${drawingEvidence.board || "PDF evidence"}${drawingEvidence.field ? ` · ${drawingEvidence.field}` : ""}`} />}</div></div><p className="empty">{drawingEvidence ? `Focused evidence: ${drawingEvidence.board || "drawing region"}${drawingEvidence.field ? ` · ${drawingEvidence.field}` : ""}.` : "Pinch to zoom and use two-finger scrolling to pan; citations focus a cited drawing region."}</p></section>}
         {tab === "snapshot" && <section className="snapshot"><h2>Viewer Snapshot</h2>{snapshot ? <img src={snapshot} alt="Captured IFC viewer context" /> : <p className="empty">Capture a BIM view to enable image-grounded inspection.</p>}<p>Selected: {selected?.globalId || "none"}</p></section>}
       </aside>
       <section className="chat"><h2>Conversation</h2><div className="messages" ref={timelineRef}>{turns.length === 0 ? <p className="empty">Ask a BIM, drawing, or current-view question. Auto chooses the source; overrides remain in technical details.</p> : turns.map((turn) => <React.Fragment key={turn.id}><div className="message-row user"><article className="message user-message"><div className="message-meta"><span>User</span><time>{turn.timestamp}</time></div><p>{turn.user}</p></article></div><div className="message-row assistant"><article className={`message assistant-message ${turn.assistant.disposition}`}><div className="message-meta"><span>Assistant</span><span>{turn.assistant.disposition.replace(/_/g, " ")}</span><span className={turn.assistant.verification.status}>{turn.assistant.verification.status}</span><time>{turn.timestamp}</time></div><p>{turn.assistant.answer_markdown}</p>{turn.assistant.citations.length > 0 && <div className="turn-citations">{turn.assistant.citations.slice(0, 3).map((citation) => <button type="button" key={stableCitationKey(citation)} onClick={() => openCitation(citation)}>View {citation.source_type} evidence</button>)}</div>}<details className="technical-details"><summary>Technical details</summary><small>Source: {turn.assistant.execution_metadata.source || "—"} · Planner: {turn.assistant.execution_metadata.planning_mode || "—"} · Models: {turn.assistant.execution_metadata.model_call_count || 0} · Tools: {turn.assistant.execution_metadata.tool_call_count || 0} · Trace: {turn.assistant.trace_id}</small></details></article></div></React.Fragment>)}</div><form onSubmit={submit}><textarea value={question} onChange={(e) => setQuestion(e.target.value)} placeholder="e.g. How many doors are in the project?" rows={3} /><div className="submit-row"><button disabled={busy}>{busy ? `Checking evidence… ${requestStage}` : "Ask with audit trail"}</button>{busy && <button type="button" className="stop-button" onClick={stopRequest}>Stop request</button>}</div></form></section>
-      <aside className="inspector"><section className="citations"><h2>Evidence Inspector</h2>{citations.length === 0 ? <p className="empty">Evidence appears after a question.</p> : <><p className="empty">{latest?.citations.length} evidence items · {Math.min(citations.length, 3)} representative citations shown</p>{citations.slice(0, 3).map((citation) => <details key={stableCitationKey(citation)}><summary onClick={() => openCitation(citation)}>{citation.source_type}: {citation.label}</summary><dl className="citation-facts">{citationFacts(citation).map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{value}</dd></div>)}</dl>{citation.locator.evidence_crop && <img className="evidence-crop" src={`/api/v1/evidence/${citation.locator.evidence_crop}`} alt="Cited PDF evidence crop" />}</details>)}</>}</section><section className="audit"><h2>Audit Trail</h2>{trace.length === 0 ? <p className="empty">Trace events appear after a question.</p> : <><div className="decision-summary"><strong>Decision Summary</strong><span>Intent: {latest?.execution_metadata.normalized_request || "—"}</span><span>Source: {latest?.execution_metadata.source || "—"}</span><span>Capability / Plan: {latest?.execution_metadata.subplans?.map((p: any) => `${p.operation || "—"}${p.entity_type ? ` · ${p.entity_type}` : ""}`).join(", ") || "—"}</span><span>Execution: {latest?.execution_metadata.tool_call_count || 0} tool · {latest?.execution_metadata.model_call_count || 0} model call(s)</span><span>Verification: {latest?.verification.status || "—"}</span><span>Evidence: {latest?.citations.length || 0} citation(s)</span><span>Result: {latest?.disposition.replace(/_/g, " ") || "—"}</span><span>Latency: {latest?.execution_metadata.latency_ms ? `${latest.execution_metadata.latency_ms} ms` : "—"}</span></div>{AUDIT_STAGES.map((stage) => { const events = trace.filter((event) => auditStage(event) === stage); return <details className="audit-stage" key={stage} open={stage === "Intent Understanding"}><summary>{stage} ({events.length})</summary>{events.length === 0 ? <p className="empty">No events.</p> : <ol>{events.map((event) => <li key={event.id}><strong>{event.summary}</strong>{event.actual_model && <small>Model: {event.actual_provider}/{event.actual_model}</small>}<details><summary>Details</summary><pre>{JSON.stringify(event.payload, null, 2)}</pre></details></li>)}</ol>}</details> })}<details className="raw-trace"><summary>Raw Trace ({trace.length} events)</summary><ol>{trace.map((event) => <li key={event.id}><strong>{event.step} · {event.event_type}</strong><span>{event.summary}</span>{event.actual_model && <small>Actual model: {event.actual_provider}/{event.actual_model}</small>}<details><summary>Payload</summary><pre>{JSON.stringify(event.payload, null, 2)}</pre></details></li>)}</ol></details></>}</section></aside>
+      <aside className="inspector"><section className="citations"><h2>Evidence Inspector</h2>{citations.length === 0 ? <p className="empty">Evidence appears after a question.</p> : <><p className="empty">{latest?.citations.length} evidence items · {Math.min(citations.length, 3)} representative citations shown</p>{citations.slice(0, 3).map((citation) => <details key={stableCitationKey(citation)}><summary onClick={() => openCitation(citation)}>{citation.source_type}: {citation.label}</summary><dl className="citation-facts">{citationFacts(citation).map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{value}</dd></div>)}</dl>{citation.locator.evidence_crop && <AuthedImage className="evidence-crop" src={`/api/v1/evidence/${citation.locator.evidence_crop}`} alt="Cited PDF evidence crop" />}</details>)}</>}</section><section className="audit"><h2>Audit Trail</h2>{trace.length === 0 ? <p className="empty">Trace events appear after a question.</p> : <><div className="decision-summary"><strong>Decision Summary</strong><span>Intent: {latest?.execution_metadata.normalized_request || "—"}</span><span>Source: {latest?.execution_metadata.source || "—"}</span><span>Capability / Plan: {latest?.execution_metadata.subplans?.map((p: any) => `${p.operation || "—"}${p.entity_type ? ` · ${p.entity_type}` : ""}`).join(", ") || "—"}</span><span>Execution: {latest?.execution_metadata.tool_call_count || 0} tool · {latest?.execution_metadata.model_call_count || 0} model call(s)</span><span>Verification: {latest?.verification.status || "—"}</span><span>Evidence: {latest?.citations.length || 0} citation(s)</span><span>Result: {latest?.disposition.replace(/_/g, " ") || "—"}</span><span>Latency: {latest?.execution_metadata.latency_ms ? `${latest.execution_metadata.latency_ms} ms` : "—"}</span></div>{AUDIT_STAGES.map((stage) => { const events = trace.filter((event) => auditStage(event) === stage); return <details className="audit-stage" key={stage} open={stage === "Intent Understanding"}><summary>{stage} ({events.length})</summary>{events.length === 0 ? <p className="empty">No events.</p> : <ol>{events.map((event) => <li key={event.id}><strong>{event.summary}</strong>{event.actual_model && <small>Model: {event.actual_provider}/{event.actual_model}</small>}<details><summary>Details</summary><pre>{JSON.stringify(event.payload, null, 2)}</pre></details></li>)}</ol>}</details> })}<details className="raw-trace"><summary>Raw Trace ({trace.length} events)</summary><ol>{trace.map((event) => <li key={event.id}><strong>{event.step} · {event.event_type}</strong><span>{event.summary}</span>{event.actual_model && <small>Actual model: {event.actual_provider}/{event.actual_model}</small>}<details><summary>Payload</summary><pre>{JSON.stringify(event.payload, null, 2)}</pre></details></li>)}</ol></details></>}</section></aside>
     </section>
   </main>;
 }

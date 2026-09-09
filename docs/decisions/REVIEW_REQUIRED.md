@@ -185,7 +185,7 @@ SPEC-M4's `ConversationStore`/`AuditStore` persistence is a different, bespoke m
 LangGraph checkpointer), so reusing this setting's name for it would have been more confusing than
 deleting the four lines that referenced it (`config.py`, `.env.example`).
 
-## M3: the public API has no authentication, authorization, or rate limiting
+## PARTIALLY RESOLVED by M5: the public API has no authentication, authorization, or rate limiting
 
 Found by an independent review of PR #9/#10 (2026-09-09, D-012), confirmed directly: any
 internet caller can reach `armiem3-web`'s public FQDN and call `/api/v1/chat`, consuming Azure
@@ -201,6 +201,18 @@ publicly without at least a minimal mitigation (an access-restricted ingress rul
 authentication on the Container App) until real authorization is designed. A future milestone
 should design who the caller model even is (anonymous demo? authenticated per-project user?)
 before picking a mechanism -- this is Phase 2 scope, not a one-line fix.
+
+**Partially resolved by SPEC-M5** (`docs/decisions/README.md` D-015, OD-28): the "caller model"
+question above is answered -- shared-secret auth, not per-project user identity, matching this
+project's actual demo/portfolio usage. `require_api_key` (`apps/api/app/security.py`) is required
+app-wide once `api_shared_secret`/`API_SHARED_SECRET` is set; the frontend gates on it and stores
+it in `localStorage`. **Still open, explicitly, not silently dropped**: this authenticates
+possession of the secret, not per-caller identity, so anyone holding it can still query or cancel
+any other holder's requests on `/api/v1/requests/*` -- SPEC-M5 closes "random internet strangers
+can't get in at all," not per-caller ownership. Rate limiting/abuse throttling was also not
+bundled in (the owner chose shared-secret auth over the "anonymous + rate limiting" alternative
+explicitly). Not yet deployed to the real Azure environment as of SPEC-M5's own commit -- see that
+spec's acceptance criteria for the live-deployment check still pending an owner go-ahead.
 
 ## PARTIALLY RESOLVED by M4: audit/evidence is not persisted across Container App revisions
 
