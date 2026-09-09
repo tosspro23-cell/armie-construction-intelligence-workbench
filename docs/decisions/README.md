@@ -304,10 +304,21 @@ constructed store instances — no shared Python object — stand in for two con
 second reads back exactly what the first wrote, run against a real local Postgres (`TEST_DATABASE_URL`,
 skipped by default so CI's no-network-egress policy is unaffected). 186 tests pass; `ruff check
 --select F,E9,I,F401` is clean. `infra/bicep/data.bicep`/`apps.bicep`/`platform.bicep` all validated
-with `az bicep build`; **not run against a real Azure subscription this session** — a Postgres
-Flexible Server bills continuously once created (unlike Container Apps), so `azure-deploy.yml`
-does not provision it automatically; that remains a deliberate, separate step pending the owner's
-explicit cost go-ahead.
+with `az bicep build`; not run against a real Azure subscription in this same session, since a
+Postgres Flexible Server bills continuously once created (unlike Container Apps) and that
+required the owner's explicit cost go-ahead first.
+
+**Now deployed and live-verified (2026-09-09, same day, owner-authorized): see
+`docs/reports/2026-09-09-m4-azure-deployment-baseline.md`.** The line above is preserved rather
+than deleted because it was an accurate statement of that moment, not a mistake — the owner
+first confirmed this subscription's free-tier eligibility (`quotaId: FreeTrial_2014-09-01`,
+confirmed via the Portal's Free Services page), then authorized the real deployment. That run
+found two more real defects unreachable from local `docker-compose` Postgres (this subscription
+cannot provision Postgres Flexible Server in `eastus2`; `pgaadauth_create_principal_with_oid`
+only exists when connected to the `postgres` maintenance database, not the application database
+— the migration script split into `apps/api/migrations/0002a_create_api_runtime_role.sql`/`0002b_grant_api_runtime_role.sql` accordingly),
+and produced direct, queryable proof of real conversation rows and 77 real audit events written
+by the actually-deployed Container App, not asserted from local tests alone.
 
 **Correction, found the same day by an independent review (below): "186 tests pass" above was
 true only against this session's own local `.venv`, which predated `apps/api/migrations/`. GitHub
@@ -348,7 +359,7 @@ being acted on (this repository's standing rule), not taken on the reviewer's wo
    INSERT/SELECT/UPDATE statements, meaning a compromised API process could tamper with or delete
    audit records outright. Fixed by separating "who administers the server" (the CI/CD deploy
    principal, which already holds elevated resource-group permissions) from "what the running app
-   can do" (a new, unverified-against-live-Azure `apps/api/migrations/0002_grant_api_runtime_role.sql`
+   can do" (a new, unverified-against-live-Azure `apps/api/migrations/0002a_create_api_runtime_role.sql`/`0002b_grant_api_runtime_role.sql`
    granting a plain, non-admin role exactly `SELECT/INSERT/UPDATE` on `conversations` and
    `SELECT/INSERT` — no `UPDATE`, no `DELETE` — on `audit_events`).
 4. **Confirmed by code inspection**: `azure-deploy.yml`'s `database_url` input defaulted to
@@ -374,10 +385,11 @@ being acted on (this repository's standing rule), not taken on the reviewer's wo
    directly from CI's own failure output (isolating it to exactly two lines and confirming the
    other three Python versions passed unaffected), not guessed at.
 
-**What was not changed**: `pgaadauth_create_principal_with_oid`'s exact argument order/name in
-`0002_grant_api_runtime_role.sql` (finding 3) could not be verified against a live Azure Postgres
-Flexible Server this session (that extension function does not exist on the local docker-compose
-Postgres everything else here was verified against, and no Flexible Server was deployed) — flagged
+**What was not changed**: `pgaadauth_create_principal_with_oid`'s exact argument order/name
+(finding 3's migration script, then a single file) could not be verified against a live Azure
+Postgres Flexible Server this session (that extension function does not exist on the local
+docker-compose Postgres everything else here was verified against, and no Flexible Server was
+deployed) — flagged
 explicitly in the script itself rather than presented as verified. Also not addressed: whether
 adding a GitHub Actions Postgres *service container* to `ci.yml` (to run the `TEST_DATABASE_URL`-
 gated tests in CI, not just locally) is compatible with this repository's own stated CI policy
@@ -385,6 +397,15 @@ gated tests in CI, not just locally) is compatible with this repository's own st
 arguably outside that literal scope even though the container itself then runs with no further
 network access. Not decided here; needs an explicit owner call, not a unilateral interpretation —
 tracked in `docs/decisions/REVIEW_REQUIRED.md`.
+
+**Both since resolved, same day.** The owner decided the CI service-container question (see
+`docs/decisions/REVIEW_REQUIRED.md`'s resolution) — `ci.yml`'s `backend` job now runs a real
+`postgres:16-alpine` service container on every push. And the `pgaadauth_create_principal_with_oid`
+question was resolved by actually deploying: the function exists exactly as documented, but only
+when connected to the `postgres` database, not `armie` — confirmed live, not guessed at, and fixed
+by splitting the migration into `0002a_create_api_runtime_role.sql` (runs against `postgres`) and
+`0002b_grant_api_runtime_role.sql` (runs against `armie`). Full account:
+`docs/reports/2026-09-09-m4-azure-deployment-baseline.md`.
 
 **Verification after all fixes above**: a second, real GitHub Actions run
 (`https://github.com/tosspro23-cell/armie-construction-intelligence-workbench/actions`, branch

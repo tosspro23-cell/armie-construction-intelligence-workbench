@@ -28,7 +28,7 @@ param deployPrincipalName string
 @allowed(['User', 'ServicePrincipal'])
 param deployPrincipalType string = 'ServicePrincipal'
 
-@description('The API app\'s managed identity (platform.bicep output: identityId/identityPrincipalId/identityName) -- NOT granted admin here. Used only as documentation of which identity apps/api/migrations/0002_grant_api_runtime_role.sql must be run for after this template deploys: that script creates a plain (non-admin) AAD-mapped Postgres role for exactly this identity and grants it SELECT/INSERT/UPDATE on the two SPEC-M4 tables only -- nothing else, not even DELETE (matching AuditStore\'s append-only interface). Kept as an explicit parameter, not just a comment, so a future automation step has something to bind the migration script\'s target identity to without re-deriving it.')
+@description('The API app\'s managed identity (platform.bicep output: identityId/identityPrincipalId/identityName) -- NOT granted admin here. Used only as documentation of which identity apps/api/migrations/0002a_create_api_runtime_role.sql (run against the "postgres" database) and 0002b_grant_api_runtime_role.sql (run against "armie") must be run for after this template deploys: together they create a plain (non-admin) AAD-mapped Postgres role for exactly this identity and grant it SELECT/INSERT/UPDATE on the two SPEC-M4 tables only -- nothing else, not even DELETE (matching AuditStore\'s append-only interface). Kept as an explicit parameter, not just a comment, so a future automation step has something to bind the migration scripts\' target identity to without re-deriving it.')
 param apiIdentityPrincipalId string
 
 param apiIdentityName string

@@ -281,3 +281,16 @@ not worked around).
   built and fully verified against a local Postgres (`docker-compose.yml`) with **zero**
   additional Azure cost; §G's actual cloud deployment should wait for an explicit go-ahead
   once the code is ready, not be assumed as part of "proceed with the spec."
+
+## §I addendum — cost go-ahead given, §G deployed and verified (2026-09-09)
+
+The owner confirmed this subscription's Azure free-account 12-months-free allowance covers
+this exact configuration (`Standard_B1ms`, 32GB storage) via the Portal's own Free Services
+page, then authorized deploying §G for real. `infra/bicep/data.bicep` was deployed
+(`centralus`, not the existing resources' `eastus2` — this subscription is restricted from
+provisioning Postgres Flexible Server there, found live), migrations applied, and
+`azure-deploy.yml` re-run with `DATABASE_URL` set. The acceptance-criteria bullet above ("If
+deployed... a real follow-up chat request... retains conversation context") is met: see
+`docs/reports/2026-09-09-m4-azure-deployment-baseline.md` for the full evidence (the model's
+own follow-up rationale, and a direct database query showing the real rows it wrote).
+OD-25/26/27 all stand as deployed, not just proposed.
