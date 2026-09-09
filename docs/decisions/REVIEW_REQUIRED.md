@@ -245,7 +245,7 @@ reconcile with the pre-existing `asyncio.to_thread` cancellation gap (D-012/`doc
 2026-09-09-m3-independent-review-and-fixes.md`: cancelling the awaited future does not stop the
 worker thread already running `agent.invoke`).
 
-## M4: should CI run a real Postgres, and does a service container fit the "no network egress" policy?
+## RESOLVED by owner decision: should CI run a real Postgres, and does a service container fit the "no network egress" policy?
 
 Raised by a second independent review of SPEC-M4 (D-013 addendum): `tests/test_postgres_persistence.py`
 and `tests/test_chat_persistence_failure_handling.py`'s live-database cases are skipped in CI
@@ -261,3 +261,13 @@ pulling the `postgres:16-alpine` image is a Docker Hub fetch, which is arguably 
 registries" read literally, even though the running container itself then makes no further
 network calls. Not decided here -- this needs an explicit owner call on how strictly that policy
 clause is meant to be read, not a unilateral interpretation in either direction.
+
+**Owner decision (2026-09-09): a `services: postgres:` block does not violate this policy.** The
+owner's stated reasoning: a GitHub Actions service-container image comes from a container
+registry the same way PyPI/npm packages come from a package registry, and once started the
+container itself makes no further outbound network calls -- consistent with this policy's actual
+intent (no live external services, no secrets, no model downloads), not a loophole in it.
+Implemented in `.github/workflows/ci.yml`: the `backend` job now runs a `postgres:16-alpine`
+service container, applies `apps/api/migrations/0001_conversations_and_audit_events.sql`, and
+runs the full suite (including the previously `TEST_DATABASE_URL`-gated tests) against it on
+every push and pull request, on all four Python versions.
