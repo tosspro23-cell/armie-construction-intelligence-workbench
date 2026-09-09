@@ -37,6 +37,9 @@ on:
         description: "Independent-review fix: leaving database_url blank on a redeploy of an API that currently has persistence enabled used to silently revert it to in-memory/JSONL mode, with no warning. This workflow now refuses that outright unless you set this to 'yes', confirming the downgrade is deliberate. Irrelevant (ignored) on a first deploy, or any deploy where database_url is set."
         required: false
         default: "no"
+      api_shared_secret:
+        description: "SPEC-M5, OD-28: the shared secret every /api/v1/* request must present as 'Authorization: Bearer <secret>'. Required, no default -- unlike database_url, leaving this blank would silently mean 'no auth,' the exact gap this milestone closes (D-012 Finding 1). workflow_dispatch string inputs are not masked automatically like repository secrets; this workflow masks it explicitly (::add-mask::) as its first step so it never appears in this run's own logs even by accident."
+        required: true
 
 permissions:
   id-token: write
@@ -70,7 +73,16 @@ jobs:
       IMAGE_TAG: ${{ inputs.image_tag || github.sha }}
       DATABASE_URL: ${{ inputs.database_url }}
       ALLOW_DISABLING_PERSISTENCE: ${{ inputs.allow_disabling_persistence }}
+      API_SHARED_SECRET: ${{ inputs.api_shared_secret }}
     steps:
+      # First step, before anything else can echo it by accident:
+      # workflow_dispatch string inputs are not masked in logs the way
+      # repository/organization secrets are (GitHub only masks values it
+      # already knows are secret) -- this tells the log renderer to treat
+      # this value as one anyway, for the rest of this run.
+      - name: Mask the API shared secret in this run's logs
+        run: echo "::add-mask::$API_SHARED_SECRET"
+
       - uses: actions/checkout@v4
 
       # OIDC federated login: no client secret is stored anywhere in this
@@ -193,6 +205,7 @@ jobs:
                          apiImage="${{ steps.platform.outputs.acr_login_server }}/armie-api:$IMAGE_TAG" \
                          webImage="${{ steps.platform.outputs.acr_login_server }}/armie-web:$IMAGE_TAG" \
                          databaseUrl="$DATABASE_URL" \
+                         apiSharedSecret="$API_SHARED_SECRET" \
             --query properties.outputs -o json > apps-outputs.json
           cat apps-outputs.json
           echo "web_app_fqdn=$(jq -r .webAppFqdn.value apps-outputs.json)" >> "$GITHUB_OUTPUT"
@@ -204,6 +217,21 @@ jobs:
       # call) paths are exercised; the workflow fails if either does not
       # come back "answered" or "clarification_required" (a "clarification"
       # is a legitimate, non-broken outcome; "error" is not).
+      # Direct proof of SPEC-M5's actual acceptance criterion, not inferred
+      # from the authenticated smoke tests below passing: a request that
+      # omits the header must be rejected, not merely "the one with the
+      # header happens to work."
+      - name: Post-deploy smoke test (unauthenticated request is rejected)
+        run: |
+          set -euo pipefail
+          base="https://${{ steps.apps.outputs.web_app_fqdn }}"
+          status=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$base/api/v1/chat" \
+            -H "Content-Type: application/json" -d '{"question": "How many doors are in this project?"}')
+          if [ "$status" != "401" ]; then
+            echo "::error::A request with no Authorization header returned HTTP $status, expected 401 -- the shared-secret check is not actually enforced on the deployed app."
+            exit 1
+          fi
+
       - name: Post-deploy smoke test (deterministic path AND real model path)
         run: |
           set -euo pipefail
@@ -211,6 +239,7 @@ jobs:
           echo "Smoke-testing $base"
 
           deterministic=$(curl -sf -X POST "$base/api/v1/chat" -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $API_SHARED_SECRET" \
             -d '{"question": "How many doors are in this project?"}')
           echo "$deterministic" | jq .
           disposition=$(echo "$deterministic" | jq -r .disposition)
@@ -220,6 +249,7 @@ jobs:
           fi
 
           semantic=$(curl -sf -X POST "$base/api/v1/chat" -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $API_SHARED_SECRET" \
             -d '{"question": "Please describe the situation with the doors in this project in your own words."}')
           echo "$semantic" | jq .
           disposition=$(echo "$semantic" | jq -r .disposition)
@@ -245,6 +275,7 @@ jobs:
           thread_id="smoke-test-$(date +%s)"
 
           first=$(curl -sf -X POST "$base/api/v1/chat" -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $API_SHARED_SECRET" \
             -d "{\"thread_id\": \"$thread_id\", \"question\": \"How many doors are on Level 01?\"}")
           echo "$first" | jq .
           disposition=$(echo "$first" | jq -r .disposition)
@@ -254,6 +285,7 @@ jobs:
           fi
 
           second=$(curl -sf -X POST "$base/api/v1/chat" -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $API_SHARED_SECRET" \
             -d "{\"thread_id\": \"$thread_id\", \"question\": \"And how many on Level 02?\"}")
           echo "$second" | jq .
           disposition=$(echo "$second" | jq -r .disposition)
