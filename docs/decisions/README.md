@@ -472,5 +472,12 @@ registration is removed and pass when restored. The frontend gate/blob-fetch mec
 verified end-to-end in a real browser (not just `tsc`/`vite build`): wrong key stays gated,
 correct key unlocks the app, and the IFC viewer, chat, trace fetch, drawing-page image, and
 evidence-crop image all load correctly through the authenticated path. 195 tests pass; `ruff
-check --select F,E9,I,F401` is clean; all `.bicep` files validated with `az bicep build`. Not run
-against a real Azure subscription this session.
+check --select F,E9,I,F401` is clean; all `.bicep` files validated with `az bicep build`.
+
+**Deployed and live-verified the same day** (`docs/reports/2026-09-09-m5-azure-deployment-baseline.md`):
+independently re-checked directly against the live app, not the deploy workflow's own report --
+no `Authorization` header returns `401`, a wrong key returns `401`, the real key returns the same
+correct answer the M3/M4 baselines already proved. Also found and resolved in this same pass: a
+CodeQL finding on storing the secret in browser storage (`js/clear-text-storage-of-sensitive-
+data`) — switched `localStorage` to `sessionStorage` and dismissed the resulting alert with a
+written justification specific to this shared, non-differentiated secret's security model.
