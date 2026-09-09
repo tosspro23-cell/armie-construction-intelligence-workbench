@@ -415,3 +415,62 @@ tests pass locally (186 + 3 new fault-injection tests, `tests/test_chat_persiste
 The Managed-Identity connection-string bug from the first pass (already fixed and tested before
 this second review) and the two live-Postgres bugs above were all re-verified against a real local
 Postgres (`docker compose up postgres`) after these additional changes, confirming no regression.
+
+## D-015 — Shared-secret authentication for the public API
+
+SPEC-M5 (`docs/specs/SPEC-M5-api-shared-secret-auth-v1.md`) closes D-012 Finding 1: any internet
+caller could reach `armiem3-web`'s public FQDN and call `/api/v1/chat`, consuming Azure OpenAI
+quota with no owner check. Verified live before writing the spec, not assumed: `az containerapp
+auth show` returned `{}` for both `armiem3-web` and `armiem3-api` (Container Apps' built-in Easy
+Auth is not enabled), `az containerapp ingress access-restriction list` returned `[]` (no IP
+restriction), and no route in `apps/api/app/main.py` declared any auth dependency.
+
+**Shared secret, not Entra ID login or IP restriction (OD-28, owner-explicit).** This is a
+demo/portfolio reference implementation with no real multi-tenant requirement; a shared secret
+closes the anonymous-access gap proportionally, without building a login system this project has
+no other use for. `app/security.py`'s `require_api_key` is registered once,
+`FastAPI(dependencies=[Depends(require_api_key)])`, so every route requires it uniformly —
+including any added later, with no per-route boilerplate or allowlist of "exempt" routes to
+maintain. A no-op when `api_shared_secret` is unset, the same opt-in-when-unset pattern as
+`database_url`/`otel_exporter_connection_string` (local development stays exactly as open as it
+already is). Uses `secrets.compare_digest`, not `==`, for the header comparison — a naive string
+comparison leaks how many leading characters of a guess were correct through response-time
+differences.
+
+**Explicit, honest limitation, not silently assumed away (D-004 discipline).** A single shared
+secret authenticates *possession of the secret*, not *identity*: anyone holding it can still query
+or cancel any other holder's requests on `/api/v1/requests/*`. This spec closes "random internet
+strangers can't get in at all"; it does not add per-caller ownership checks. Acceptable for this
+project's actual usage pattern (the owner, and anyone they hand the key to for a demo), not a
+gap this milestone claims to have fixed.
+
+**Found while writing the spec, not assumed:** two frontend endpoints (`/api/v1/project/pdf/pages/
+{page}.png`, `/api/v1/evidence/{filename}`) are loaded via raw `<img src=...>` tags, which cannot
+carry a custom `Authorization` header. Fixed with `apps/web/src/apiClient.tsx`'s `AuthedImage`
+component (`fetch` with the header → blob → `URL.createObjectURL`, revoked on cleanup) instead of
+the simpler-looking alternative of a query-string key, which would leak the secret into browser
+history and server access logs. This helper module is separate from `main.tsx` (not defined
+inline there) specifically because `IfcViewer.tsx` also calls the API directly and must not import
+from the app's entry module.
+
+**Azure: a Container Apps native secret, not Key Vault (OD-29, this spec's default, flagged for
+owner review).** SPEC-M3 deferred Key Vault because Managed Identity eliminated every secret
+Phase 1 needed; this is the first secret Managed Identity cannot eliminate (a browser/end user is
+not an Azure identity), but a whole Key Vault resource, access policy, and `secretRef` pointing at
+it is disproportionate to one shared demo key. `infra/bicep/apps.bicep`'s `apiSharedSecret` param
+is `@secure()`, required with no default (unlike `databaseUrl`, blank here would silently mean "no
+auth"), stored as a Container Apps `secrets` entry and surfaced via `secretRef`, not a plain env
+value. `azure-deploy.yml`'s new `api_shared_secret` input is masked with `::add-mask::` as the
+workflow's first step, since `workflow_dispatch` string inputs are not masked automatically the
+way repository secrets are.
+
+**Verification.** A `TestClient(app)`-based test (the first in this suite to route through
+FastAPI's real HTTP dispatch for `app.main.app` — every other test calls `main.chat()`/`resume()`
+directly as a plain coroutine, which does not run dependency injection) proves the dependency
+actually rejects a real unauthenticated request; confirmed to fail when the dependency
+registration is removed and pass when restored. The frontend gate/blob-fetch mechanism was
+verified end-to-end in a real browser (not just `tsc`/`vite build`): wrong key stays gated,
+correct key unlocks the app, and the IFC viewer, chat, trace fetch, drawing-page image, and
+evidence-crop image all load correctly through the authenticated path. 195 tests pass; `ruff
+check --select F,E9,I,F401` is clean; all `.bicep` files validated with `az bicep build`. Not run
+against a real Azure subscription this session.
