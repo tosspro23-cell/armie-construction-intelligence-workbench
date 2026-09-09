@@ -15,7 +15,7 @@
     "react-dom": "^18.3.1",
     "three": "0.149.0",
     "typescript": "^5.7.3",
-    "vite": "^5.4.14",
+    "vite": "^8.2.2",
     "web-ifc": "0.0.39",
     "web-ifc-three": "^0.0.126"
   },
