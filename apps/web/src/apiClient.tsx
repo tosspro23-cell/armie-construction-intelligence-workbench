@@ -24,6 +24,12 @@ export function getStoredApiKey(): string | null {
 }
 
 export function setStoredApiKey(key: string): void {
+  // codeql[js/clear-text-storage-of-sensitive-data] -- reviewed and
+  // accepted, not overlooked: see the comment above this function and
+  // SPEC-M5's §I addendum for why this specific shared-secret model
+  // (possession = access for every legitimate holder already) does not
+  // warrant a real server-side session just to avoid script-readable
+  // storage.
   try { sessionStorage.setItem(API_KEY_STORAGE_KEY, key); } catch { /* per-viewer convenience only; a private/blocked storage context just re-prompts next time */ }
 }
 
