@@ -244,3 +244,20 @@ shared store that each replica's own request-handling loop checks periodically, 
 reconcile with the pre-existing `asyncio.to_thread` cancellation gap (D-012/`docs/reports/
 2026-09-09-m3-independent-review-and-fixes.md`: cancelling the awaited future does not stop the
 worker thread already running `agent.invoke`).
+
+## M4: should CI run a real Postgres, and does a service container fit the "no network egress" policy?
+
+Raised by a second independent review of SPEC-M4 (D-013 addendum): `tests/test_postgres_persistence.py`
+and `tests/test_chat_persistence_failure_handling.py`'s live-database cases are skipped in CI
+(gated behind `TEST_DATABASE_URL`, unset there), verified only by a developer manually running
+`docker compose up postgres` locally -- which this session did, repeatedly, but CI itself never
+exercises the real Postgres-backed store implementations at all.
+
+The straightforward fix is a GitHub Actions `services: postgres:` block on the `backend` job
+(runs on the runner itself, no external network reachability once started). Whether that is
+consistent with `.github/workflows/ci.yml`'s own documented policy ("No Ollama, no model
+downloads, no secrets, no network egress beyond package registries") is genuinely ambiguous:
+pulling the `postgres:16-alpine` image is a Docker Hub fetch, which is arguably outside "package
+registries" read literally, even though the running container itself then makes no further
+network calls. Not decided here -- this needs an explicit owner call on how strictly that policy
+clause is meant to be read, not a unilateral interpretation in either direction.
