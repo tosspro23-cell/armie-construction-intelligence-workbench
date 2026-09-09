@@ -146,5 +146,11 @@ class PostgresAuditStore:
         events = []
         for row in rows:
             data = {**row.pop("payload"), **row}
+            # psycopg deserializes the UUID/TIMESTAMPTZ columns into native
+            # uuid.UUID/datetime objects; AuditEvent.id is a plain str
+            # (found running this against a real Postgres -- pydantic
+            # rejects a UUID object for a str field even though it accepts
+            # a datetime object for a datetime field without complaint).
+            data["id"] = str(data["id"])
             events.append(AuditEvent.model_validate(data))
         return events
