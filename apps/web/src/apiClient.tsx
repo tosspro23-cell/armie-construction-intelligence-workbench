@@ -8,14 +8,23 @@ import { useEffect, useState } from "react";
 // query-string key would. Shared between main.tsx and IfcViewer.tsx (not
 // defined in main.tsx itself) since IfcViewer.tsx also calls the API
 // directly and must not import from the app's entry module.
+// sessionStorage, not localStorage: cleared when the tab/browser closes
+// instead of sitting on disk indefinitely, which matters on a shared or
+// public machine. This does not eliminate the underlying trade-off CodeQL
+// flags (js/clear-text-storage-of-sensitive-data) -- any script-readable
+// browser storage is exposed to an XSS vulnerability on this page the
+// same way -- see D-015 for why that residual risk is accepted rather
+// than built around (a real per-user session/cookie flow) for a single
+// shared demo secret whose entire security model is already
+// "possession = access," not per-identity credentials.
 const API_KEY_STORAGE_KEY = "armie_api_key";
 
 export function getStoredApiKey(): string | null {
-  try { return localStorage.getItem(API_KEY_STORAGE_KEY); } catch { return null; }
+  try { return sessionStorage.getItem(API_KEY_STORAGE_KEY); } catch { return null; }
 }
 
 export function setStoredApiKey(key: string): void {
-  try { localStorage.setItem(API_KEY_STORAGE_KEY, key); } catch { /* per-viewer convenience only; a private/blocked storage context just re-prompts next time */ }
+  try { sessionStorage.setItem(API_KEY_STORAGE_KEY, key); } catch { /* per-viewer convenience only; a private/blocked storage context just re-prompts next time */ }
 }
 
 export function withAuthHeader(init?: RequestInit): RequestInit {

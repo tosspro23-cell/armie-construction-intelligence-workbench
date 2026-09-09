@@ -164,3 +164,31 @@ author was not told about).
   Container Apps native secret, not Azure Key Vault — disproportionate infrastructure
   for one shared demo key (see §C). Revisit if this project ever needs per-user
   secrets, rotation, or a real production posture.
+
+## §I addendum — CodeQL finding on the frontend storage choice
+
+CodeQL (enabled earlier this session) flagged `apiClient.tsx`'s `setStoredApiKey` as a
+high-severity `js/clear-text-storage-of-sensitive-data` finding on the PR opening this
+spec's §B commit range: the shared secret is stored unencrypted in browser storage,
+readable by any script on the page (an XSS vulnerability would expose it). Genuine
+finding, not a false positive — investigated rather than dismissed reflexively.
+
+Fixed the cheap, real part: switched `localStorage` → `sessionStorage` (cleared when the
+tab/browser closes instead of sitting on disk indefinitely — meaningfully better on a
+shared/public machine, no UX regression against this spec's own tested behaviour, since
+`sessionStorage` still survives a same-tab reload). This does **not** resolve the
+underlying CodeQL rule — any script-readable storage carries the same XSS-exposure
+property regardless of which Web Storage API is used; only an httpOnly cookie issued by
+a real server-side session (which this milestone deliberately does not build — OD-28
+already chose shared-secret auth specifically to avoid a login/session system) removes
+it.
+
+**Accepted, not built around, for this specific security model**: the alert is dismissed
+on the repository (with this reasoning recorded there and here) because this secret's
+entire security property is "possession = access" for every legitimate holder already —
+see this spec's Rationale on per-caller ownership not being a goal here. Client-side
+exposure of it to an XSS attacker does not grant that attacker anything beyond what any
+of this project's own intended users (the owner, or anyone they hand the key to) already
+has by design. This reasoning would not hold for a real per-user credential or an
+API key with differentiated privilege per holder — it holds specifically because this
+model has neither.
