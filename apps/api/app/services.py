@@ -1,7 +1,9 @@
 from typing import Callable
 
-from app.audit.store import AuditStore
 from app.config import Settings
+from app.persistence.audit_store import AuditStore
+from app.persistence.conversation_store import ConversationStore
+from app.persistence.factory import get_audit_store, get_conversation_store
 from app.providers.base import ModelProvider
 from app.providers.factory import get_escalation_provider, get_text_provider, get_vision_provider
 from app.tools.document.analyzer import DocumentAnalyzer
@@ -10,6 +12,8 @@ from app.tools.ifc.repository import IfcRepository
 TextProviderFactory = Callable[[Settings], ModelProvider]
 VisionProviderFactory = Callable[[Settings], ModelProvider]
 EscalationProviderFactory = Callable[[Settings], "ModelProvider | None"]
+ConversationStoreFactory = Callable[[Settings], ConversationStore]
+AuditStoreFactory = Callable[[Settings], AuditStore]
 
 
 class ServiceContainer:
@@ -29,9 +33,12 @@ class ServiceContainer:
         text_provider_factory: TextProviderFactory = get_text_provider,
         vision_provider_factory: VisionProviderFactory = get_vision_provider,
         escalation_provider_factory: EscalationProviderFactory = get_escalation_provider,
+        conversation_store_factory: ConversationStoreFactory = get_conversation_store,
+        audit_store_factory: AuditStoreFactory = get_audit_store,
     ) -> None:
         self.settings = settings
-        self.audit_store = AuditStore(settings.audit_store_path)
+        self.audit_store = audit_store_factory(settings)
+        self.conversation_store = conversation_store_factory(settings)
         self.ifc_repository = IfcRepository(settings.ifc_path)
         self.document_analyzer = DocumentAnalyzer(
             pdf_path=settings.pdf_path,

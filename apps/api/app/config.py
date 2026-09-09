@@ -64,8 +64,20 @@ class Settings(BaseSettings):
     # clarification.
     ollama_escalation_model: str | None = None
 
-    checkpoint_db_path: Path = Path("./runtime/checkpoints.sqlite")
     audit_store_path: Path = Path("./runtime/audit.jsonl")
+    # Postgres-backed conversation/audit persistence (SPEC-M4, OD-20/24) is
+    # opt-in, the same pattern as otel_exporter_connection_string above:
+    # unset keeps today's in-memory dict + local JSONL file behaviour, so no
+    # developer or CI environment is required to run Postgres. Setting it
+    # switches app.state.container's ConversationStore/AuditStore (see
+    # app/persistence/factory.py) to the Postgres-backed implementations.
+    database_url: str | None = None
+    # Authenticate to Postgres with an Entra ID access token obtained via
+    # DefaultAzureCredential instead of a password embedded in database_url
+    # -- continuing OD-23's zero-stored-secret posture onto this project's
+    # second Azure-managed data resource (OD-26). Only meaningful in Azure;
+    # local development against a local Postgres uses a plain password.
+    database_use_managed_identity: bool = False
     evidence_dir: Path = Path("./runtime/evidence")
     route_confidence_threshold: float = 0.70
     pdf_confidence_threshold: float = 0.75

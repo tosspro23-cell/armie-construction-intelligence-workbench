@@ -254,7 +254,6 @@ def test_f7_stalled_provider_produces_a_distinct_timeout_disposition(tmp_path: P
     container, service = _service(settings, fake)
     main_module.app.state.container = container
     main_module.app.state.agent = service
-    main_module.app.state.conversations = {}
     main_module.app.state.requests = {}
 
     response = asyncio.run(main_module.chat(ChatRequest(question=QUESTION)))
@@ -318,7 +317,6 @@ def test_f10_cancellation_produces_cancelled_disposition_without_context_mutatio
     container, service = _service(settings, fake)
     main_module.app.state.container = container
     main_module.app.state.agent = service
-    main_module.app.state.conversations = {}
     main_module.app.state.requests = {}
 
     async def run() -> None:
@@ -327,7 +325,7 @@ def test_f10_cancellation_produces_cancelled_disposition_without_context_mutatio
         task.cancel()
         response = await task
         assert response.disposition.value == "cancelled"
-        assert "thread-f10" not in main_module.app.state.conversations
+        assert main_module.app.state.container.conversation_store.get("thread-f10") is None
 
     asyncio.run(run())
 

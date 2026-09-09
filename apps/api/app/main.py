@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse
 
 from app.agent.graph import AgentService
 from app.config import get_settings
+from app.persistence.conversation_store import ConversationStore
 from app.schemas.models import (
     AgentResponse,
     AuditEvent,
@@ -27,7 +28,13 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     app.state.container = ServiceContainer(settings)
     app.state.agent = AgentService(app.state.container)
-    app.state.conversations = {}
+    # app.state.requests is intentionally never persisted (SPEC-M4 §Excluded
+    # scope): each record holds a live asyncio.Task used for cancellation,
+    # which has no meaningful representation outside the event loop that
+    # created it. Conversation context and audit events, in contrast, move
+    # to ServiceContainer.conversation_store/.audit_store (SPEC-M4 §A/B),
+    # which durably persist across a process restart when configured with
+    # DATABASE_URL.
     app.state.requests = {}
     yield
 
@@ -134,11 +141,11 @@ def _terminal_response(request: ChatRequest, request_id: str, disposition: Dispo
 @app.post("/api/v1/chat")
 async def chat(request: ChatRequest):
     agent: AgentService = app.state.agent
-    contexts: dict = app.state.conversations
+    conversations: ConversationStore = app.state.container.conversation_store
     request_id = request.request_id or str(uuid4())
     record = {"status": "running", "stage": "queued", "task": asyncio.current_task(), "trace_id": request_id}
     app.state.requests[request_id] = record
-    context = contexts.get(request.thread_id or "", {})
+    context = conversations.get(request.thread_id or "") or {}
     record["stage"] = "agent_execution"
     started = time.perf_counter()
     try:
@@ -172,24 +179,24 @@ async def chat(request: ChatRequest):
     if response.disposition.value in {"answered", "clarification_required"}:
         context_update = response.context_update
         if context_update:
-            contexts[response.thread_id] = context_update
+            conversations.set(response.thread_id, context_update)
         else:
             trace = app.state.container.audit_store.by_trace(response.trace_id)
             latest_plan = next((event.payload.get("plan") for event in reversed(trace) if event.event_type == "route_selected"), None)
-            contexts[response.thread_id] = {
+            conversations.set(response.thread_id, {
                 "previous_query_plan": latest_plan,
                 "active_entity_type": latest_plan.get("entity_type") if latest_plan else None,
                 "active_filters": latest_plan.get("filters", {}) if latest_plan else {},
                 "active_group_by": latest_plan.get("group_by") if latest_plan else None,
                 "evidence_refs": [citation.evidence_id for citation in response.citations],
-            }
+            })
     return response
 
 
 @app.post("/api/v1/chat/{thread_id}/resume")
 async def resume(thread_id: str, request: ClarificationResumeRequest):
-    contexts: dict = app.state.conversations
-    if thread_id not in contexts:
+    conversations: ConversationStore = app.state.container.conversation_store
+    if conversations.get(thread_id) is None:
         raise HTTPException(status_code=404, detail="No resumable conversation was found for this thread.")
     return await chat(ChatRequest(thread_id=thread_id, question=request.answer))
 
