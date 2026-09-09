@@ -15,6 +15,12 @@ on:
       azure_openai_account_name:
         description: "Name of an EXISTING Azure OpenAI account in that resource group (SPEC-M3 infra/bicep/platform.bicep is not authorized to create one -- see its header comment)"
         required: true
+      azure_openai_text_deployment:
+        description: "Name of an EXISTING model deployment on that account, for text interpretation. No default on purpose: an independent review found this workflow previously omitted this parameter entirely, letting Bicep's own default ('gpt-4o-mini') silently deploy against a model that did not exist on the real account -- the deployment 'succeeded' and nothing caught it until a real question was asked."
+        required: true
+      azure_openai_vision_deployment:
+        description: "Name of an EXISTING model deployment on that account, for vision-grounded calls (can be the same value as the text deployment)."
+        required: true
       name_prefix:
         description: "Short resource-name prefix (lowercase alphanumeric, 3-11 chars)"
         required: false
@@ -33,6 +39,24 @@ jobs:
     name: Deploy Phase 1 vertical slice
     runs-on: ubuntu-latest
     env:
+      # Every workflow_dispatch input is threaded through job-level env vars
+      # and referenced as a shell variable ($FOO) in every run: step below,
+      # never as a raw ${{ inputs.* }} substitution inside a script body.
+      # An independent review found the previous version interpolated
+      # inputs.* directly into run: scripts -- GitHub Actions performs plain
+      # text substitution of ${{ }} expressions before bash ever sees the
+      # script, so an input containing shell metacharacters (e.g. a
+      # command substitution) would execute with this workflow's Azure
+      # permissions. Confirmed live with a harmless probe input containing
+      # $(...) before this fix. Anyone who can dispatch this workflow can
+      # already deploy arbitrary container images into this resource group,
+      # so this is defense-in-depth against a future access-scope change,
+      # not a response to an active anonymous-attacker path.
+      RESOURCE_GROUP: ${{ inputs.resource_group }}
+      AZURE_OPENAI_ACCOUNT_NAME: ${{ inputs.azure_openai_account_name }}
+      AZURE_OPENAI_TEXT_DEPLOYMENT: ${{ inputs.azure_openai_text_deployment }}
+      AZURE_OPENAI_VISION_DEPLOYMENT: ${{ inputs.azure_openai_vision_deployment }}
+      NAME_PREFIX: ${{ inputs.name_prefix }}
       # workflow_dispatch input defaults can't reference expressions like
       # github.sha directly, so the fallback lives here instead.
       IMAGE_TAG: ${{ inputs.image_tag || github.sha }}
@@ -43,7 +67,10 @@ jobs:
       # repository, matching this milestone's Managed-Identity-only
       # invariant (SPEC-M3 §7) at the CI/CD layer too. The federated
       # credential trusting this workflow must be set up once, out-of-band,
-      # by whoever owns the target subscription.
+      # by whoever owns the target subscription. Its OIDC token subject
+      # includes GitHub's immutable org/repo numeric IDs
+      # (repo:org@id/repo@id:ref:...), not just names -- found live the
+      # first time this workflow actually ran (D-012).
       - name: Log in to Azure (OIDC)
         uses: azure/login@v2
         with:
@@ -51,20 +78,41 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
+      # Refuse to deploy at all if the requested model deployments don't
+      # exist, instead of letting Bicep silently fall back to a default
+      # that doesn't -- this is the direct fix for the incident above.
+      - name: Verify the requested Azure OpenAI deployments exist
+        run: |
+          set -euo pipefail
+          existing=$(az cognitiveservices account deployment list \
+            --name "$AZURE_OPENAI_ACCOUNT_NAME" \
+            --resource-group "$RESOURCE_GROUP" \
+            --query "[].name" -o tsv)
+          echo "Existing deployments on $AZURE_OPENAI_ACCOUNT_NAME:"
+          echo "$existing"
+          for wanted in "$AZURE_OPENAI_TEXT_DEPLOYMENT" "$AZURE_OPENAI_VISION_DEPLOYMENT"; do
+            if ! grep -qxF "$wanted" <<< "$existing"; then
+              echo "::error::Deployment '$wanted' does not exist on $AZURE_OPENAI_ACCOUNT_NAME. Refusing to deploy Container Apps pointed at a model that isn't there."
+              exit 1
+            fi
+          done
+
       - name: Deploy platform prerequisites (registry, identity, monitoring, role assignments)
         id: platform
         run: |
           az deployment group create \
-            --resource-group "${{ inputs.resource_group }}" \
+            --resource-group "$RESOURCE_GROUP" \
             --template-file infra/bicep/platform.bicep \
-            --parameters namePrefix="${{ inputs.name_prefix }}" \
-                         azureOpenAiAccountName="${{ inputs.azure_openai_account_name }}" \
+            --parameters namePrefix="$NAME_PREFIX" \
+                         azureOpenAiAccountName="$AZURE_OPENAI_ACCOUNT_NAME" \
             --query properties.outputs -o json > platform-outputs.json
           cat platform-outputs.json
           echo "acr_login_server=$(jq -r .acrLoginServer.value platform-outputs.json)" >> "$GITHUB_OUTPUT"
           echo "acr_name=$(jq -r .acrName.value platform-outputs.json)" >> "$GITHUB_OUTPUT"
           echo "identity_id=$(jq -r .identityId.value platform-outputs.json)" >> "$GITHUB_OUTPUT"
           echo "identity_client_id=$(jq -r .identityClientId.value platform-outputs.json)" >> "$GITHUB_OUTPUT"
+          echo "web_identity_id=$(jq -r .webIdentityId.value platform-outputs.json)" >> "$GITHUB_OUTPUT"
+          echo "web_identity_client_id=$(jq -r .webIdentityClientId.value platform-outputs.json)" >> "$GITHUB_OUTPUT"
           echo "log_analytics_name=$(jq -r .logAnalyticsName.value platform-outputs.json)" >> "$GITHUB_OUTPUT"
           echo "app_insights_connection_string=$(jq -r .appInsightsConnectionString.value platform-outputs.json)" >> "$GITHUB_OUTPUT"
           echo "azure_openai_endpoint=$(jq -r .azureOpenAiEndpoint.value platform-outputs.json)" >> "$GITHUB_OUTPUT"
@@ -82,37 +130,72 @@ jobs:
       - name: Build and push API image
         run: |
           docker build -f apps/api/Dockerfile \
-            -t "${{ steps.platform.outputs.acr_login_server }}/armie-api:${{ env.IMAGE_TAG }}" \
+            -t "${{ steps.platform.outputs.acr_login_server }}/armie-api:$IMAGE_TAG" \
             .
-          docker push "${{ steps.platform.outputs.acr_login_server }}/armie-api:${{ env.IMAGE_TAG }}"
+          docker push "${{ steps.platform.outputs.acr_login_server }}/armie-api:$IMAGE_TAG"
 
       - name: Build and push web image
         run: |
           docker build -f apps/web/Dockerfile \
-            -t "${{ steps.platform.outputs.acr_login_server }}/armie-web:${{ env.IMAGE_TAG }}" \
+            -t "${{ steps.platform.outputs.acr_login_server }}/armie-web:$IMAGE_TAG" \
             .
-          docker push "${{ steps.platform.outputs.acr_login_server }}/armie-web:${{ env.IMAGE_TAG }}"
+          docker push "${{ steps.platform.outputs.acr_login_server }}/armie-web:$IMAGE_TAG"
 
       - name: Deploy Container Apps
         id: apps
         run: |
           az deployment group create \
-            --resource-group "${{ inputs.resource_group }}" \
+            --resource-group "$RESOURCE_GROUP" \
             --template-file infra/bicep/apps.bicep \
-            --parameters namePrefix="${{ inputs.name_prefix }}" \
+            --parameters namePrefix="$NAME_PREFIX" \
                          acrLoginServer="${{ steps.platform.outputs.acr_login_server }}" \
                          identityId="${{ steps.platform.outputs.identity_id }}" \
                          identityClientId="${{ steps.platform.outputs.identity_client_id }}" \
+                         webIdentityId="${{ steps.platform.outputs.web_identity_id }}" \
                          logAnalyticsName="${{ steps.platform.outputs.log_analytics_name }}" \
                          appInsightsConnectionString="${{ steps.platform.outputs.app_insights_connection_string }}" \
                          azureOpenAiEndpoint="${{ steps.platform.outputs.azure_openai_endpoint }}" \
-                         apiImage="${{ steps.platform.outputs.acr_login_server }}/armie-api:${{ env.IMAGE_TAG }}" \
-                         webImage="${{ steps.platform.outputs.acr_login_server }}/armie-web:${{ env.IMAGE_TAG }}" \
+                         azureOpenAiTextDeployment="$AZURE_OPENAI_TEXT_DEPLOYMENT" \
+                         azureOpenAiVisionDeployment="$AZURE_OPENAI_VISION_DEPLOYMENT" \
+                         apiImage="${{ steps.platform.outputs.acr_login_server }}/armie-api:$IMAGE_TAG" \
+                         webImage="${{ steps.platform.outputs.acr_login_server }}/armie-web:$IMAGE_TAG" \
             --query properties.outputs -o json > apps-outputs.json
           cat apps-outputs.json
+          echo "web_app_fqdn=$(jq -r .webAppFqdn.value apps-outputs.json)" >> "$GITHUB_OUTPUT"
+
+      # Directly answers an independent review's finding that a prior
+      # deployment "succeeded" while the model-backed answer path was
+      # actually broken (wrong deployment name) and nothing noticed. Both
+      # the deterministic (zero-model-call) and the semantic (real model
+      # call) paths are exercised; the workflow fails if either does not
+      # come back "answered" or "clarification_required" (a "clarification"
+      # is a legitimate, non-broken outcome; "error" is not).
+      - name: Post-deploy smoke test (deterministic path AND real model path)
+        run: |
+          set -euo pipefail
+          base="https://${{ steps.apps.outputs.web_app_fqdn }}"
+          echo "Smoke-testing $base"
+
+          deterministic=$(curl -sf -X POST "$base/api/v1/chat" -H "Content-Type: application/json" \
+            -d '{"question": "How many doors are in this project?"}')
+          echo "$deterministic" | jq .
+          disposition=$(echo "$deterministic" | jq -r .disposition)
+          if [ "$disposition" != "answered" ]; then
+            echo "::error::Deterministic smoke question returned disposition=$disposition, expected answered"
+            exit 1
+          fi
+
+          semantic=$(curl -sf -X POST "$base/api/v1/chat" -H "Content-Type: application/json" \
+            -d '{"question": "Please describe the situation with the doors in this project in your own words."}')
+          echo "$semantic" | jq .
+          disposition=$(echo "$semantic" | jq -r .disposition)
+          if [ "$disposition" = "error" ]; then
+            echo "::error::Model-backed smoke question returned disposition=error -- the Azure OpenAI path is broken (check the deployment names actually exist and match what was just verified above)."
+            exit 1
+          fi
 
       - name: Print deployment summary
         run: |
           echo "### Deployed" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Web app: https://$(jq -r .webAppFqdn.value apps-outputs.json)" >> "$GITHUB_STEP_SUMMARY"
-          echo "- API (internal only, not publicly reachable): $(jq -r .apiInternalUrl.value apps-outputs.json)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Web app: https://${{ steps.apps.outputs.web_app_fqdn }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Smoke test: deterministic path answered, model path did not error" >> "$GITHUB_STEP_SUMMARY"
