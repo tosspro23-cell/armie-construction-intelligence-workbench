@@ -18,10 +18,19 @@ param namePrefix string = 'armiem3'
 
 param location string = resourceGroup().location
 
-@description('The API app\'s managed identity (platform.bicep output: identityId) -- becomes this server\'s sole Microsoft Entra administrator. A dedicated, least-privilege AAD role for the API identity is not set up here: this is a single-app, single-identity deployment (no multi-tenant scenario yet), and doing least-privilege properly needs a post-deploy SQL step (CREATE ROLE ... IN ROLE azure_ad_user) Bicep cannot express. A simplifying default for this milestone, not an owner decision -- flagged the same way platform.bicep flags azureOpenAiAccountName not being created by that template.')
+@description('Object ID of the principal that deploys/administers this server -- the same OIDC service principal azure-deploy.yml already authenticates as (azure/login, secrets.AZURE_CLIENT_ID), which already holds Contributor + Role Based Access Control Administrator on this resource group (D-012). Becomes the Flexible Server\'s sole Microsoft Entra administrator. NOT the API\'s runtime managed identity (see apiIdentityPrincipalId below) -- an earlier version of this template made the runtime identity itself the AAD admin, which is full database-admin privilege for a container whose actual job is two INSERT/SELECT/UPDATE statements; an independent review correctly flagged that a compromised API process would then be able to modify or delete audit records outright, defeating this project\'s own independent-verification/audit-integrity invariant (D-004). Fixed by separating "who can administer this server" from "what the running app can do to it."')
+param deployPrincipalId string
+
+@description('Display name of the deploy principal above, required by the Flexible Server AAD administrator resource alongside its object ID.')
+param deployPrincipalName string
+
+@description('\'User\' for a human deploying by hand (e.g. via az login), \'ServicePrincipal\' for azure-deploy.yml\'s OIDC app registration (the expected case).')
+@allowed(['User', 'ServicePrincipal'])
+param deployPrincipalType string = 'ServicePrincipal'
+
+@description('The API app\'s managed identity (platform.bicep output: identityId/identityPrincipalId/identityName) -- NOT granted admin here. Used only as documentation of which identity apps/api/migrations/0002_grant_api_runtime_role.sql must be run for after this template deploys: that script creates a plain (non-admin) AAD-mapped Postgres role for exactly this identity and grants it SELECT/INSERT/UPDATE on the two SPEC-M4 tables only -- nothing else, not even DELETE (matching AuditStore\'s append-only interface). Kept as an explicit parameter, not just a comment, so a future automation step has something to bind the migration script\'s target identity to without re-deriving it.')
 param apiIdentityPrincipalId string
 
-@description('The API app managed identity\'s display name, required by the Flexible Server AAD administrator resource alongside its principal ID.')
 param apiIdentityName string
 
 param tenantId string = subscription().tenantId
@@ -56,17 +65,28 @@ resource postgres 'Microsoft.DBforPostgreSQL/flexibleServers@2024-08-01' = {
     // scope-control precedent: defer infrastructure a capability doesn't
     // yet require). The Container Apps environment in apps.bicep has no
     // VNet integration either, so it can only reach a Postgres Flexible
-    // Server over its public endpoint; the firewall rule below is Azure's
-    // documented mechanism for "reachable from Azure services," not the
-    // open internet, and with passwordAuth disabled a network path alone
-    // is not a valid credential -- a caller still needs a real Entra ID
-    // token for apiIdentityPrincipalId.
+    // Server over its public endpoint -- see the firewall rule below for
+    // exactly what that means, corrected after an independent review
+    // pointed out the previous wording overstated it.
     network: {
       publicNetworkAccess: 'Enabled'
     }
   }
 }
 
+// NOT "reachable only from your Azure resources" -- an independent review
+// correctly caught an earlier version of this comment overstating that.
+// Microsoft's own documentation for this exact 0.0.0.0-0.0.0.0 rule name
+// (https://learn.microsoft.com/azure/postgresql/security/security-firewall-rules)
+// says it allows connections from *any* Azure resource in *any*
+// subscription, including other customers' -- not a network boundary
+// scoped to this resource group or this project. With passwordAuth
+// disabled server-wide (authConfig above), a network path here is not by
+// itself a valid credential -- a caller still needs a real Entra ID token
+// for a principal this server actually recognizes -- but this rule should
+// not be described as private network isolation, because it is not.
+// Tightening this to a real private endpoint / VNet integration is
+// deferred (SPEC-M3's scope-control precedent: no VNet in this milestone).
 resource allowAzureServices 'Microsoft.DBforPostgreSQL/flexibleServers/firewallRules@2024-08-01' = {
   parent: postgres
   name: 'AllowAllAzureServicesAndResourcesWithinAzureIps'
@@ -83,10 +103,10 @@ resource database 'Microsoft.DBforPostgreSQL/flexibleServers/databases@2024-08-0
 
 resource aadAdmin 'Microsoft.DBforPostgreSQL/flexibleServers/administrators@2024-08-01' = {
   parent: postgres
-  name: apiIdentityPrincipalId
+  name: deployPrincipalId
   properties: {
-    principalType: 'ServicePrincipal'
-    principalName: apiIdentityName
+    principalType: deployPrincipalType
+    principalName: deployPrincipalName
     tenantId: tenantId
   }
 }
