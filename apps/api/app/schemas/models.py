@@ -141,6 +141,13 @@ class QueryPlan(BaseModel):
         "space_distance",
     ] | None = None
     entity_type: str | None = None
+    # SPEC-M6: which configured PDF document (by filename) this plan
+    # targets. None means "search every configured document" -- today's
+    # only possible behaviour, and still the default with one document
+    # configured. Settable only via an explicit source_preference override
+    # in this milestone (app/agent/router.py); natural-language document-
+    # name inference is SPEC-M7's concern, not this field's.
+    requested_document: str | None = None
     filters: dict[str, Any] = Field(default_factory=dict)
     group_by: Literal["storey", "space", "type", "none"] | None = None
     # `group_by` is the only grouping representation. Execution modifiers are

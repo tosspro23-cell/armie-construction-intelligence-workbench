@@ -1027,17 +1027,113 @@ Return only a corrected MultiQueryPlan JSON object."""
                 }}, "tool_call_count": state.get("tool_call_count", 0) + 1}
             return {"tool_result": self._error_result(str(error))}
 
+    def _execute_pdf_multi_document(
+        self, state: GraphState, plan: QueryPlan, query: DocumentQueryInput,
+        analyzers: dict[str, Any], tool_call_count: int, model_call_count: int,
+    ) -> dict:
+        """SPEC-M6's naive, deterministic multi-document baseline: no vision
+        escalation, no document-name inference -- just native_lookup against
+        every configured document, in configured order, zero model calls.
+
+        Exists to make two failure modes honestly visible rather than
+        guessed past: a field answerable from more than one document
+        (precision failure), and a realistically-phrased question whose
+        answer exists only under different vocabulary than any table uses,
+        so no document matches at all (recall failure -- indistinguishable
+        here from a genuine no-answer case, which is the point: this
+        baseline cannot tell them apart, and that inability is the evidence
+        baseline SPEC-M7 (Azure AI Search) is meant to beat, not an
+        assumption). Only reached when `plan.requested_document` is unset
+        and more than one document is configured -- see `_execute_pdf`.
+        """
+        hits: list[tuple[str, Any]] = []
+        for filename, analyzer in analyzers.items():
+            result = analyzer.native_lookup(query)
+            self._audit(
+                state, "execute_pdf", "tool_completed",
+                f"Deterministic native-text extraction attempted against {filename}.",
+                {"document": filename, "confidence": result.confidence, "extraction_method": result.extraction_method},
+            )
+            if result.confidence >= self.settings.pdf_confidence_threshold and result.value is not None:
+                hits.append((filename, result))
+
+        if len(hits) == 1:
+            filename, result = hits[0]
+            # Evidence.source_file already names the right document (each
+            # DocumentAnalyzer stamps its own pdf_path.name), but Citation/
+            # _citations only surfaces `locator`, not source_file directly --
+            # add it there too so a multi-document answer's citation actually
+            # says which document it came from, not just the audit trail.
+            evidence = [item.model_copy(update={"locator": {**item.locator, "document": filename}}) for item in result.evidence]
+            citations = self._citations(evidence)
+            evidence_result = EvidenceVerifier().verify(evidence, self.settings.pdf_confidence_threshold)
+            status = verification_status([
+                evidence_result,
+                InvariantValidator().validate(evidence=evidence, citations=[Citation.model_validate(item) for item in citations], disposition="answered"),
+            ])
+            return {"tool_result": {
+                "answer": str(result.value),
+                "disposition": "answered", "citations": citations, "verification": status.model_dump(),
+                "context_update": {
+                    "active_source": SourceType.PDF.value, "previous_query_plan": plan.model_dump(),
+                    "evidence_refs": [item.id for item in evidence],
+                },
+            }, "evidence": [item.model_dump() for item in evidence], "tool_call_count": tool_call_count, "model_call_count": model_call_count}
+
+        if len(hits) > 1:
+            candidates = [filename for filename, _ in hits]
+            self._audit(
+                state, "execute_pdf", "clarification_requested",
+                "The requested field is answerable from more than one configured document; refusing to guess between them.",
+                {"candidate_documents": candidates},
+            )
+            return {"tool_result": {
+                "answer": f"This field is answerable from more than one document ({', '.join(candidates)}); please specify which one you mean.",
+                "disposition": "clarification_required", "citations": [],
+                "verification": VerificationStatus(status="not_applicable", reason="Cross-document match was not unique.").model_dump(),
+                "context_update": {"active_source": SourceType.PDF.value, "previous_query_plan": plan.model_dump()},
+            }, "tool_call_count": tool_call_count, "model_call_count": model_call_count}
+
+        self._audit(
+            state, "execute_pdf", "clarification_requested",
+            "No configured document produced a confident deterministic match for this field.",
+            {"documents_checked": list(analyzers.keys())},
+        )
+        return {"tool_result": {
+            "answer": "I could not find this field with a confident match in any configured document.",
+            "disposition": "clarification_required", "citations": [],
+            "verification": VerificationStatus(status="not_applicable", reason="No document produced a confident deterministic match.").model_dump(),
+            "context_update": {"active_source": SourceType.PDF.value, "previous_query_plan": plan.model_dump()},
+        }, "tool_call_count": tool_call_count, "model_call_count": model_call_count}
+
     def _execute_pdf(self, state: GraphState) -> dict:
         plan = QueryPlan.model_validate(state["plan"])
         query = DocumentQueryInput(
             field=plan.requested_field or state["question"],
             question=state["question"],
         )
-        self._audit(state, "execute_pdf", "tool_called", "PDF document tool invoked.", {"query": query.model_dump()})
+        self._audit(state, "execute_pdf", "tool_called", "PDF document tool invoked.", {"query": query.model_dump(), "requested_document": plan.requested_document})
         try:
             tool_call_count = state.get("tool_call_count", 0) + 1
             model_call_count = state.get("model_call_count", 0)
-            result = self.container.document_analyzer.native_lookup(query)
+            analyzers = self.container.document_analyzers
+            analyzer: Any = None
+            if plan.requested_document is not None:
+                analyzer = analyzers.get(plan.requested_document)
+                if analyzer is None:
+                    self._audit(state, "execute_pdf", "error", "Requested document is not part of the configured corpus.", {"requested_document": plan.requested_document, "configured_documents": list(analyzers.keys())})
+                    return {"tool_result": self._error_result(f"Requested document '{plan.requested_document}' is not part of the configured document corpus.")}
+            elif len(analyzers) > 1:
+                # SPEC-M6: more than one document configured and no explicit
+                # target -- resolve deterministically, at zero model calls.
+                # Never falls through to vision below: vision can resolve
+                # "what's on this page," not "which document," so it cannot
+                # help with either failure mode this branch exists to
+                # surface honestly (see _execute_pdf_multi_document).
+                return self._execute_pdf_multi_document(state, plan, query, analyzers, tool_call_count, model_call_count)
+            else:
+                analyzer = next(iter(analyzers.values()))
+            result = analyzer.native_lookup(query)
             self._audit(
                 state,
                 "execute_pdf",
@@ -1061,8 +1157,8 @@ Return only a corrected MultiQueryPlan JSON object."""
                     {"native_confidence": result.confidence, "miss_reason": result.miss_reason},
                 )
             elif result.confidence < self.settings.pdf_confidence_threshold:
-                board = self.container.document_analyzer.target_board(query.question)
-                field = self.container.document_analyzer.target_field(query.question)
+                board = analyzer.target_board(query.question)
+                field = analyzer.target_field(query.question)
                 self._audit(
                     state,
                     "execute_pdf",
@@ -1073,7 +1169,7 @@ Return only a corrected MultiQueryPlan JSON object."""
                 if board and field:
                     provider = self.container.vision_provider_factory(self.settings)
                     self._audit(state, "execute_pdf", "model_called", "PDF board-localization model call started.", {"purpose": "pdf_board_localize", "board": board}, actual_provider=provider.name, actual_model=provider.model)
-                    location, _ = asyncio.run(self.container.document_analyzer.localize_board(provider, query, board))
+                    location, _ = asyncio.run(analyzer.localize_board(provider, query, board))
                     model_call_count += 1
                     # Some vision providers correctly identify the requested board in
                     # their rationale but omit the redundant `board` field. The typed
@@ -1090,13 +1186,13 @@ Return only a corrected MultiQueryPlan JSON object."""
                             "context_update": {"active_source": SourceType.PDF.value, "previous_query_plan": plan.model_dump()},
                         }, "tool_call_count": tool_call_count, "model_call_count": model_call_count}
                     self._audit(state, "execute_pdf", "model_called", "Board-localized PDF crop sent to candidate extractor.", {"purpose": "pdf_board_extract", "board_bbox": location.bbox}, actual_provider=provider.name, actual_model=provider.model)
-                    candidates, crop = asyncio.run(self.container.document_analyzer.board_candidates(provider, query, board, location.bbox))
+                    candidates, crop = asyncio.run(analyzer.board_candidates(provider, query, board, location.bbox))
                     model_call_count += 1
                     normalized = [
                         candidate for candidate in candidates.candidates
                         if (candidate.board or board).upper() == board
-                        and self.container.document_analyzer.canonical_field(candidate.field)
-                        == self.container.document_analyzer.canonical_field(field)
+                        and analyzer.canonical_field(candidate.field)
+                        == analyzer.canonical_field(field)
                         and candidate.value is not None
                     ]
                     self._audit(state, "execute_pdf", "model_completed", "Board-localized candidate extraction completed.", {"candidate_count": len(candidates.candidates), "valid_candidate_count": len(normalized), "candidates": [item.model_dump() for item in candidates.candidates], "ambiguity": candidates.ambiguity}, actual_provider=provider.name, actual_model=provider.model)
@@ -1109,11 +1205,11 @@ Return only a corrected MultiQueryPlan JSON object."""
                         }, "tool_call_count": tool_call_count, "model_call_count": model_call_count}
                     candidate = normalized[0]
                     self._audit(state, "execute_pdf", "model_called", "Independent same-crop PDF verifier started.", {"purpose": "pdf_board_verify", "candidate": candidate.model_dump()}, actual_provider=provider.name, actual_model=provider.model)
-                    verification = asyncio.run(self.container.document_analyzer.verify_board_candidate(provider, query, board, candidate, crop))
+                    verification = asyncio.run(analyzer.verify_board_candidate(provider, query, board, candidate, crop))
                     model_call_count += 1
                     self._audit(state, "execute_pdf", "model_completed", "Independent same-crop PDF verification completed.", {"verification": verification.model_dump()}, actual_provider=provider.name, actual_model=provider.model)
                     evidence = [Evidence(
-                        source_type=SourceType.PDF, source_file=self.settings.pdf_file,
+                        source_type=SourceType.PDF, source_file=analyzer.pdf_path.name,
                         summary=f"{board} · {field}: {candidate.value}{(' ' + candidate.unit) if candidate.unit else ''}",
                         locator={"page": query.page_hint or 1, "bbox": location.bbox, "field": field, "board": board, "extraction_method": "board_localized_vision", "evidence_crop": crop.name},
                         extracted_value=candidate.value, confidence=candidate.confidence,
@@ -1131,13 +1227,13 @@ Return only a corrected MultiQueryPlan JSON object."""
                 provider = self.container.vision_provider_factory(self.settings)
                 self._audit(state, "execute_pdf", "model_called", "PDF page sent to the vision extractor.", {"purpose": "pdf_extract"}, actual_provider=provider.name, actual_model=provider.model)
                 result = asyncio.run(
-                    self.container.document_analyzer.vision_lookup(provider, query)
+                    analyzer.vision_lookup(provider, query)
                 )
                 model_call_count += 1
                 self._audit(state, "execute_pdf", "model_completed", "PDF vision extraction completed.", {"value": result.value, "bbox": result.bbox, "ambiguity": result.ambiguity}, actual_provider=provider.name, actual_model=provider.model)
                 self._audit(state, "execute_pdf", "model_called", "Independent PDF evidence verifier invoked.", {"purpose": "pdf_verify"}, actual_provider=provider.name, actual_model=provider.model)
                 visual_verification = asyncio.run(
-                    self.container.document_analyzer.verify_vision_extraction(provider, query, result)
+                    analyzer.verify_vision_extraction(provider, query, result)
                 )
                 model_call_count += 1
                 self._audit(state, "execute_pdf", "model_completed", "Independent PDF evidence verification completed.", {"supported": visual_verification.supported, "confidence": visual_verification.confidence, "rationale": visual_verification.rationale}, actual_provider=provider.name, actual_model=provider.model)
@@ -1179,7 +1275,11 @@ Return only a corrected MultiQueryPlan JSON object."""
             if "OPENAI_API_KEY is required" in str(error):
                 evidence = [Evidence(
                     source_type=SourceType.PDF,
-                    source_file=self.settings.pdf_file,
+                    # `analyzer` may be unbound here if the exception came from
+                    # _execute_pdf_multi_document (raised before any single
+                    # `analyzer` was ever selected) -- fall back to the
+                    # primary configured document's name in that case.
+                    source_file=(analyzer.pdf_path.name if analyzer is not None else next(iter(analyzers.keys()), "unknown")),
                     summary="The electrical schedule requires a configured vision provider for reliable table extraction.",
                     locator={
                         "page": 1,
