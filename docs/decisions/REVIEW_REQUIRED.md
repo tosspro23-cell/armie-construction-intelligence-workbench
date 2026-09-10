@@ -219,6 +219,16 @@ independently re-checked directly against the live app -- no `Authorization` hea
 key both return `401`; the real key returns the same correct answer the M3/M4 baselines already
 proved, unaffected by this milestone.
 
+**Further resolved, 2026-09-10 (D-016):** the "any holder can query or cancel any other holder's
+requests" gap named above is now closed. `POST /api/v1/session` issues a server-generated,
+per-tab caller-correlation token; `app.state.requests` records which session created each entry;
+`GET /api/v1/requests/{id}` and `POST /api/v1/requests/{id}/cancel` both 404 a session mismatch
+before revealing anything. Explicit, not silently broadened: this is caller correlation, not a
+new identity/authentication layer (OD-28's shared-secret choice stands unchanged), and a request
+created without the session flow (a direct API script) stays unrestricted, matching pre-D-016
+behaviour rather than breaking non-browser callers. Rate limiting/abuse throttling is still not
+bundled in -- unchanged, still open.
+
 ## PARTIALLY RESOLVED by M4: audit/evidence is not persisted across Container App revisions
 
 Found by the same independent review, confirmed directly: `audit_store_path` and `evidence_dir`
