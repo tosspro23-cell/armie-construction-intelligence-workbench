@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
@@ -21,7 +21,7 @@ from app.schemas.models import (
     Disposition,
     VerificationStatus,
 )
-from app.security import require_api_key
+from app.security import check_request_ownership, generate_session_id, require_api_key
 from app.services import ServiceContainer
 from app.telemetry import configure_telemetry
 
@@ -78,6 +78,19 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.post("/api/v1/session")
+def create_session() -> dict:
+    """Issues a per-tab caller-correlation token (D-016). Not a new
+    authentication boundary -- reaching this route already requires the
+    shared secret (require_api_key, app-wide) -- only a way for
+    app.state.requests to tell two concurrent holders of that secret
+    apart. The frontend calls this once per gate-unlock
+    (apps/web/src/apiClient.tsx ensureSessionId) and threads the result
+    back as ``X-Session-Id`` on every later request.
+    """
+    return {"session_id": generate_session_id()}
 
 
 @app.get("/api/v1/health")
@@ -172,11 +185,14 @@ async def _safe_audit_append(audit_store, event: AuditEvent) -> str | None:
 
 
 @app.post("/api/v1/chat")
-async def chat(request: ChatRequest):
+async def chat(request: ChatRequest, x_session_id: str | None = Header(default=None)):
     agent: AgentService = app.state.agent
     conversations: ConversationStore = app.state.container.conversation_store
     request_id = request.request_id or str(uuid4())
-    record = {"status": "running", "stage": "queued", "task": asyncio.current_task(), "trace_id": request_id}
+    # session_id (D-016): whoever's X-Session-Id created this record is
+    # its only owner for /api/v1/requests/* below; None (no header sent)
+    # keeps the record unrestricted, matching pre-D-016 behaviour.
+    record = {"status": "running", "stage": "queued", "task": asyncio.current_task(), "trace_id": request_id, "session_id": x_session_id}
     app.state.requests[request_id] = record
     try:
         # await asyncio.to_thread, not a direct call: with SPEC-M4's
@@ -264,7 +280,7 @@ async def chat(request: ChatRequest):
 
 
 @app.post("/api/v1/chat/{thread_id}/resume")
-async def resume(thread_id: str, request: ClarificationResumeRequest):
+async def resume(thread_id: str, request: ClarificationResumeRequest, x_session_id: str | None = Header(default=None)):
     conversations: ConversationStore = app.state.container.conversation_store
     try:
         existing = await asyncio.to_thread(conversations.get, thread_id)
@@ -272,14 +288,15 @@ async def resume(thread_id: str, request: ClarificationResumeRequest):
         raise HTTPException(status_code=503, detail=f"Could not read conversation state: {error}") from error
     if existing is None:
         raise HTTPException(status_code=404, detail="No resumable conversation was found for this thread.")
-    return await chat(ChatRequest(thread_id=thread_id, question=request.answer))
+    return await chat(ChatRequest(thread_id=thread_id, question=request.answer), x_session_id=x_session_id)
 
 
 @app.post("/api/v1/requests/{request_id}/cancel")
-async def cancel_request(request_id: str):
+async def cancel_request(request_id: str, x_session_id: str | None = Header(default=None)):
     record = app.state.requests.get(request_id)
     if not record:
         raise HTTPException(status_code=404, detail="Request was not found.")
+    check_request_ownership(record, x_session_id)
     record["status"] = "cancel_requested"
     task = record.get("task")
     if task and task is not asyncio.current_task() and not task.done():
@@ -288,10 +305,11 @@ async def cancel_request(request_id: str):
 
 
 @app.get("/api/v1/requests/{request_id}")
-def request_status(request_id: str):
+def request_status(request_id: str, x_session_id: str | None = Header(default=None)):
     record = app.state.requests.get(request_id)
     if not record:
         raise HTTPException(status_code=404, detail="Request was not found.")
+    check_request_ownership(record, x_session_id)
     return {key: value for key, value in record.items() if key != "task"}
 
 
