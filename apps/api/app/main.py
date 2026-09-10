@@ -121,7 +121,10 @@ def project_ifc():
 
 @app.get("/api/v1/project/pdf")
 def project_pdf():
-    path = app.state.container.settings.pdf_path
+    # The primary (first-configured) document only -- SPEC-M6 deliberately
+    # does not make this viewer endpoint multi-document-aware; see
+    # ServiceContainer.document_analyzer.
+    path = app.state.container.document_analyzer.pdf_path
     if not path.exists():
         raise HTTPException(status_code=404, detail="Configured PDF source file was not found.")
     return FileResponse(path, media_type="application/pdf", filename=path.name)
