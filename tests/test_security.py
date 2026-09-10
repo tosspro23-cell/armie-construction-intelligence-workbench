@@ -76,7 +76,7 @@ def test_a_real_http_request_without_the_header_is_rejected_end_to_end(monkeypat
     """
     monkeypatch.setenv("DATA_DIR", str(ROOT / "demo_data"))
     monkeypatch.setenv("IFC_FILE", "armie_demo.ifc")
-    monkeypatch.setenv("PDF_FILE", "armie_demo_schedule.pdf")
+    monkeypatch.setenv("PDF_FILES", '["armie_demo_schedule.pdf"]')
     monkeypatch.setenv("AUDIT_STORE_PATH", str(tmp_path / "audit.jsonl"))
     monkeypatch.setenv("EVIDENCE_DIR", str(tmp_path / "evidence"))
     monkeypatch.setenv("API_SHARED_SECRET", "correct-horse-battery-staple")

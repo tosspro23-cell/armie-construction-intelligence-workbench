@@ -37,7 +37,14 @@ class Settings(BaseSettings):
     app_env: str = "development"
     data_dir: Path = Path("./demo_data")
     ifc_file: str = "armie_demo.ifc"
-    pdf_file: str = "armie_demo_schedule.pdf"
+    # SPEC-M6: an ordered list, not a single filename -- the default keeps
+    # every unmodified deployment on exactly today's one-document behaviour.
+    # Order matters: it is the deterministic iteration order the multi-
+    # document lookup (app/agent/graph.py _execute_pdf) uses, and it is
+    # also which document single-document-scoped consumers (the raw PDF/
+    # page-image viewer endpoints, the door/window reconciliation pilot)
+    # treat as "the" document -- see ServiceContainer.document_analyzer.
+    pdf_files: list[str] = ["armie_demo_schedule.pdf"]
 
     llm_provider: str = "ollama"
     openai_api_key: str | None = None
@@ -101,8 +108,8 @@ class Settings(BaseSettings):
         return self.data_dir / self.ifc_file
 
     @property
-    def pdf_path(self) -> Path:
-        return self.data_dir / self.pdf_file
+    def pdf_paths(self) -> list[Path]:
+        return [self.data_dir / pdf_file for pdf_file in self.pdf_files]
 
     def ensure_runtime_directories(self) -> None:
         self.audit_store_path.parent.mkdir(parents=True, exist_ok=True)

@@ -64,7 +64,7 @@ def test_ownership_is_unrestricted_for_a_record_with_no_owner():
 def test_a_real_http_caller_cannot_query_or_cancel_another_sessions_request(monkeypatch, tmp_path):
     monkeypatch.setenv("DATA_DIR", str(ROOT / "demo_data"))
     monkeypatch.setenv("IFC_FILE", "armie_demo.ifc")
-    monkeypatch.setenv("PDF_FILE", "armie_demo_schedule.pdf")
+    monkeypatch.setenv("PDF_FILES", '["armie_demo_schedule.pdf"]')
     monkeypatch.setenv("AUDIT_STORE_PATH", str(tmp_path / "audit.jsonl"))
     monkeypatch.setenv("EVIDENCE_DIR", str(tmp_path / "evidence"))
     get_settings.cache_clear()

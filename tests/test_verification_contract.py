@@ -70,7 +70,7 @@ def test_invariant_validator_passes_non_answered_disposition_without_evidence() 
 # --- DeterministicVerifier -----------------------------------------------------------
 
 def _repository() -> IfcRepository:
-    settings = Settings(data_dir=ROOT / "demo_data", ifc_file="armie_demo.ifc", pdf_file="armie_demo_schedule.pdf")
+    settings = Settings(data_dir=ROOT / "demo_data", ifc_file="armie_demo.ifc", pdf_files=["armie_demo_schedule.pdf"])
     return IfcRepository(settings.ifc_path)
 
 

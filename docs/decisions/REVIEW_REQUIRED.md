@@ -306,3 +306,19 @@ Implemented in `.github/workflows/ci.yml`: the `backend` job now runs a `postgre
 service container, applies `apps/api/migrations/0001_conversations_and_audit_events.sql`, and
 runs the full suite (including the previously `TEST_DATABASE_URL`-gated tests) against it on
 every push and pull request, on all four Python versions.
+
+## RESOLVED by M6: the multi-document/enterprise-retrieval prerequisite now has real evidence
+
+`PROJECT_STATE.md`'s 2026-09-10 Phase 3 scoping note flagged that "enterprise retrieval" (the
+originally-planned Phase 3) had no way to be evaluated: the system hardcoded exactly one PDF, so
+there was no corpus to retrieve *among*, and no way to prove semantic search would beat what
+already existed. SPEC-M6 (D-017) resolves this: `Settings.pdf_files`/`ServiceContainer.
+document_analyzers` support a real multi-document corpus, and a new naive deterministic baseline
+(`_execute_pdf_multi_document`) evidences two distinct failure modes against an 18-document
+corpus -- a precision failure (the same field answerable from more than one document) and a
+recall failure (a realistically-phrased question's answer exists only under different vocabulary
+than any table uses). The owner explicitly rejected the first spec draft's precision-failure-only
+scope as insufficient justification for Azure AI Search specifically; both failure modes are now
+real, tested fixtures, not an assumption. SPEC-M7 (Azure AI Search) is gated on this evidence,
+with an explicit invariant carried forward from M1/M2P1/D-009: any future retrieval step may only
+perform document/page location, never answer synthesis.

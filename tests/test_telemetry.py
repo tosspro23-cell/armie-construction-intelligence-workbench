@@ -25,7 +25,7 @@ REPRO_SCRIPT = Path(__file__).resolve().parent / "_fastapi_instrumentation_timin
 
 def _settings(tmp_path: Path, otel_exporter_connection_string: str | None) -> Settings:
     settings = Settings(
-        data_dir=ROOT / "demo_data", ifc_file="armie_demo.ifc", pdf_file="armie_demo_schedule.pdf",
+        data_dir=ROOT / "demo_data", ifc_file="armie_demo.ifc", pdf_files=["armie_demo_schedule.pdf"],
         audit_store_path=tmp_path / "audit.jsonl", evidence_dir=tmp_path / "evidence",
         otel_exporter_connection_string=otel_exporter_connection_string,
     )

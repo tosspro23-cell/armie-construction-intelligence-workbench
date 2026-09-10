@@ -57,7 +57,7 @@ def test_codepoint_scan_selects_zh_cn_for_chinese_deictic_fast_path(tmp_path: Pa
     branch that sets selected_language for a deictic/selection-grounded
     request), exercised end-to-end via a Chinese deictic phrase.
     """
-    settings = Settings(data_dir=ROOT / "demo_data", ifc_file="armie_demo.ifc", pdf_file="armie_demo_schedule.pdf", audit_store_path=tmp_path / "audit.jsonl", evidence_dir=tmp_path / "evidence")
+    settings = Settings(data_dir=ROOT / "demo_data", ifc_file="armie_demo.ifc", pdf_files=["armie_demo_schedule.pdf"], audit_store_path=tmp_path / "audit.jsonl", evidence_dir=tmp_path / "evidence")
     settings.ensure_runtime_directories()
     fake = FakeModelProvider()
     container = ServiceContainer(settings, text_provider_factory=lambda s: fake, vision_provider_factory=lambda s: fake)
@@ -93,7 +93,7 @@ def test_hardcoded_chinese_board_ambiguity_clarification(tmp_path: Path) -> None
     AgentService._resolve_context for a bare "board" reference, which is
     resolved before any model call or routing.
     """
-    settings = Settings(data_dir=ROOT / "demo_data", ifc_file="armie_demo.ifc", pdf_file="armie_demo_schedule.pdf", audit_store_path=tmp_path / "audit.jsonl", evidence_dir=tmp_path / "evidence")
+    settings = Settings(data_dir=ROOT / "demo_data", ifc_file="armie_demo.ifc", pdf_files=["armie_demo_schedule.pdf"], audit_store_path=tmp_path / "audit.jsonl", evidence_dir=tmp_path / "evidence")
     settings.ensure_runtime_directories()
     fake = FakeModelProvider()  # no scripted responses: this path must not call the model
     container = ServiceContainer(settings, text_provider_factory=lambda s: fake, vision_provider_factory=lambda s: fake)

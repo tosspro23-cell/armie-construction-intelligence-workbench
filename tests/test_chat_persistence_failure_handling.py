@@ -35,7 +35,7 @@ QUESTION = "How many doors are in this project?"
 
 def _settings(tmp_path: Path, **overrides) -> Settings:
     defaults = dict(
-        data_dir=ROOT / "demo_data", ifc_file="armie_demo.ifc", pdf_file="armie_demo_schedule.pdf",
+        data_dir=ROOT / "demo_data", ifc_file="armie_demo.ifc", pdf_files=["armie_demo_schedule.pdf"],
         audit_store_path=tmp_path / "audit.jsonl", evidence_dir=tmp_path / "evidence",
     )
     defaults.update(overrides)
