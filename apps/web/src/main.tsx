@@ -1,6 +1,6 @@
 import React, { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { api, ApiAuthError, AuthedImage, setStoredApiKey } from "./apiClient";
+import { api, ApiAuthError, AuthedImage, ensureSessionId, setStoredApiKey } from "./apiClient";
 import { IfcViewer, ViewerStatus } from "./IfcViewer";
 import "./styles.css";
 
@@ -83,7 +83,7 @@ function App() {
   const [apiKeyInput, setApiKeyInput] = useState("");
 
   const loadMetadata = useCallback(() => {
-    api<Record<string, any>>("/api/v1/project/metadata").then((value) => { setMetadata(value); setApiState("ready"); setNeedsApiKey(false); })
+    api<Record<string, any>>("/api/v1/project/metadata").then((value) => { setMetadata(value); setApiState("ready"); setNeedsApiKey(false); void ensureSessionId(); })
       .catch((error: Error) => {
         if (error instanceof ApiAuthError) { setNeedsApiKey(true); return; }
         console.error(error); setApiState("unavailable"); setApiError("The local API is unavailable. Start FastAPI on port 8000 and reload.");

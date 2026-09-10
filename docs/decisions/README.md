@@ -481,3 +481,57 @@ correct answer the M3/M4 baselines already proved. Also found and resolved in th
 CodeQL finding on storing the secret in browser storage (`js/clear-text-storage-of-sensitive-
 data`) — switched `localStorage` to `sessionStorage` and dismissed the resulting alert with a
 written justification specific to this shared, non-differentiated secret's security model.
+
+## D-016 — Per-caller request ownership via a server-issued session token
+
+Fix work against D-015's own explicitly-flagged limitation (`REVIEW_REQUIRED.md`'s "PARTIALLY
+RESOLVED by M5" entry), not a new milestone — per this project's established fix-work convention
+(chore/dependency and fix-against-an-existing-milestone's-findings work gets a `D-0xx` entry, not
+a new `docs/specs/SPEC-<milestone>` document; see D-012's independent-review fixes and PR #12 for
+precedent). Branch `fix/request-ownership-session-token`.
+
+**The gap.** D-015 was explicit that shared-secret auth authenticates *possession*, not
+*identity*: any holder of `API_SHARED_SECRET` could query or cancel *any other holder's* request
+via `GET /api/v1/requests/{id}` / `POST /api/v1/requests/{id}/cancel` — `app.state.requests`
+carried no notion of who created a given record.
+
+**Owner-chosen mechanism (server-issued session token, not Entra ID or client-self-declared ID).**
+OD-28 already decided against per-user identity (Entra ID) as disproportionate to this project's
+demo/portfolio usage; reopening that trade-off just to fix this one gap would have been a much
+larger change than the gap warrants. A client-self-declared caller ID (e.g. a client-generated
+`X-Caller-Id`) was rejected too: it is not actually a fix, since a caller can claim any ID,
+including another caller's. The middle ground: `POST /api/v1/session` (behind `require_api_key`
+like every route) issues a `secrets.token_urlsafe(32)` value the *server* generates; the frontend
+fetches one once per gate-unlock (`apps/web/src/apiClient.tsx`'s `ensureSessionId`, called from
+`main.tsx`'s `loadMetadata` success path) and threads it back as `X-Session-Id` on every
+subsequent request. `app.state.requests[id]["session_id"]` is stamped from the creating request's
+`X-Session-Id` at `POST /api/v1/chat` time; `check_request_ownership` (`app/security.py`) is
+called by both `GET /api/v1/requests/{id}` and `POST /api/v1/requests/{id}/cancel` before doing
+anything else, raising `404` — not `403`, so a non-owner cannot even confirm the request exists —
+on a session mismatch.
+
+**Explicit, not a new authentication boundary.** This is caller *correlation*, not identity: the
+session token is not itself a secret worth protecting beyond the shared secret that gates issuing
+one in the first place, and it carries none of Entra ID's guarantees (no revocation, no per-user
+audit identity, no protection if a caller shares their own token). It only stops one holder from
+reaching into *another* holder's in-flight requests by ID — the actual, narrow gap D-015 flagged.
+
+**Backward-compatible by design, not by accident.** A request created with no `X-Session-Id`
+header (a direct API script that never adopted the session flow) is stamped `session_id: None`,
+and `check_request_ownership` treats a record with no owner as unrestricted — exactly pre-D-016
+behaviour. This is a deliberate proportionality call, not an oversight: a caller bypassing the
+frontend already holds the shared secret and could reach `/api/v1/chat` directly regardless, so
+this fix closes the browser-mediated multi-holder case D-015 actually described without requiring
+every API integration to adopt a new header just to keep working.
+
+**Verification.** `tests/test_request_ownership.py`: unit tests on `check_request_ownership`
+directly, plus one `TestClient(app)`-based end-to-end test (the same real-HTTP-dispatch pattern
+D-015 established, since `Header()` resolution — like `Depends()` — does not run when a route
+function is called directly as a plain coroutine) proving a session-B caller gets `404` on a
+session-A request's status and cancel endpoints, the owning session gets `200` on both, and a
+request created without `X-Session-Id` stays open to any caller. Confirmed as a genuine
+reproduction, not a tautology: the ownership check was temporarily removed from both routes,
+the new end-to-end test failed exactly at the cross-session assertion (`200` where `404` was
+expected), then the fix was restored and the full suite re-run green. 201 tests pass (195 + 6
+new; 3 Postgres-only cases remain skipped without `TEST_DATABASE_URL`, unaffected by this fix);
+`ruff check --select F,E9,I,F401` clean; `npm run build` (`tsc -b && vite build`) clean.

@@ -33,11 +33,44 @@ export function setStoredApiKey(key: string): void {
   try { sessionStorage.setItem(API_KEY_STORAGE_KEY, key); } catch { /* per-viewer convenience only; a private/blocked storage context just re-prompts next time */ }
 }
 
+// D-016: a per-tab, server-issued token that lets /api/v1/requests/* tell
+// this tab's requests apart from another concurrent holder of the same
+// shared secret's -- closing the "any key-holder can query/cancel anyone
+// else's requests" gap without introducing per-user identity (OD-28 still
+// stands; this is caller *correlation*, not authentication). sessionStorage
+// for the same reason as the API key above.
+const SESSION_ID_STORAGE_KEY = "armie_session_id";
+
+export function getStoredSessionId(): string | null {
+  try { return sessionStorage.getItem(SESSION_ID_STORAGE_KEY); } catch { return null; }
+}
+
+function setStoredSessionId(id: string): void {
+  try { sessionStorage.setItem(SESSION_ID_STORAGE_KEY, id); } catch { /* per-tab convenience only; ownership correlation just won't apply this tab */ }
+}
+
+// Fetches a fresh session id from the server once per gate-unlock and
+// caches it for the rest of the tab's life. Best-effort: if this fails,
+// the tab's requests simply behave as they did before D-016 (unowned, no
+// ownership check applies to them) rather than blocking the user out --
+// the shared secret alone is still what gets them into the app.
+export async function ensureSessionId(): Promise<void> {
+  if (getStoredSessionId()) return;
+  try {
+    const response = await fetch("/api/v1/session", { method: "POST", ...withAuthHeader() });
+    if (!response.ok) return;
+    const body = await response.json();
+    if (body.session_id) setStoredSessionId(body.session_id);
+  } catch { /* best-effort, see above */ }
+}
+
 export function withAuthHeader(init?: RequestInit): RequestInit {
   const key = getStoredApiKey();
-  if (!key) return init || {};
+  const sessionId = getStoredSessionId();
+  if (!key && !sessionId) return init || {};
   const headers = new Headers(init?.headers);
-  headers.set("Authorization", `Bearer ${key}`);
+  if (key) headers.set("Authorization", `Bearer ${key}`);
+  if (sessionId) headers.set("X-Session-Id", sessionId);
   return { ...init, headers };
 }
 

@@ -32,7 +32,7 @@ This is a cold-start guide for a new vendor or frontier coding agent. Read this 
 | Azure OpenAI provider, Managed Identity only -- no API-key path (SPEC-M3, D-012) | `apps/api/app/providers/azure_openai_provider.py` |
 | Provider **factory** injection seam (text/vision/escalation) + conversation/audit store factory seam, tool services | `apps/api/app/services.py` (`ServiceContainer`) |
 | OpenTelemetry -> Application Insights wiring, opt-in and inert by default (SPEC-M3) | `apps/api/app/telemetry.py` |
-| Shared-secret auth for the public API, app-wide FastAPI dependency, no-op unless set (SPEC-M5) | `apps/api/app/security.py` |
+| Shared-secret auth for the public API, app-wide FastAPI dependency, no-op unless set (SPEC-M5); per-caller request-ownership check via a server-issued session token (D-016) | `apps/api/app/security.py` |
 | Frontend auth-header/key-gate/blob-fetch helpers shared with `IfcViewer.tsx` (SPEC-M5) | `apps/web/src/apiClient.tsx` |
 | `ConversationStore`/`AuditStore` interfaces + in-memory/JSONL (default) and Postgres (opt-in, `DATABASE_URL`) implementations (SPEC-M4, D-014) | `apps/api/app/persistence/` |
 | Postgres schema for the two tables above (applied by hand, no migration framework) | `apps/api/migrations/0001_conversations_and_audit_events.sql` |
@@ -48,7 +48,7 @@ This is a cold-start guide for a new vendor or frontier coding agent. Read this 
 
 ## End-to-end lifecycle
 
-`POST /api/v1/chat` creates a request-scoped invocation. LangGraph resolves viewer/conversation context, selects a deterministic or semantic plan, canonicalizes and validates it, checks capability, executes a source-specific tool, creates evidence, verifies the result, and returns an `AgentResponse`. The API commits context updates only for terminal answered/clarification flows. `/api/v1/traces/{trace_id}` exposes the audit events used by the UI. `/api/v1/requests/{request_id}/cancel` is the cancellation boundary.
+`POST /api/v1/chat` creates a request-scoped invocation. LangGraph resolves viewer/conversation context, selects a deterministic or semantic plan, canonicalizes and validates it, checks capability, executes a source-specific tool, creates evidence, verifies the result, and returns an `AgentResponse`. The API commits context updates only for terminal answered/clarification flows. `/api/v1/traces/{trace_id}` exposes the audit events used by the UI. `/api/v1/requests/{request_id}/cancel` is the cancellation boundary; both it and `GET /api/v1/requests/{request_id}` require the caller's `X-Session-Id` to match the session that created the request (D-016), unless the request was created without one.
 
 ## Contracts that must remain stable
 
