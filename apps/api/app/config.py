@@ -56,6 +56,19 @@ class Settings(BaseSettings):
     azure_openai_api_version: str = "2024-10-21"
     azure_openai_text_deployment: str = "gpt-4o-mini"
     azure_openai_vision_deployment: str = "gpt-4o-mini"
+    # SPEC-M7: Azure AI Search retrieval, opt-in like database_url/
+    # otel_exporter_connection_string -- unset means SPEC-M6's naive
+    # multi-document baseline is the only behaviour; no environment is
+    # required to have a search service or an embedding deployment just to
+    # run this project. Azure-only in this milestone (no Ollama/OpenAI
+    # embeddings).
+    azure_search_endpoint: str | None = None
+    azure_search_index_name: str = "armie-document-corpus"
+    azure_openai_embedding_deployment: str = "text-embedding-3-small"
+    # Empirically determined against the real armiem3-search index
+    # (SPEC-M7 OD-35, D-018), not guessed -- see
+    # docs/reports/2026-09-10-m7-azure-ai-search-baseline.md.
+    azure_search_relevance_threshold: float = 0.030
     # Empty by default: OpenTelemetry exports nowhere unless explicitly set,
     # the same opt-in pattern as ollama_escalation_model below.
     otel_exporter_connection_string: str | None = None

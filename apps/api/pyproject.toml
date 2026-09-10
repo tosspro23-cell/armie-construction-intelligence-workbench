@@ -38,6 +38,10 @@ dependencies = [
   # event loop to run on there. See app/persistence/postgres_store.py.
   "psycopg[binary]>=3.1,<4",
   "psycopg_pool>=3.2,<4",
+  # SPEC-M7: Azure AI Search retrieval (opt-in, unset azure_search_endpoint
+  # means this is never imported at runtime -- see app/services.py's
+  # search_client_factory seam).
+  "azure-search-documents>=11.5,<12",
 ]
 
 [build-system]

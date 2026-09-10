@@ -30,3 +30,18 @@ class ModelProvider(Protocol):
         purpose: str,
     ) -> T: ...
 
+
+class EmbeddingProvider(Protocol):
+    """SPEC-M7: a separate, narrower Protocol from ModelProvider, not an
+    extension of it. Embedding is Azure-only in this milestone (no Ollama/
+    OpenAI implementation) and used only for the opt-in Azure AI Search
+    retrieval path, never for interpretation -- folding it into
+    ModelProvider would force every text/vision provider to answer for a
+    capability most of them don't have.
+    """
+
+    name: str
+    model: str
+
+    async def embed(self, text: str) -> list[float]: ...
+
