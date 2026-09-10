@@ -4,14 +4,22 @@ from app.config import Settings
 from app.persistence.audit_store import AuditStore
 from app.persistence.conversation_store import ConversationStore
 from app.persistence.factory import get_audit_store, get_conversation_store
-from app.providers.base import ModelProvider
-from app.providers.factory import get_escalation_provider, get_text_provider, get_vision_provider
+from app.providers.base import EmbeddingProvider, ModelProvider
+from app.providers.factory import (
+    get_embedding_provider,
+    get_escalation_provider,
+    get_text_provider,
+    get_vision_provider,
+)
+from app.retrieval import get_search_client
 from app.tools.document.analyzer import DocumentAnalyzer
 from app.tools.ifc.repository import IfcRepository
 
 TextProviderFactory = Callable[[Settings], ModelProvider]
 VisionProviderFactory = Callable[[Settings], ModelProvider]
 EscalationProviderFactory = Callable[[Settings], "ModelProvider | None"]
+EmbeddingProviderFactory = Callable[[Settings], "EmbeddingProvider | None"]
+SearchClientFactory = Callable[[Settings], "object | None"]
 ConversationStoreFactory = Callable[[Settings], ConversationStore]
 AuditStoreFactory = Callable[[Settings], AuditStore]
 
@@ -33,6 +41,8 @@ class ServiceContainer:
         text_provider_factory: TextProviderFactory = get_text_provider,
         vision_provider_factory: VisionProviderFactory = get_vision_provider,
         escalation_provider_factory: EscalationProviderFactory = get_escalation_provider,
+        embedding_provider_factory: EmbeddingProviderFactory = get_embedding_provider,
+        search_client_factory: SearchClientFactory = get_search_client,
         conversation_store_factory: ConversationStoreFactory = get_conversation_store,
         audit_store_factory: AuditStoreFactory = get_audit_store,
     ) -> None:
@@ -53,6 +63,16 @@ class ServiceContainer:
         self.text_provider_factory = text_provider_factory
         self.vision_provider_factory = vision_provider_factory
         self.escalation_provider_factory = escalation_provider_factory
+        self.embedding_provider_factory = embedding_provider_factory
+        # A factory, called per-retrieval in app/agent/graph.py -- not a
+        # stored instance -- mirroring the model-provider factories above
+        # rather than the ConversationStore/AuditStore instances, since the
+        # Azure SDK's SearchClient has the same per-call-construction
+        # precedent as AzureOpenAIProvider's own client (a documented,
+        # deliberate inefficiency: PROJECT_STATE.md's "per-call Azure
+        # client/credential reuse" deferred item), not a proven-safe-to-
+        # share-across-concurrent-requests object.
+        self.search_client_factory = search_client_factory
 
     @property
     def document_analyzer(self) -> DocumentAnalyzer:
