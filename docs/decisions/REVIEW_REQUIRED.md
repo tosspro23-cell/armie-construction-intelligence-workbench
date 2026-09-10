@@ -322,3 +322,19 @@ scope as insufficient justification for Azure AI Search specifically; both failu
 real, tested fixtures, not an assumption. SPEC-M7 (Azure AI Search) is gated on this evidence,
 with an explicit invariant carried forward from M1/M2P1/D-009: any future retrieval step may only
 perform document/page location, never answer synthesis.
+
+## RESOLVED by M7: Azure AI Search retrieval built and evaluated against M6's evidence, on real data
+
+Closes the gate M6 set. Azure AI Search retrieval (`docs/reports/2026-09-10-m7-azure-ai-search-
+baseline.md`) is live-deployed and evaluated against M6's own precision/recall failure fixtures,
+not a fresh scenario: it correctly ranks the recall-failure document (`rfi_log_047.pdf`) first for
+the exact fixture question, verified end-to-end over real HTTP, and leaves the precision-failure
+(collision) case unchanged, verified by call-count. Honest, checked-not-assumed nuance: hybrid
+search's win on the exact fixture question is substantially attributable to lexical overlap on the
+entity name, not embedding semantics alone -- a further paraphrased query with no literal overlap
+confirms the genuinely semantic claim independently. `azure_search_relevance_threshold` was set
+from real measured score clusters (0.025), not guessed. Still open, unaddressed by this milestone:
+per `PROJECT_STATE.md`'s scoping note, ADLS Gen2 (a real document source of truth, and the
+still-separate evidence-persistence gap) remains a future milestone; this one indexes directly
+from `demo_data/` by design (§B, disproportionate to build a full indexer pipeline for 18
+documents).

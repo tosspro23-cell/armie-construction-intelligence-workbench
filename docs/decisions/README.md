@@ -610,3 +610,75 @@ existing).** No Azure AI Search, no vector index, no embeddings, no ADLS. No nat
 document-name inference. No extraction of any kind from narrative documents — if SPEC-M7's
 retrieval step ever *locates* the right passage in one, reading it back out is a separate, later
 scope decision.
+
+## D-018 — Azure AI Search retrieval, evaluated against D-017's own two named failure modes
+
+`docs/specs/SPEC-M7-azure-ai-search-retrieval-v1.md`. Builds the capability D-017's naive baseline
+exists to justify or refute, evaluated against that milestone's own precision/recall failure
+fixtures rather than a fresh scenario. Full live evidence in
+`docs/reports/2026-09-10-m7-azure-ai-search-baseline.md`; this entry records the design decisions
+and their real, measured justification — per the owner's explicit instruction for this milestone,
+conclusions here come from data against the live service, not narrative.
+
+**Real infrastructure, not hypothetical.** `armiem3-search` (Azure AI Search, `sku: free`,
+`centralus` — `eastus2` was out of capacity, the same restriction D-014 hit for Postgres) was
+created during the cost-feasibility check and kept for direct use (OD-34, owner-confirmed) rather
+than deleted and re-decided later. `text-embedding-3-small` deployed on the existing
+`armie-m3-openai` resource — no new Azure OpenAI resource. `armiem3-search` has
+`disableLocalAuth: true` set (no API-key path exists at all); RBAC is least-privilege and
+role-split, continuing OD-23's zero-stored-secret posture onto a third Azure-managed resource: the
+API's runtime identity holds only `Search Index Data Reader` (query), while index/schema
+management (`Search Index Data Contributor` + `Search Service Contributor`) and the one-time
+`Cognitive Services OpenAI User` grant needed to run the indexing script belong to the operator
+identity, not the running API.
+
+**Push-based indexing, not ADLS + an indexer/skillset pipeline (§B, OD unchanged from the spec).**
+`scripts/index_document_corpus.py` extracts whole-document text (PyMuPDF, no chunking — every
+document in this corpus is a single page), embeds it via the new `EmbeddingProvider` seam, and
+upserts directly into the index. Standing up Blob Storage plus an indexer for 18 single-page
+documents would be disproportionate infrastructure, mirroring OD-29's reasoning for the same
+question applied to storage instead of secrets.
+
+**A real defect, found only by running the actual end-to-end path against the live index, not by
+the CI-safe unit tests.** The first indexing run stored each document's `filename` as its
+`Settings.pdf_files`-relative path (e.g. `"corpus/schedule_l2_east.pdf"`); `ServiceContainer.
+document_analyzers` keys its dict by the bare basename. `_retrieve_relevant_documents` filters
+retrieved filenames against that dict, so the mismatch silently excluded every retrieval
+candidate — a live `TestClient` run returned the unchanged blanket miss message instead of a
+directed one. The CI-safe fake-search-client tests could not have caught this: they inject
+filenames that already match, by construction. Fixed by storing the basename in the index and
+rebuilding it from scratch (cheaper and cleaner than migrating 18 documents' ids in place).
+
+**The asymmetric acceptance bar held, on real data, with an honest caveat found by testing it
+rather than assuming it.** Hybrid search (BM25 + vector) ranks `rfi_log_047.pdf` first for
+SPEC-M6's exact recall-failure question, end-to-end verified via a live `TestClient` call
+(`clarification_required`, naming the RFI first, `model_call_count: 1`); the precision-failure
+(Panel-A) case is unchanged, verified by call-count (`search_client.calls == []`,
+`model_call_count: 0` on that path), not just by the unchanged answer text. Checked further,
+rather than declaring victory on the first result: **on this specific fixture question,
+pure-vector-only search does *not* rank the RFI first** (it ranks third; hybrid's win is
+substantially attributable to BM25 matching the literal token "Panel-E," which appears verbatim
+in the RFI's prose) — a real, useful outcome, but a weaker claim than "embeddings resolved a
+vocabulary mismatch." A further, deliberately paraphrased query that avoids the literal entity
+name entirely does resolve correctly on pure vector similarity alone, by a wide margin (0.787 vs.
+0.708 runner-up) — that is the genuinely semantic version of the claim. Both results are recorded;
+neither is allowed to stand in for the other.
+
+**`azure_search_relevance_threshold` = 0.025 (OD-35), set from measured score distributions, not
+picked in advance.** Every query tried against the live index showed the same bimodal split:
+topically relevant documents scored 0.030–0.033, clearly irrelevant ones scored 0.014–0.019,
+consistently across every question tested. 0.025 sits in the observed gap.
+
+**`text-embedding-3-small` (OD-36, as recommended, unrevisited).** The real-index evidence above
+did not surface a case where embedding quality was the limiting factor at this corpus's scale, so
+there was no basis to revisit the recommended default.
+
+**Verification.** 7 new CI-safe unit tests (`tests/test_azure_ai_search_retrieval.py`), fake
+search client + fake embedding provider injected via `ServiceContainer`'s factory seam (D-007
+discipline) — the real-index claims above are not re-asserted here, since they can only be tested
+against a live Azure AI Search index (this report, not a CI gate, per the spec's own Acceptance
+criteria). Confirmed as genuine reproductions, not tautologies: temporarily gutted the retrieval
+call sites in `_execute_pdf_multi_document`, confirmed exactly the two directed/blanket-miss tests
+failed as expected, restored, reran the full suite green. 234 tests pass (227 + 7 new); `ruff
+check --select F,E9,I,F401 apps/api tests` clean; `npm run build` clean (no frontend change was
+needed — the new miss message is plain text through an existing render path).
