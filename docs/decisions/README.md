@@ -535,3 +535,78 @@ the new end-to-end test failed exactly at the cross-session assertion (`200` whe
 expected), then the fix was restored and the full suite re-run green. 201 tests pass (195 + 6
 new; 3 Postgres-only cases remain skipped without `TEST_DATABASE_URL`, unaffected by this fix);
 `ruff check --select F,E9,I,F401` clean; `npm run build` (`tsc -b && vite build`) clean.
+
+## D-017 — Multi-document corpus and its naive deterministic baseline (SPEC-M6)
+
+`docs/specs/SPEC-M6-multi-document-corpus-v1.md`, revised in place after owner review (its own
+Rationale section keeps that revision note — see there for why the first draft's one-document,
+one-collision scope was rejected as insufficient). Implements the Phase 3 prerequisite from
+`PROJECT_STATE.md`'s 2026-09-10 scoping note: today's system hardcodes exactly one PDF
+(`Settings.pdf_file`, one `DocumentAnalyzer`, no document field on `QueryPlan`), so there was no
+way to build or evaluate real "enterprise retrieval" against it, and no way to prove semantic
+search would beat what already exists.
+
+**Config/plumbing (§A).** `Settings.pdf_files: list[str]` replaces `pdf_file` (singular),
+defaulting to a one-element list — no behaviour change for an unmodified deployment.
+`ServiceContainer.document_analyzers: dict[str, DocumentAnalyzer]` builds one analyzer per
+configured file, in configured order (not filesystem/glob order, which is platform-dependent).
+`ServiceContainer.document_analyzer` (singular) becomes a property returning the primary
+(first-configured) analyzer — a deliberate scope boundary, not a shim: the raw PDF/page-image
+viewer endpoints and the door/window reconciliation pilot (OD-15/D-011) both stay scoped to one
+document in this milestone.
+
+**`QueryPlan.requested_document` (§B).** `None` means "search every configured document" —
+today's only reachable value. Not wired to any live API/UI override in this milestone
+(natural-language document-name inference is explicitly SPEC-M7's concern); it exists so
+`_execute_pdf` can honor an explicit target when one is set by a future planner, and so the
+single-document path (when exactly one document is configured, or one is explicitly named)
+stays byte-for-byte identical to pre-M6 behaviour.
+
+**The naive baseline, and two evidenced failure modes, not one (§C).** `_execute_pdf_multi_document`
+runs `native_lookup` against every configured document, zero model calls, and never falls
+through to vision (vision resolves "what's on this page," not "which document"). Three outcomes:
+exactly one confident hit → answered (citation's `locator` gains a `document` field —
+`Evidence.source_file` was already correct per-analyzer, but `Citation`/`_citations` never
+surfaced it); more than one confident hit → `clarification_required` naming every candidate
+(**precision failure**, OD-32); zero confident hits → `clarification_required` (**recall
+failure** — covers both a genuine no-answer case and a vocabulary-mismatch miss the baseline
+cannot distinguish from it, OD-33). The owner explicitly rejected precision failure alone as
+sufficient justification for Azure AI Search: a keyword collision only proves *some*
+disambiguation step is architecturally necessary, which a simpler rule-based router could also
+provide. Recall failure — a realistically-phrased question whose answer exists under different
+vocabulary than any table uses — is the stronger case, since no amount of additional keyword
+rules can fix a vocabulary gap.
+
+**The corpus (§D), ~15-20 documents, 3-4 types, explicitly a mechanism demonstration, not an
+enterprise-scale claim (OD-30, owner-confirmed).** 17 new documents in `demo_data/corpus/`
+(`armie_demo_schedule.pdf`/`armie_demo.ifc` untouched — SPEC-M2's Tag/reconciliation fixture work
+depends on the original schedule staying exactly as it is): 6 schedule variants reusing the
+original's exact table geometry (so D-009's `native_lookup` characterization holds without
+re-deriving it), 4 door/window spec sheets (different field vocabulary, for genuine diversity), 4
+RFI log entries and 3 meeting-minutes excerpts (narrative, not required to satisfy D-009's
+tabular characterization at all). "Panel-A" is a real, distinct panel independently reused by two
+different wings' schedules (precision-failure fixture, OD-31); `rfi_log_047.pdf` states in prose
+that "Panel-E" was sized for a "connected capacity of 15.75 kW," deliberately not the tables'
+"Connected Load (kW)" vocabulary, and explicitly not yet in any issued schedule — no table in the
+corpus contains Panel-E at all (recall-failure fixture, OD-31). Empirically verified before
+writing any test: narrative documents degrade to a graceful 0.0-confidence miss rather than a
+crash or a bogus parsed table.
+
+**Verification.** 26 new tests (`tests/test_multi_document_corpus.py`), covering `ServiceContainer`
+plumbing, both failure modes, the single-match-among-many case, narrative documents never
+producing a false hit, and the full 18-document corpus loading and answering correctly. Confirmed
+as genuine reproductions, not tautologies: the multi-document branch was temporarily forced off
+(simulating pre-M6 behaviour) and the collision test and full-corpus test both failed exactly
+where expected, then the fix was restored and the full suite re-run green. Also manually verified
+over real HTTP (`TestClient`, not just `AgentService.invoke` directly) — the collision question,
+the recall-failure question, and a genuine single match all produced exactly the responses the
+tests assert. 227 tests pass (201 + 26 new), 3 Postgres-only skipped, unaffected; `ruff check
+--select F,E9,I,F401` clean; `npm run build` clean. Every existing PDF-lookup test passes
+unmodified (mechanical fallout only: `Settings(pdf_file=...)` → `Settings(pdf_files=[...])` at
+each call site, no assertion changed).
+
+**Explicitly not done here (SPEC-M7's scope, gated on this milestone's evidence actually
+existing).** No Azure AI Search, no vector index, no embeddings, no ADLS. No natural-language
+document-name inference. No extraction of any kind from narrative documents — if SPEC-M7's
+retrieval step ever *locates* the right passage in one, reading it back out is a separate, later
+scope decision.

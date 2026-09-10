@@ -38,6 +38,7 @@ This is a cold-start guide for a new vendor or frontier coding agent. Read this 
 | Postgres schema for the two tables above (applied by hand, no migration framework) | `apps/api/migrations/0001_conversations_and_audit_events.sql` |
 | IFC deterministic adapter | `apps/api/app/tools/ifc/repository.py` |
 | PDF rendering/native lookup/vision preparation | `apps/api/app/tools/document/analyzer.py` |
+| Multi-document corpus support: one `DocumentAnalyzer` per `Settings.pdf_files` entry, naive zero-model-call multi-document lookup (SPEC-M6, D-017) | `apps/api/app/services.py` (`document_analyzers`), `apps/api/app/agent/graph.py` (`_execute_pdf_multi_document`) |
 | Independent and invariant verification | `apps/api/app/verification/verifiers.py` |
 | Browser state, viewer, citations, audit grouping, cancellation | `apps/web/src/main.tsx`, `apps/web/src/IfcViewer.tsx`, `apps/web/src/styles.css` |
 | Deterministic-contract, failure-path, characterization, and seam-invariance tests | `tests/` (see `docs/specs/SPEC-M1-reliability-foundation-v1.md`) |
