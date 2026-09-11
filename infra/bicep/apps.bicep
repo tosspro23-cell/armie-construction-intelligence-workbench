@@ -49,6 +49,9 @@ param databaseUrl string = ''
 @secure()
 param apiSharedSecret string
 
+@description('D-022: platform.bicep output azureSearchEndpoint (SPEC-M7, D-018). Blank (the default) keeps AZURE_SEARCH_ENDPOINT unset, so app/config.py never enables the retrieval fallback -- exactly like every deployment before this fix, and the same opt-in-when-unset shape as evidenceStorageAccountUrl below.')
+param azureSearchEndpoint string = ''
+
 @description('SPEC-M8, D-020: blob endpoint (evidence.bicep output blobEndpoint) for cited PDF evidence-crop persistence. Empty (the default) keeps evidence crops local-filesystem-only, exactly like every deployment before this milestone -- they will not survive a revision replacement. Managed Identity only (no API-key path exists in apps/api/app/evidence_storage.py at all), the same posture as databaseUrl above.')
 param evidenceStorageAccountUrl string = ''
 
@@ -74,6 +77,16 @@ var databaseEnv = empty(databaseUrl) ? [] : [
 // is not the same opt-out as a genuinely absent env var).
 var evidenceEnv = empty(evidenceStorageAccountUrl) ? [] : [
   { name: 'EVIDENCE_STORAGE_ACCOUNT_URL', value: evidenceStorageAccountUrl }
+]
+
+// Same conditional-append reasoning as databaseEnv/evidenceEnv above.
+// azureSearchIndexName/azureOpenAiEmbeddingDeployment are left at
+// config.py's own defaults here -- both already match what
+// scripts/index_document_corpus.py actually built against the real index
+// (docs/reports/2026-09-10-m7-azure-ai-search-baseline.md), so there is
+// nothing this template needs to override.
+var searchEnv = empty(azureSearchEndpoint) ? [] : [
+  { name: 'AZURE_SEARCH_ENDPOINT', value: azureSearchEndpoint }
 ]
 
 resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2022-10-01' existing = {
@@ -182,7 +195,7 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
             // secretRef, not value (SPEC-M5 §C): pulls from the Container
             // Apps secret declared above, never inlined as plain text here.
             { name: 'API_SHARED_SECRET', secretRef: 'api-shared-secret' }
-          ], databaseEnv, evidenceEnv)
+          ], databaseEnv, evidenceEnv, searchEnv)
         }
       ]
     }
