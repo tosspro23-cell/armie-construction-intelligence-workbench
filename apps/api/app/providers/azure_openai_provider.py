@@ -121,3 +121,45 @@ class AzureOpenAIProvider:
                 "schema": response_model.model_json_schema()}},
         )
         return response_model.model_validate_json(response.choices[0].message.content)
+
+
+class AzureOpenAIEmbeddingProvider:
+    """Azure OpenAI embeddings, Managed Identity only (OD-23 extended, SPEC-M7).
+
+    A separate class from AzureOpenAIProvider, not a shared one: an
+    embedding deployment is a genuinely different model shape (no chat
+    completion, no vision), and reusing AzureOpenAIProvider's `.model` to
+    also mean "the embedding deployment" would make `actual_model` audit
+    fields ambiguous about which deployment actually served a given call.
+    Reuses the same `_build_managed_identity_client` helper -- same
+    resource, same credential, only the deployment name differs.
+    """
+
+    name = "azure"
+
+    def __init__(
+        self,
+        *,
+        endpoint: str | None,
+        api_version: str,
+        deployment: str,
+        timeout_seconds: float = 90.0,
+        client_factory: Callable[[], object] | None = None,
+    ) -> None:
+        self.endpoint = endpoint
+        self.api_version = api_version
+        self.model = deployment
+        self.timeout_seconds = timeout_seconds
+        self._client_factory = client_factory
+
+    def _client(self):
+        if not self.endpoint:
+            raise RuntimeError("AZURE_OPENAI_ENDPOINT is required for Azure OpenAI embedding calls.")
+        if self._client_factory is not None:
+            return self._client_factory()
+        return _build_managed_identity_client(self.endpoint, self.api_version, self.timeout_seconds)
+
+    async def embed(self, text: str) -> list[float]:
+        client = self._client()
+        response = await client.embeddings.create(model=self.model, input=text)
+        return response.data[0].embedding

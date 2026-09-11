@@ -340,7 +340,8 @@ class AuditEvent(BaseModel):
         "semantic_repair", "model_escalation", "batch_eligibility",
         "execution_consistency", "result_shape_verification", "context_precedence",
         "followup_delta", "grouped_execution", "postprocess_argmax",
-        "disposition_resolution", "timeout", "cancelled", "progress"
+        "disposition_resolution", "timeout", "cancelled", "progress",
+        "retrieval_evaluated"
     ]
     summary: str
     payload: dict[str, Any] = Field(default_factory=dict)

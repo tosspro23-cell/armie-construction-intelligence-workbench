@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from app.config import Settings
-from app.providers.azure_openai_provider import AzureOpenAIProvider
-from app.providers.base import ModelProvider
+from app.providers.azure_openai_provider import AzureOpenAIEmbeddingProvider, AzureOpenAIProvider
+from app.providers.base import EmbeddingProvider, ModelProvider
 from app.providers.ollama_provider import OllamaProvider
 from app.providers.openai_provider import OpenAIProvider
 
@@ -47,3 +47,19 @@ def get_escalation_provider(settings: Settings) -> ModelProvider | None:
     if not settings.ollama_escalation_model:
         return None
     return OllamaProvider(settings.ollama_base_url, settings.ollama_escalation_model, settings.model_call_timeout_seconds)
+
+
+def get_embedding_provider(settings: Settings) -> EmbeddingProvider | None:
+    """Opt-in (SPEC-M7): returns None unless Azure AI Search retrieval is
+    actually configured (`azure_search_endpoint` set) -- no environment is
+    required to have an embedding deployment just to run this project.
+    Azure-only in this milestone; see EmbeddingProvider's docstring.
+    """
+    if not settings.azure_search_endpoint:
+        return None
+    return AzureOpenAIEmbeddingProvider(
+        endpoint=settings.azure_openai_endpoint,
+        api_version=settings.azure_openai_api_version,
+        deployment=settings.azure_openai_embedding_deployment,
+        timeout_seconds=settings.model_call_timeout_seconds,
+    )

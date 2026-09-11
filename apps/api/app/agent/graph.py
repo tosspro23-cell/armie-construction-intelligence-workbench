@@ -1027,6 +1027,48 @@ Return only a corrected MultiQueryPlan JSON object."""
                 }}, "tool_call_count": state.get("tool_call_count", 0) + 1}
             return {"tool_result": self._error_result(str(error))}
 
+    def _retrieve_relevant_documents(self, state: GraphState, question: str) -> list[tuple[str, float]]:
+        """SPEC-M7: ranks configured documents by relevance via Azure AI
+        Search hybrid retrieval (BM25 + vector), used only as a fallback
+        inside `_execute_pdf_multi_document`'s zero-hit branch below --
+        not run ahead of every `native_lookup` call, since that would cost
+        a real model call (the embedding) even on the common case where a
+        single document already answers unambiguously. Purely
+        informational either way: this milestone's "location, never
+        synthesis" invariant means a retrieval score only ever narrows
+        which documents are worth *naming* in an honest miss message, it
+        is never a substitute for `native_lookup`'s own confidence/value.
+
+        Returns `[]` whenever retrieval isn't configured
+        (`azure_search_endpoint` unset -- SPEC-M6's naive baseline is then
+        the only behaviour, unaffected) or a real Azure AI Search call
+        fails: retrieval is advisory, so a transient failure here must
+        degrade to the existing blanket miss message, never surface as an
+        unhandled error on top of an already-honest `clarification_required`.
+        """
+        search_client = self.container.search_client_factory(self.settings)
+        if search_client is None:
+            return []
+        embedding_provider = self.container.embedding_provider_factory(self.settings)
+        if embedding_provider is None:
+            return []
+        try:
+            from azure.search.documents.models import VectorizedQuery
+            vector = asyncio.run(embedding_provider.embed(question))
+            results = search_client.search(
+                search_text=question,
+                vector_queries=[VectorizedQuery(vector=vector, k_nearest_neighbors=5, fields="content_vector")],
+                select=["filename"], top=5,
+            )
+            return [(item["filename"], item["@search.score"]) for item in results]
+        except Exception as error:
+            self._audit(
+                state, "execute_pdf", "error",
+                "Azure AI Search retrieval failed; falling back to the naive baseline's blanket miss message.",
+                {"error": str(error)},
+            )
+            return []
+
     def _execute_pdf_multi_document(
         self, state: GraphState, plan: QueryPlan, query: DocumentQueryInput,
         analyzers: dict[str, Any], tool_call_count: int, model_call_count: int,
@@ -1094,13 +1136,53 @@ Return only a corrected MultiQueryPlan JSON object."""
                 "context_update": {"active_source": SourceType.PDF.value, "previous_query_plan": plan.model_dump()},
             }, "tool_call_count": tool_call_count, "model_call_count": model_call_count}
 
+        # SPEC-M7: a directed miss, not a blanket one, when retrieval is
+        # configured and ranks a candidate above the empirically-set
+        # threshold (D-018/OD-35) -- still zero fabricated values, still
+        # clarification_required, only the message's specificity changes.
+        # Costs exactly one real model call (the query embedding) when it
+        # runs at all; skipped entirely (search_client_factory returns
+        # None) whenever azure_search_endpoint is unset, so SPEC-M6's
+        # zero-model-call naive-baseline behaviour is unchanged by default.
+        retrieved = self._retrieve_relevant_documents(state, state["question"])
+        if retrieved:
+            model_call_count += 1
+        relevant_configured = [(name, score) for name, score in retrieved if name in analyzers]
+        directed_candidates = [name for name, score in relevant_configured if score >= self.settings.azure_search_relevance_threshold]
+        if relevant_configured:
+            # A dedicated event, not just a key inside the clarification_
+            # requested payload below -- found worth doing during the
+            # owner's own hands-on walkthrough (D-018 addendum): the
+            # retrieval evidence was real and correct but easy to miss,
+            # buried among many other Raw Trace payloads. This event type
+            # is what apps/web/src/main.tsx's dedicated "AI Search
+            # Retrieval" card (not the generic Raw Trace list) looks for,
+            # so the scores that actually drove the directed-vs-blanket
+            # miss decision are visible without expanding several
+            # unrelated payloads first. Only emitted when retrieval
+            # actually ran and returned candidates -- absence of this
+            # event in a trace already means "retrieval wasn't attempted
+            # or configured," which is itself informative.
+            self._audit(
+                state, "execute_pdf", "retrieval_evaluated",
+                f"Azure AI Search ranked {len(relevant_configured)} configured document(s) by relevance.",
+                {
+                    "documents_evaluated": [{"filename": name, "score": score} for name, score in relevant_configured],
+                    "relevance_threshold": self.settings.azure_search_relevance_threshold,
+                    "directed_candidates": directed_candidates,
+                },
+            )
         self._audit(
             state, "execute_pdf", "clarification_requested",
             "No configured document produced a confident deterministic match for this field.",
-            {"documents_checked": list(analyzers.keys())},
+            {"documents_checked": list(analyzers.keys()), "retrieval_candidates": relevant_configured, "directed_candidates": directed_candidates},
         )
+        if directed_candidates:
+            answer = f"I could not automatically extract this field, but the most relevant configured document(s) may be: {', '.join(directed_candidates)}."
+        else:
+            answer = "I could not find this field with a confident match in any configured document."
         return {"tool_result": {
-            "answer": "I could not find this field with a confident match in any configured document.",
+            "answer": answer,
             "disposition": "clarification_required", "citations": [],
             "verification": VerificationStatus(status="not_applicable", reason="No document produced a confident deterministic match.").model_dump(),
             "context_update": {"active_source": SourceType.PDF.value, "previous_query_plan": plan.model_dump()},
