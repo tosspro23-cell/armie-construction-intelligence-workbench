@@ -821,10 +821,15 @@ deleted, endpoint still serves the crop from blob storage) demonstrated end-to-e
 pass (241 + 6 new); `ruff check --select F,E9,I,F401 apps/api tests` clean; `npm run build` clean;
 `infra/bicep/*.bicep` (including the new `evidence.bicep`) validate with `az bicep build`.
 
-**Not yet deployed to the live Container App** (stated plainly, not silently implied) -- `infra/
-bicep/evidence.bicep` and the `apps.bicep`/`azure-deploy.yml` wiring exist and are validated, but
-exercising them against the live `armiem3-api` environment is a separate, owner-authorized step
-not taken in this pass, the same as D-018's own still-unexercised Azure AI Search deploy wiring.
+**Update, 2026-09-11: deployed and live-verified.** Owner-authorized redeploy of `armiem3-api`/
+`armiem3-web` with `evidence_storage_account_url` set to the real `armiem3evidence` blob endpoint
+(the same `workflow_dispatch` run that also carried D-021 below). Verified against the live app,
+not just the workflow's own smoke tests: asked a real question ("What is the connected load for
+Panel-A?") through the deployed API, got back a citation naming a freshly-generated evidence crop,
+confirmed with `az storage blob list` that the exact file (matching size, fresh timestamp) exists
+in the real `evidence` container, then fetched it back through the live `GET /api/v1/evidence/
+{filename}` endpoint and confirmed the returned bytes are the same real PNG. No open item remains
+on this milestone.
 
 ## D-021 — `API_SHARED_SECRET` moved from a `workflow_dispatch` input to a repository secret
 
@@ -866,5 +871,10 @@ independently reproduce the way D-020's blob dual-write was verified. What was c
 `grep` confirms no remaining reference to `inputs.api_shared_secret` anywhere in the workflow;
 the edited YAML parses (`yaml.safe_load`); and the new pre-flight step was read against GitHub's
 documented behavior for empty `secrets.*` values (silently `''`, never a workflow parse error).
-The actual masking behavior itself will be confirmed the next time this workflow is dispatched --
-by inspecting that run's own log for the environment-annotation lines this incident came from.
+**Update, 2026-09-11: confirmed live**, in the same `workflow_dispatch` run that deployed D-020.
+`gh run view <id> --log` for that run shows `API_SHARED_SECRET: ***` in every step's environment
+annotation, including the very first one (`Run actions/checkout@v4`) -- earlier than even the
+first step of the previous version's own run, and unlike that run, with no cleartext occurrence
+anywhere in the log. Also confirmed end-to-end, not just in the log: the leaked value now returns
+`401` from the live API, and the newly-rotated secret (generated and set as the `API_SHARED_SECRET`
+repository secret in the same pass) returns `200`.
