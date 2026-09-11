@@ -949,6 +949,12 @@ than guessing correct.
 
 **Verification.** `az bicep build` on both edited templates, clean, no new warnings, after both
 corrections above. Deployed for real via `workflow_dispatch` against `armiem3-search`/
-`armiem3-api` with both `azure_search_service_name` and `pdf_files` set: the new smoke test's
-exact question, and an independent check against the live app afterward, are recorded in a
-same-day addendum below.
+`armiem3-api` with both `azure_search_service_name` and `pdf_files` set -- all steps passed,
+including the new smoke test. Independently re-verified directly against the live app afterward
+(not only the workflow's own smoke test): the exact Panel-E question returned
+`clarification_required` naming `rfi_log_047.pdf` first, and its trace's `retrieval_evaluated`
+event shows real Azure AI Search hybrid scores against all 18 corpus documents --
+`rfi_log_047.pdf` at `0.03280`, matching the original SPEC-M7 baseline report's own measured
+score for this exact question -- at `model_call_count: 0`. This is the actual, deployed-app
+version of SPEC-M7's central claim; M7 was previously live-evidenced only against the baseline
+session's own ad hoc setup, never through the repeatable deploy pipeline until this fix.
