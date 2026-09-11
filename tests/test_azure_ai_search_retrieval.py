@@ -120,6 +120,46 @@ def test_a_recall_failure_becomes_a_directed_miss_when_retrieval_finds_a_candida
     assert response.execution_metadata.get("model_call_count", 0) == 1  # the embedding call, disclosed
 
 
+def test_a_directed_miss_emits_a_dedicated_retrieval_evaluated_audit_event(tmp_path: Path) -> None:
+    """SPEC-M7 addendum (D-018): the retrieval evidence that actually
+    drove this decision must be a distinct, easy-to-find audit event --
+    not only a key buried inside clarification_requested's payload among
+    many other Raw Trace entries. apps/web/src/main.tsx looks for this
+    exact event_type to render a dedicated "AI Search Retrieval" card.
+    """
+    settings = _settings(tmp_path, [f"{CORPUS}/schedule_l2_east.pdf", f"{CORPUS}/schedule_l2_west.pdf"])
+    search_client = FakeSearchClient(results=[
+        {"filename": "schedule_l2_east.pdf", "@search.score": 0.9},
+        {"filename": "schedule_l2_west.pdf", "@search.score": 0.001},
+    ])
+    embedding_provider = FakeEmbeddingProvider()
+    service = _service(settings, search_client=search_client, embedding_provider=embedding_provider)
+    container = service.container
+
+    response = service.invoke(thread_id="dedicated-event", viewer_context=None, question="What is the connected load for Panel-E?")
+
+    events = [event for event in container.audit_store.by_trace(response.trace_id) if event.event_type == "retrieval_evaluated"]
+    assert len(events) == 1
+    payload = events[0].payload
+    assert payload["documents_evaluated"] == [
+        {"filename": "schedule_l2_east.pdf", "score": 0.9},
+        {"filename": "schedule_l2_west.pdf", "score": 0.001},
+    ]
+    assert payload["relevance_threshold"] == settings.azure_search_relevance_threshold
+    assert payload["directed_candidates"] == ["schedule_l2_east.pdf"]  # only the one that cleared the bar
+
+
+def test_no_dedicated_retrieval_event_when_retrieval_is_not_configured(tmp_path: Path) -> None:
+    settings = _settings(tmp_path, [f"{CORPUS}/schedule_l2_east.pdf", f"{CORPUS}/schedule_l2_west.pdf"])
+    service = _service(settings, search_client=None, embedding_provider=None)
+    container = service.container
+
+    response = service.invoke(thread_id="no-event", viewer_context=None, question="What is the connected load for Panel-E?")
+
+    events = [event for event in container.audit_store.by_trace(response.trace_id) if event.event_type == "retrieval_evaluated"]
+    assert events == []
+
+
 def test_a_recall_failure_stays_a_blanket_miss_when_nothing_clears_the_threshold(tmp_path: Path) -> None:
     settings = _settings(tmp_path, [f"{CORPUS}/schedule_l2_east.pdf", f"{CORPUS}/schedule_l2_west.pdf"])
     search_client = FakeSearchClient(results=[
@@ -133,6 +173,11 @@ def test_a_recall_failure_stays_a_blanket_miss_when_nothing_clears_the_threshold
     assert response.disposition.value == "clarification_required"
     assert response.answer_markdown == "I could not find this field with a confident match in any configured document."
     assert response.execution_metadata.get("model_call_count", 0) == 1  # retrieval still ran and still cost a call
+    # Still worth surfacing in a dedicated card: retrieval ran, found a
+    # candidate, but it didn't clear the bar -- that's useful evidence too.
+    events = [event for event in service.container.audit_store.by_trace(response.trace_id) if event.event_type == "retrieval_evaluated"]
+    assert len(events) == 1
+    assert events[0].payload["directed_candidates"] == []
 
 
 def test_a_failed_search_call_degrades_to_the_blanket_miss_not_an_unhandled_error(tmp_path: Path) -> None:

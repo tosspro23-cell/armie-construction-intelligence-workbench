@@ -1149,6 +1149,29 @@ Return only a corrected MultiQueryPlan JSON object."""
             model_call_count += 1
         relevant_configured = [(name, score) for name, score in retrieved if name in analyzers]
         directed_candidates = [name for name, score in relevant_configured if score >= self.settings.azure_search_relevance_threshold]
+        if relevant_configured:
+            # A dedicated event, not just a key inside the clarification_
+            # requested payload below -- found worth doing during the
+            # owner's own hands-on walkthrough (D-018 addendum): the
+            # retrieval evidence was real and correct but easy to miss,
+            # buried among many other Raw Trace payloads. This event type
+            # is what apps/web/src/main.tsx's dedicated "AI Search
+            # Retrieval" card (not the generic Raw Trace list) looks for,
+            # so the scores that actually drove the directed-vs-blanket
+            # miss decision are visible without expanding several
+            # unrelated payloads first. Only emitted when retrieval
+            # actually ran and returned candidates -- absence of this
+            # event in a trace already means "retrieval wasn't attempted
+            # or configured," which is itself informative.
+            self._audit(
+                state, "execute_pdf", "retrieval_evaluated",
+                f"Azure AI Search ranked {len(relevant_configured)} configured document(s) by relevance.",
+                {
+                    "documents_evaluated": [{"filename": name, "score": score} for name, score in relevant_configured],
+                    "relevance_threshold": self.settings.azure_search_relevance_threshold,
+                    "directed_candidates": directed_candidates,
+                },
+            )
         self._audit(
             state, "execute_pdf", "clarification_requested",
             "No configured document produced a confident deterministic match for this field.",
