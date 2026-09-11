@@ -26,7 +26,7 @@ param location string = resourceGroup().location
 @description('Name of an EXISTING Azure OpenAI (Cognitive Services) account in this resource group. Not created by this template: model/region availability for a brand-new subscription is too variable to safely automate before this has been run against a real one -- a Phase 1 simplifying default, not an owner decision. Create it out-of-band first (portal or `az cognitiveservices account create`).')
 param azureOpenAiAccountName string
 
-@description('D-022: name of an EXISTING Azure AI Search service (SPEC-M7, D-018), in this same resource group. Blank (the default) provisions no Search RBAC and apps.bicep leaves AZURE_SEARCH_ENDPOINT unset, the same opt-in-when-unset pattern as azureSearchServiceName\'s sibling settings -- SPEC-M7\'s own Affected Surfaces section named this Bicep wiring as in scope, but the milestone shipped without it: the service and its RBAC were provisioned by hand (`az role assignment create`) during that milestone\'s live baseline session, not codified here, leaving the deployed armiem3-api with retrieval merged into its code but never actually enabled. Not created by this template, the same reasoning as azureOpenAiAccountName above -- Search account creation already happened out-of-band (OD-34).')
+@description('D-022: name of an EXISTING Azure AI Search service (SPEC-M7, D-018), in this same resource group. Blank (the default) leaves apps.bicep\'s AZURE_SEARCH_ENDPOINT unset, the same opt-in-when-unset pattern as this parameter\'s siblings. This template computes the endpoint string only -- it does NOT grant RBAC on the Search service (see below for why); create the service and grant its RBAC out-of-band first, the same as azureOpenAiAccountName above and evidence.bicep\'s own storage-account RBAC.')
 param azureSearchServiceName string = ''
 
 var uniqueSuffix = uniqueString(resourceGroup().id)
@@ -45,15 +45,6 @@ var appInsightsName = '${namePrefix}-insights'
 // memory a second time.
 var acrPullRoleId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')
 var openAiUserRoleId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '5e0bd9bd-7b93-4f28-af87-19fc36ad61bd')
-// Search Index Data Reader -- read-only query access, mirroring the M7
-// baseline session's own least-privilege choice for the API's runtime
-// identity (that session separately granted itself, the operator identity,
-// Search Index Data Contributor + Search Service Contributor for the
-// indexing script -- neither belongs on the running API). Verified against
-// this real subscription (`az role definition list --name "Search Index
-// Data Reader"`), the same discipline the AcrPull GUID comment above
-// documents, not assumed from memory.
-var searchIndexDataReaderRoleId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '1407120a-92aa-4202-b7e9-c0e197c71c8f')
 var hasSearch = !empty(azureSearchServiceName)
 
 resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2022-10-01' = {
@@ -142,21 +133,23 @@ resource openAiUserAssignment 'Microsoft.Authorization/roleAssignments@2022-04-0
   }
 }
 
-resource azureSearch 'Microsoft.Search/searchServices@2023-11-01' existing = if (hasSearch) {
-  name: azureSearchServiceName
-}
-
-// API identity only (query-time retrieval), never webIdentity -- same
-// isolation reasoning as openAiUserAssignment above.
-resource searchIndexDataReaderAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (hasSearch) {
-  name: guid(azureSearch.id, identity.id, searchIndexDataReaderRoleId)
-  scope: azureSearch
-  properties: {
-    roleDefinitionId: searchIndexDataReaderRoleId
-    principalId: identity.properties.principalId
-    principalType: 'ServicePrincipal'
-  }
-}
+// Deliberately no `existing` Search resource or role assignment here,
+// unlike azureOpenAi/openAiUserAssignment above -- found live, not assumed:
+// this template's own deploying identity (the GitHub OIDC service
+// principal) holds "Role Based Access Control Administrator" with an ABAC
+// condition restricting Microsoft.Authorization/roleAssignments/write to
+// exactly two role-definition GUIDs (AcrPull, Cognitive Services OpenAI
+// User) -- the deliberate D-012 fix for an unconditioned RBAC-delegation
+// privilege-escalation path on this same identity. A first version of this
+// fix added a Search Index Data Reader role assignment here and failed
+// live with "does not have permission to perform action
+// 'Microsoft.Authorization/roleAssignments/write'" -- correctly: widening
+// that condition to cover a third role would partially reopen exactly what
+// D-012 closed. RBAC for Search stays a manual, out-of-band step instead,
+// the same pattern data.bicep/evidence.bicep already use for their own
+// role assignments -- already done for the real armiem3-search/
+// armiem3-identity pair during SPEC-M7's own baseline session
+// (`az role assignment create ... --role "Search Index Data Reader"`).
 
 output acrName string = acr.name
 output acrLoginServer string = acr.properties.loginServer
