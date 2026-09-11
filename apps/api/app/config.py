@@ -113,6 +113,13 @@ class Settings(BaseSettings):
     # authenticates this service to other Azure resources, not a browser
     # caller to this service -- a genuinely different problem (D-015).
     api_shared_secret: str | None = None
+    # Per-caller rate limiting on /api/v1/chat (D-019, closing the second
+    # half of D-012 Finding 1 -- D-016 closed the ownership half). Opt-in
+    # like api_shared_secret/database_url: unset means unlimited, today's
+    # behaviour. In-process only (app/rate_limit.py) -- see its own
+    # docstring for why that's proportional to this project's OD-22
+    # single-replica pin, not a real distributed limiter.
+    rate_limit_requests_per_minute: int | None = None
     route_confidence_threshold: float = 0.70
     pdf_confidence_threshold: float = 0.75
     max_verification_retries: int = 1
