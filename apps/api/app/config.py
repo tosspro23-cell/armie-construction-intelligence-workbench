@@ -105,6 +105,14 @@ class Settings(BaseSettings):
     # local development against a local Postgres uses a plain password.
     database_use_managed_identity: bool = False
     evidence_dir: Path = Path("./runtime/evidence")
+    # Evidence crop persistence via Azure Blob Storage (SPEC-M8, D-020),
+    # opt-in like database_url/azure_search_endpoint: unset means evidence
+    # crops stay local-filesystem-only, today's behaviour -- they will not
+    # survive a Container App revision replacement. Managed Identity only
+    # (the real armiem3evidence storage account has allowSharedKeyAccess
+    # disabled -- no API-key path exists at all).
+    evidence_storage_account_url: str | None = None
+    evidence_storage_container_name: str = "evidence"
     # Shared-secret auth for the public API (SPEC-M5, OD-28): unset (the
     # local-development default) means every route stays exactly as open as
     # it is today -- no developer needs a key to run this project locally.
