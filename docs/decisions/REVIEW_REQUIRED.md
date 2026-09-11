@@ -240,7 +240,7 @@ limiter, and documented as such. Unset by default, same opt-in pattern as every 
 setting in this project. This finding (D-012 Finding 1) is now fully resolved across
 authentication (D-015), per-caller ownership (D-016), and rate limiting (D-019).
 
-## PARTIALLY RESOLVED by M4: audit/evidence is not persisted across Container App revisions
+## RESOLVED by M4/M8: audit/evidence is not persisted across Container App revisions
 
 Found by the same independent review, confirmed directly: `audit_store_path` and `evidence_dir`
 (`apps/api/app/config.py`) are local container filesystem paths with no volume or external store
@@ -272,6 +272,19 @@ question against the deployed app correctly used conversation context from the p
 direct query against the live database (independent of the app) shows real `conversations`/
 `audit_events` rows written by it. `evidence_dir` remains the one open item above (still
 local-filesystem only, unchanged).
+
+**Resolved, 2026-09-11 (D-020, SPEC-M8):** the evidence-crop half closes. `DocumentAnalyzer.
+crop_evidence` additionally uploads to Azure Blob Storage when `evidence_storage_account_url` is
+configured (Managed Identity only, no API-key path); `GET /api/v1/evidence/{filename}` reads blob
+storage first, falling back to local disk. Real-Azure-verified, not only in CI-safe fakes
+(`docs/reports/2026-09-11-m8-evidence-blob-persistence-baseline.md`): a citation's evidence crop
+was generated, its local file deleted (simulating a revision replacement), and the real endpoint
+still served the correct bytes from the real Storage Account. Corrects the informal "needs ADLS"
+framing this gap carried since D-014/D-018 -- plain Blob Storage, not ADLS Gen2, is what this
+project's actual opaque-filename-lookup need requires (OD-37). Still open, stated plainly: the
+live `armiem3-api` Container App has not yet been redeployed with this setting enabled -- the
+Bicep/workflow wiring exists and is validated, but exercising it is a separate, owner-authorized
+step not taken in this pass.
 
 ## M4: request-tracking/cancellation state has no cross-replica representation
 
