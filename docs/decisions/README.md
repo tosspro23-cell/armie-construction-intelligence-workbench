@@ -682,3 +682,41 @@ call sites in `_execute_pdf_multi_document`, confirmed exactly the two directed/
 failed as expected, restored, reran the full suite green. 234 tests pass (227 + 7 new); `ruff
 check --select F,E9,I,F401 apps/api tests` clean; `npm run build` clean (no frontend change was
 needed — the new miss message is plain text through an existing render path).
+
+## D-018 addendum — a dedicated Audit Trail card, and a real Azure AI Search Free-tier limitation
+
+Both found during the owner's own hands-on walkthrough of the live system after the milestone
+above, not anticipated in the original spec.
+
+**The retrieval evidence was real and correct but hard to find.** The owner had to expand several
+unrelated Raw Trace payloads to locate the actual retrieval scores driving a directed-vs-blanket
+miss decision. Fixed by making `_execute_pdf_multi_document` (`app/agent/graph.py`) emit a new,
+dedicated audit event (`event_type: "retrieval_evaluated"`, added to `AuditEvent`'s `event_type`
+Literal) whenever retrieval actually ran and returned any configured-document candidate — payload
+is `documents_evaluated` (filename/score pairs), `relevance_threshold`, and `directed_candidates`,
+independent of whether any candidate cleared the bar (a below-threshold result is still worth
+seeing, not just a silent blanket miss). `apps/web/src/main.tsx` looks for this exact event type
+and renders a bordered, left-accented "AI Search Retrieval" card directly under the Decision
+Summary — a small table (Document / Relevance score / Named in answer?) — instead of relying on
+the generic Raw Trace list. Absence of the event in a trace is itself informative: it means
+retrieval wasn't attempted or configured for that turn. 9 tests now cover the seam (2 new:
+asserting the event's exact payload when a candidate clears the threshold and when none do, and
+its absence when retrieval isn't configured); verified live in a real browser against the live
+Azure services, not just unit-tested.
+
+**Azure AI Search's Free tier does not reliably support diagnostic (`OperationLogs`) export.**
+Investigated, not assumed, after enabling `armiem3-search`'s diagnostic settings (`OperationLogs`
++ `AllMetrics` -> the existing `armiem3-logs` Log Analytics workspace) and finding `AllMetrics`
+flowing normally while `OperationLogs` stayed empty for 30+ minutes -- well past normal
+first-time propagation delay. Microsoft's own documentation confirms this is a real, tier-related
+limitation, not a misconfiguration: "Conditions that maximize the integrity of data measurement
+include: Use a billable service (a service created at either the Basic or a Standard tier). The
+free service is shared by multiple subscribers, which introduces a certain amount of volatility
+as loads shift" ([Monitor Queries - Azure AI Search](https://learn.microsoft.com/en-us/azure/search/search-monitor-queries)).
+**Owner decision:** stay on the free tier; do not pursue Azure-side per-query diagnostic logs for
+this milestone. The app's own `AuditStore` (JSONL/Postgres) is the verified, reliable source of
+retrieval evidence regardless of this limitation -- confirmed unaffected, since it never depended
+on Azure Monitor. Upgrading to Basic (~$0.101/hour, a real recurring cost) to get reliable
+`OperationLogs` remains an option, not exercised here. The diagnostic setting itself
+(`armiem3-search-diagnostics`) is left enabled -- `AllMetrics` is genuinely useful and free;
+`OperationLogs` may eventually start flowing (or not) with no further action required either way.
