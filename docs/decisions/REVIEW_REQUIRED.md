@@ -185,7 +185,7 @@ SPEC-M4's `ConversationStore`/`AuditStore` persistence is a different, bespoke m
 LangGraph checkpointer), so reusing this setting's name for it would have been more confusing than
 deleting the four lines that referenced it (`config.py`, `.env.example`).
 
-## PARTIALLY RESOLVED by M5: the public API has no authentication, authorization, or rate limiting
+## RESOLVED by D-016/D-019: the public API has no authentication, authorization, or rate limiting
 
 Found by an independent review of PR #9/#10 (2026-09-09, D-012), confirmed directly: any
 internet caller can reach `armiem3-web`'s public FQDN and call `/api/v1/chat`, consuming Azure
@@ -228,6 +228,17 @@ new identity/authentication layer (OD-28's shared-secret choice stands unchanged
 created without the session flow (a direct API script) stays unrestricted, matching pre-D-016
 behaviour rather than breaking non-browser callers. Rate limiting/abuse throttling is still not
 bundled in -- unchanged, still open.
+
+**Resolved, 2026-09-11 (D-019):** rate limiting closes the last piece of this finding.
+`require_rate_limit` (`apps/api/app/security.py`), applied to `/api/v1/chat` and its resume
+endpoint only (the two routes that actually spend Azure OpenAI/Search quota), caps requests per
+rolling minute once `rate_limit_requests_per_minute`/`RATE_LIMIT_REQUESTS_PER_MINUTE` is set,
+keyed by `X-Session-Id` (falling back to the raw `Authorization` header value for callers with no
+session, the same proportional compatibility choice D-016 made for the same case). In-process
+only (`app/rate_limit.py`), matching OD-22's existing single-replica pin -- not a distributed
+limiter, and documented as such. Unset by default, same opt-in pattern as every other optional
+setting in this project. This finding (D-012 Finding 1) is now fully resolved across
+authentication (D-015), per-caller ownership (D-016), and rate limiting (D-019).
 
 ## PARTIALLY RESOLVED by M4: audit/evidence is not persisted across Container App revisions
 
