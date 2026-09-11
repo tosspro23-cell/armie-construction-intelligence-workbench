@@ -281,10 +281,14 @@ storage first, falling back to local disk. Real-Azure-verified, not only in CI-s
 was generated, its local file deleted (simulating a revision replacement), and the real endpoint
 still served the correct bytes from the real Storage Account. Corrects the informal "needs ADLS"
 framing this gap carried since D-014/D-018 -- plain Blob Storage, not ADLS Gen2, is what this
-project's actual opaque-filename-lookup need requires (OD-37). Still open, stated plainly: the
-live `armiem3-api` Container App has not yet been redeployed with this setting enabled -- the
-Bicep/workflow wiring exists and is validated, but exercising it is a separate, owner-authorized
-step not taken in this pass.
+project's actual opaque-filename-lookup need requires (OD-37).
+
+**Update, 2026-09-11: deployed and live-verified.** The live `armiem3-api` Container App was
+redeployed with `evidence_storage_account_url` set. A real chat question against the live app
+produced a citation naming a freshly-generated evidence crop; confirmed present in the real
+`armiem3evidence` Storage Account (`az storage blob list`); confirmed byte-identical when fetched
+back through the live `GET /api/v1/evidence/{filename}` endpoint. No open item remains on this
+gap.
 
 ## M4: request-tracking/cancellation state has no cross-replica representation
 
