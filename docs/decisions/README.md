@@ -720,3 +720,48 @@ on Azure Monitor. Upgrading to Basic (~$0.101/hour, a real recurring cost) to ge
 `OperationLogs` remains an option, not exercised here. The diagnostic setting itself
 (`armiem3-search-diagnostics`) is left enabled -- `AllMetrics` is genuinely useful and free;
 `OperationLogs` may eventually start flowing (or not) with no further action required either way.
+
+## D-019 — Per-caller rate limiting on `/api/v1/chat`
+
+Fix work against D-012 Finding 1's remaining half, not a new milestone -- D-016 (per-caller
+request ownership) explicitly left this open ("rate limiting was also not bundled in, the
+owner's explicit choice"), matching this project's chore/fix-vs-feat convention (D-012's
+independent-review fixes, PR #12 precedent). Branch `fix/per-caller-rate-limiting`.
+
+**Scope: `/api/v1/chat` and `/api/v1/chat/{id}/resume` only, not app-wide like `require_api_key`.**
+Rate limiting exists to bound Azure OpenAI/Search quota spend; every other route (`/api/v1/health`,
+`/api/v1/project/*`, `/api/v1/requests/*`) either costs nothing or is already covered by D-016's
+per-caller ownership check. A route-level `dependencies=[Depends(require_rate_limit)]` on just
+these two routes, not a global one, keeps that distinction explicit rather than rate-limiting
+routes that were never the actual concern.
+
+**`InMemorySlidingWindowRateLimiter` (`app/rate_limit.py`), in-process only -- a deliberate,
+documented proportionality choice, not an oversight.** This project pins `minReplicas:
+maxReplicas: 1` (OD-22) precisely because `app.state.requests` has no cross-replica
+representation; a rate limiter sharing that same constraint costs nothing further and avoids
+introducing Redis or any other shared-state dependency for a demo-scale, single-replica
+deployment. If OD-22's pin is ever lifted, this limiter would need replacing with a shared
+store at the same time, not before -- the docstring says so explicitly.
+
+**Keyed by `X-Session-Id` when present, falling back to the raw `Authorization` header value
+otherwise (OD unchanged, mirrors D-016's own compatibility choice for the same case).** Each
+browser tab gets its own budget once it has adopted the session flow; a direct API caller with
+no session shares one bucket with every other unidentified caller -- proportional, not a new gap,
+for the same reason D-016 left an unowned request unrestricted rather than inventing identity
+where none exists.
+
+**`rate_limit_requests_per_minute` unset by default (opt-in-when-unset, the same pattern as
+`api_shared_secret`/`database_url`/`azure_search_endpoint`).** No developer or CI environment is
+required to configure a limit just to run this project; local development and any deployment
+that omits it stays exactly as unlimited as it is today.
+
+**Verification.** 5 new tests (`tests/test_rate_limit.py`): the limiter's own allow/reject/window-
+slide behaviour with an injectable fake clock (no sleeping); a real `TestClient(app)` end-to-end
+test proving a second request from the same session within the window returns `429` with a
+`Retry-After` header while a *different* session's first request still succeeds (independent
+budgets, not a global counter); and an explicit no-op check when unset. Confirmed as a genuine
+reproduction, not a tautology: the route-level dependency was temporarily removed, the new
+end-to-end test failed exactly at the `429` assertion (got `200` instead), then the fix was
+restored and the full suite re-run green. 241 tests pass (236 + 5 new); `ruff check --select
+F,E9,I,F401 apps/api tests` clean; `npm run build` clean (no frontend change needed -- a `429`
+surfaces through the existing generic error-handling path).
