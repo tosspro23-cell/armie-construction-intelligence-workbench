@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import base64
+import logging
 import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 from uuid import uuid4
+
+logger = logging.getLogger(__name__)
 
 from app.schemas.models import DocumentQueryInput, DocumentQueryResult, Evidence, SourceType
 from app.schemas.vision import (
@@ -45,9 +49,22 @@ class _Table:
 class DocumentAnalyzer:
     """MVP document adapter: native text/layout first, vision adapter second."""
 
-    def __init__(self, pdf_path: Path, evidence_dir: Path) -> None:
+    def __init__(
+        self, pdf_path: Path, evidence_dir: Path,
+        blob_container_client_factory: Callable[[], object | None] | None = None,
+    ) -> None:
         self.pdf_path = pdf_path
         self.evidence_dir = evidence_dir
+        # A factory, not a stored client -- mirrors app/retrieval.py's
+        # search_client_factory (D-018's own precedent, the same
+        # per-call-construction trade-off already accepted for Azure SDK
+        # clients in this project, PROJECT_STATE.md's "per-call Azure
+        # client/credential reuse" deferred item). Every configured
+        # document's analyzer shares the same underlying factory; crop
+        # filenames are already globally unique via uuid4(), so no
+        # per-document prefixing is needed. Resolves to None unless
+        # evidence_storage_account_url is configured -- see crop_evidence.
+        self._blob_container_client_factory = blob_container_client_factory or (lambda: None)
 
     @property
     def available(self) -> bool:
@@ -92,6 +109,25 @@ class DocumentAnalyzer:
         pixmap = page.get_pixmap(matrix=fitz.Matrix(2, 2), clip=rect, alpha=False)
         output = self.evidence_dir / f"pdf-crop-{page_number}-{uuid4().hex}.png"
         pixmap.save(output)
+        # SPEC-M8: additionally upload to blob storage when configured --
+        # the local write above is unchanged so no call site or return
+        # type needs to change, and local disk stays a harmless, cheap
+        # write either way. A transient upload failure must not fail an
+        # otherwise-correct, already-computed answer (D-014's own
+        # context_persist_error proportionality: losing durability for one
+        # crop is a strictly lesser failure than losing the answer).
+        blob_container_client = self._blob_container_client_factory()
+        if blob_container_client is not None:
+            try:
+                blob_container_client.upload_blob(name=output.name, data=pixmap.tobytes("png"), overwrite=True)
+            except Exception as error:
+                # Not silently dropped (D-004 discipline) -- surfaced to
+                # Container App logs even though this method has no audit-
+                # trail access of its own (that's AgentService's job, not
+                # DocumentAnalyzer's). The citation this crop belongs to
+                # is still correct either way; only its durability across
+                # a future revision replacement is at risk.
+                logger.warning("Evidence crop blob upload failed for %s: %s", output.name, error)
         return output
 
     def page_bbox(self, page_number: int) -> list[float]:

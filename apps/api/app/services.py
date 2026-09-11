@@ -1,6 +1,7 @@
 from typing import Callable
 
 from app.config import Settings
+from app.evidence_storage import get_blob_container_client
 from app.persistence.audit_store import AuditStore
 from app.persistence.conversation_store import ConversationStore
 from app.persistence.factory import get_audit_store, get_conversation_store
@@ -20,6 +21,7 @@ VisionProviderFactory = Callable[[Settings], ModelProvider]
 EscalationProviderFactory = Callable[[Settings], "ModelProvider | None"]
 EmbeddingProviderFactory = Callable[[Settings], "EmbeddingProvider | None"]
 SearchClientFactory = Callable[[Settings], "object | None"]
+BlobContainerClientFactory = Callable[[Settings], "object | None"]
 ConversationStoreFactory = Callable[[Settings], ConversationStore]
 AuditStoreFactory = Callable[[Settings], AuditStore]
 
@@ -43,6 +45,7 @@ class ServiceContainer:
         escalation_provider_factory: EscalationProviderFactory = get_escalation_provider,
         embedding_provider_factory: EmbeddingProviderFactory = get_embedding_provider,
         search_client_factory: SearchClientFactory = get_search_client,
+        blob_container_client_factory: BlobContainerClientFactory = get_blob_container_client,
         conversation_store_factory: ConversationStoreFactory = get_conversation_store,
         audit_store_factory: AuditStoreFactory = get_audit_store,
     ) -> None:
@@ -56,8 +59,15 @@ class ServiceContainer:
         # regression tests non-reproducible. `_execute_pdf` (app/agent/
         # graph.py) is the only multi-document-aware consumer; everything
         # else keeps using `self.document_analyzer` below.
+        # SPEC-M8: every analyzer shares the same blob-container-client
+        # factory (crop filenames are already globally unique via
+        # uuid4()) -- bound to `settings` here so DocumentAnalyzer itself
+        # stays decoupled from the Settings type.
         self.document_analyzers: dict[str, DocumentAnalyzer] = {
-            pdf_path.name: DocumentAnalyzer(pdf_path=pdf_path, evidence_dir=settings.evidence_dir)
+            pdf_path.name: DocumentAnalyzer(
+                pdf_path=pdf_path, evidence_dir=settings.evidence_dir,
+                blob_container_client_factory=lambda: blob_container_client_factory(settings),
+            )
             for pdf_path in settings.pdf_paths
         }
         self.text_provider_factory = text_provider_factory
@@ -73,6 +83,12 @@ class ServiceContainer:
         # client/credential reuse" deferred item), not a proven-safe-to-
         # share-across-concurrent-requests object.
         self.search_client_factory = search_client_factory
+        # Stored (not only bound into each DocumentAnalyzer above) so
+        # app/main.py's evidence_file endpoint can honor whatever factory
+        # was injected here too -- tests substitute a fake the same way
+        # they do for search_client_factory, never by monkeypatching
+        # app.evidence_storage's production global (D-007 discipline).
+        self.blob_container_client_factory = blob_container_client_factory
 
     @property
     def document_analyzer(self) -> DocumentAnalyzer:
