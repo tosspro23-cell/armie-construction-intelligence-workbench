@@ -49,6 +49,9 @@ param databaseUrl string = ''
 @secure()
 param apiSharedSecret string
 
+@description('SPEC-M8, D-020: blob endpoint (evidence.bicep output blobEndpoint) for cited PDF evidence-crop persistence. Empty (the default) keeps evidence crops local-filesystem-only, exactly like every deployment before this milestone -- they will not survive a revision replacement. Managed Identity only (no API-key path exists in apps/api/app/evidence_storage.py at all), the same posture as databaseUrl above.')
+param evidenceStorageAccountUrl string = ''
+
 var containerAppsEnvName = '${namePrefix}-env'
 var apiAppName = '${namePrefix}-api'
 var webAppName = '${namePrefix}-web'
@@ -65,6 +68,12 @@ var databaseEnv = empty(databaseUrl) ? [] : [
   // there is no scenario in this deployment template where a databaseUrl
   // is set but should be treated as password-based.
   { name: 'DATABASE_USE_MANAGED_IDENTITY', value: 'true' }
+]
+
+// Same conditional-append reasoning as databaseEnv above (an empty string
+// is not the same opt-out as a genuinely absent env var).
+var evidenceEnv = empty(evidenceStorageAccountUrl) ? [] : [
+  { name: 'EVIDENCE_STORAGE_ACCOUNT_URL', value: evidenceStorageAccountUrl }
 ]
 
 resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2022-10-01' existing = {
@@ -173,7 +182,7 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
             // secretRef, not value (SPEC-M5 §C): pulls from the Container
             // Apps secret declared above, never inlined as plain text here.
             { name: 'API_SHARED_SECRET', secretRef: 'api-shared-secret' }
-          ], databaseEnv)
+          ], databaseEnv, evidenceEnv)
         }
       ]
     }

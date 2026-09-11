@@ -42,6 +42,10 @@ dependencies = [
   # means this is never imported at runtime -- see app/services.py's
   # search_client_factory seam).
   "azure-search-documents>=11.5,<12",
+  # SPEC-M8: evidence crop persistence (opt-in, unset
+  # evidence_storage_account_url means this is never imported at runtime --
+  # see app/evidence_storage.py's factory seam).
+  "azure-storage-blob>=12.19,<13",
 ]
 
 [build-system]

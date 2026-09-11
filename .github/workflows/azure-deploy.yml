@@ -40,6 +40,10 @@ on:
       api_shared_secret:
         description: "SPEC-M5, OD-28: the shared secret every /api/v1/* request must present as 'Authorization: Bearer <secret>'. Required, no default -- unlike database_url, leaving this blank would silently mean 'no auth,' the exact gap this milestone closes (D-012 Finding 1). workflow_dispatch string inputs are not masked automatically like repository secrets; this workflow masks it explicitly (::add-mask::) as its first step so it never appears in this run's own logs even by accident."
         required: true
+      evidence_storage_account_url:
+        description: "SPEC-M8, D-020: blob endpoint (infra/bicep/evidence.bicep output blobEndpoint, e.g. https://<storageAccountName>.blob.core.windows.net) for the already-provisioned evidence Storage Account. Blank (the default) keeps evidence crops local-filesystem-only -- they will not survive a revision replacement, exactly like every deployment before this milestone. This workflow does NOT provision infra/bicep/evidence.bicep itself, the same deliberate-separate-step pattern as data.bicep."
+        required: false
+        default: ""
 
 permissions:
   id-token: write
@@ -74,6 +78,7 @@ jobs:
       DATABASE_URL: ${{ inputs.database_url }}
       ALLOW_DISABLING_PERSISTENCE: ${{ inputs.allow_disabling_persistence }}
       API_SHARED_SECRET: ${{ inputs.api_shared_secret }}
+      EVIDENCE_STORAGE_ACCOUNT_URL: ${{ inputs.evidence_storage_account_url }}
     steps:
       # First step, before anything else can echo it by accident:
       # workflow_dispatch string inputs are not masked in logs the way
@@ -206,6 +211,7 @@ jobs:
                          webImage="${{ steps.platform.outputs.acr_login_server }}/armie-web:$IMAGE_TAG" \
                          databaseUrl="$DATABASE_URL" \
                          apiSharedSecret="$API_SHARED_SECRET" \
+                         evidenceStorageAccountUrl="$EVIDENCE_STORAGE_ACCOUNT_URL" \
             --query properties.outputs -o json > apps-outputs.json
           cat apps-outputs.json
           echo "web_app_fqdn=$(jq -r .webAppFqdn.value apps-outputs.json)" >> "$GITHUB_OUTPUT"

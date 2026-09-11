@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 
 from app.agent.graph import AgentService
 from app.config import get_settings
@@ -157,6 +157,21 @@ def evidence_file(filename: str):
     # arbitrary paths while allowing PDF crops and rendered pages in the UI.
     if Path(filename).name != filename:
         raise HTTPException(status_code=400, detail="Invalid evidence file name.")
+    # SPEC-M8: blob storage first when configured -- it is the durable
+    # source of truth once enabled (a Container App revision replacement
+    # wipes local disk, but not blob storage); local is still checked as
+    # a fallback, covering evidence written before this was enabled or a
+    # crop whose upload transiently failed (DocumentAnalyzer.crop_evidence
+    # never fails the request over that, so local remains the only copy
+    # in that case).
+    container: ServiceContainer = app.state.container
+    blob_container_client = container.blob_container_client_factory(container.settings)
+    if blob_container_client is not None:
+        try:
+            downloaded = blob_container_client.download_blob(filename).readall()
+            return Response(content=downloaded, media_type="image/png")
+        except Exception:
+            pass
     path = app.state.container.settings.evidence_dir / filename
     if not path.exists():
         raise HTTPException(status_code=404, detail="Evidence file was not found.")

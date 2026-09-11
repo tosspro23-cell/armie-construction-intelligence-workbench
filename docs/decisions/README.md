@@ -765,3 +765,63 @@ end-to-end test failed exactly at the `429` assertion (got `200` instead), then 
 restored and the full suite re-run green. 241 tests pass (236 + 5 new); `ruff check --select
 F,E9,I,F401 apps/api tests` clean; `npm run build` clean (no frontend change needed -- a `429`
 surfaces through the existing generic error-handling path).
+
+## D-020 — Evidence crop persistence via Azure Blob Storage
+
+`docs/specs/SPEC-M8-evidence-blob-persistence-v1.md`. Closes the one piece SPEC-M4/D-014 (OD-24)
+explicitly deferred: cited PDF evidence crops (`Evidence.locator["evidence_crop"]`) lived only on
+local Container App disk, so a revision replacement broke old citations even though the database
+describing them in full (D-014's Postgres-backed `AuditStore`/`ConversationStore`) survived fine.
+Full live evidence in `docs/reports/2026-09-11-m8-evidence-blob-persistence-baseline.md`.
+
+**Scoped narrower than "persist everything `evidence_dir` writes," verified before scoping, not
+assumed.** Grep-verified every call site of `DocumentAnalyzer.render_page` and `crop_evidence`:
+`render_page`'s output is never stored by filename anywhere -- every caller either serves it once
+immediately or feeds it straight into a vision-model call as base64 and discards the path. Only
+`crop_evidence`'s output filename is ever embedded into a persisted `locator`. This milestone
+accordingly touches only `crop_evidence` and the `/api/v1/evidence/{filename}` serving endpoint.
+
+**Blob Storage, not literally "ADLS Gen2" (OD-37, this spec's default, flagged for owner
+review).** Prior documents (`PROJECT_STATE.md`'s Phase 3 scoping note, D-018's addendum)
+informally named this gap "needs ADLS" -- verified before building anything, that framing was
+never a deliberate decision: this project's actual need is opaque-filename PNG lookup, no folder
+hierarchy, no analytics workload, none of which benefit from ADLS Gen2's defining feature (a
+hierarchical namespace). Plain Blob Storage (Standard LRS, one flat container) is the proportional
+choice, mirroring OD-29's "disproportionate infrastructure for [a narrow, small need]" reasoning
+already established for this project's Key Vault (D-015) and ADLS/indexer-pipeline (D-018)
+decisions.
+
+**Dual-write, not a replacement (§B).** `crop_evidence` keeps writing the local file exactly as
+before -- no call site or return type changes -- and, when a container-client factory resolves to
+a real client, additionally uploads the same PNG bytes under the same filename. A factory, not a
+stored instance (mirrors `app/retrieval.py`'s `search_client_factory`, the same per-call-
+construction trade-off already accepted for Azure SDK clients in this project). A transient
+upload failure is logged (`logger.warning`, since `DocumentAnalyzer` has no audit-trail access of
+its own) but never fails the request -- losing durability for one crop is a strictly lesser
+failure than losing an already-computed, already-verified answer, the same proportionality
+D-014's `context_persist_error` handling already established for conversation-context writes.
+
+**`GET /api/v1/evidence/{filename}`: blob-first, local-fallback (§C).** Reads
+`ServiceContainer.blob_container_client_factory` (stored on the container, not only bound into
+each `DocumentAnalyzer`, so tests -- and this endpoint -- can substitute a fake the same way they
+already do for `search_client_factory`, never by monkeypatching `app.evidence_storage`'s
+production global). Tries blob storage first when configured (the durable source of truth once
+enabled); falls back to the local file if blob storage doesn't have it (covers evidence written
+before this was enabled, or a crop whose upload transiently failed); 404s only if neither has it.
+
+**Verification.** 6 new tests (`tests/test_evidence_blob_persistence.py`): the opt-in factory's
+None-when-unset behaviour; `crop_evidence`'s dual-write (asserted against real PNG magic bytes,
+not a stub); a failed upload not failing the request; and the endpoint's blob-first/local-fallback
+behaviour from both directions. Confirmed as a genuine reproduction, not a tautology: temporarily
+removed the upload call, confirmed the dual-write test failed exactly where expected, restored,
+reran the full suite green. **Independently confirmed live, not only in CI-safe fakes** (this
+project's own precedent: a persistence claim needs proof against the real service) -- see the
+baseline report for the real Storage Account, real upload, and the actual claim (local file
+deleted, endpoint still serves the crop from blob storage) demonstrated end-to-end. 247 tests
+pass (241 + 6 new); `ruff check --select F,E9,I,F401 apps/api tests` clean; `npm run build` clean;
+`infra/bicep/*.bicep` (including the new `evidence.bicep`) validate with `az bicep build`.
+
+**Not yet deployed to the live Container App** (stated plainly, not silently implied) -- `infra/
+bicep/evidence.bicep` and the `apps.bicep`/`azure-deploy.yml` wiring exist and are validated, but
+exercising them against the live `armiem3-api` environment is a separate, owner-authorized step
+not taken in this pass, the same as D-018's own still-unexercised Azure AI Search deploy wiring.
