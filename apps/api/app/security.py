@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import secrets
 
-from fastapi import Header, HTTPException
+from fastapi import Header, HTTPException, Request
 
 from app.config import get_settings
 
@@ -58,3 +58,36 @@ def check_request_ownership(record: dict, caller_session_id: str | None) -> None
         return
     if caller_session_id != owner_session_id:
         raise HTTPException(status_code=404, detail="Request was not found.")
+
+
+def require_rate_limit(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_session_id: str | None = Header(default=None),
+) -> None:
+    """FastAPI dependency for ``POST /api/v1/chat`` only -- not app-wide
+    like ``require_api_key`` -- since rate limiting exists to bound Azure
+    OpenAI/Search quota spend (D-012 Finding 1), and only ``/api/v1/chat``
+    actually spends any (D-019, closing the half of that finding D-016
+    explicitly left open: "rate limiting was also not bundled in").
+
+    A no-op when ``rate_limit_requests_per_minute`` is unset, the same
+    opt-in-when-unset pattern as ``api_shared_secret``/``database_url``.
+
+    Keyed by ``X-Session-Id`` when the caller sent one (D-016's per-tab
+    correlation token -- each browser tab gets its own budget), falling
+    back to the raw ``Authorization`` header value otherwise (every direct
+    API caller with no session shares one bucket -- proportional to
+    D-016's own compatibility choice for the same case, not a new gap).
+    """
+    settings = get_settings()
+    if not settings.rate_limit_requests_per_minute:
+        return
+    limiter = request.app.state.rate_limiter
+    key = x_session_id or authorization or "unidentified"
+    allowed, retry_after = limiter.allow(key)
+    if not allowed:
+        raise HTTPException(
+            status_code=429, detail="Rate limit exceeded. Please slow down and try again shortly.",
+            headers={"Retry-After": str(max(int(retry_after) + 1, 1))},
+        )

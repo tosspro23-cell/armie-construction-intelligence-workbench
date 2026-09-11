@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse
 from app.agent.graph import AgentService
 from app.config import get_settings
 from app.persistence.conversation_store import ConversationStore
+from app.rate_limit import InMemorySlidingWindowRateLimiter
 from app.schemas.models import (
     AgentResponse,
     AuditEvent,
@@ -21,7 +22,12 @@ from app.schemas.models import (
     Disposition,
     VerificationStatus,
 )
-from app.security import check_request_ownership, generate_session_id, require_api_key
+from app.security import (
+    check_request_ownership,
+    generate_session_id,
+    require_api_key,
+    require_rate_limit,
+)
 from app.services import ServiceContainer
 from app.telemetry import configure_telemetry
 
@@ -39,6 +45,13 @@ async def lifespan(app: FastAPI):
     # which durably persist across a process restart when configured with
     # DATABASE_URL.
     app.state.requests = {}
+    # D-019: constructed regardless of whether rate limiting is actually
+    # enabled -- require_rate_limit (app/security.py) returns before ever
+    # consulting this when rate_limit_requests_per_minute is unset, so an
+    # unconfigured deployment pays no cost for its existence.
+    app.state.rate_limiter = InMemorySlidingWindowRateLimiter(
+        limit=settings.rate_limit_requests_per_minute or 1, window_seconds=60.0,
+    )
     yield
     # Independent-review addition: PostgresConversationStore/PostgresAuditStore
     # (SPEC-M4) hold open psycopg connection pools; InMemoryConversationStore/
@@ -187,7 +200,7 @@ async def _safe_audit_append(audit_store, event: AuditEvent) -> str | None:
         return str(error)
 
 
-@app.post("/api/v1/chat")
+@app.post("/api/v1/chat", dependencies=[Depends(require_rate_limit)])
 async def chat(request: ChatRequest, x_session_id: str | None = Header(default=None)):
     agent: AgentService = app.state.agent
     conversations: ConversationStore = app.state.container.conversation_store
@@ -282,7 +295,7 @@ async def chat(request: ChatRequest, x_session_id: str | None = Header(default=N
     return response
 
 
-@app.post("/api/v1/chat/{thread_id}/resume")
+@app.post("/api/v1/chat/{thread_id}/resume", dependencies=[Depends(require_rate_limit)])
 async def resume(thread_id: str, request: ClarificationResumeRequest, x_session_id: str | None = Header(default=None)):
     conversations: ConversationStore = app.state.container.conversation_store
     try:
