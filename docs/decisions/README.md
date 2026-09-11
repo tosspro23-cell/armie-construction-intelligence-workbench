@@ -895,27 +895,38 @@ lookup, not M7's hybrid retrieval -- despite `PROJECT_STATE.md` correctly saying
 deployed/live-evidenced," which was true of the *baseline session's* ad hoc setup, not of the
 repeatable deploy pipeline this project otherwise treats as the source of truth for what is live.
 
-**Fix, mirroring D-020's exact shape.** `azureSearchServiceName` (blank by default) is a new
-`platform.bicep` parameter: when set, it references the existing Search service (`existing`,
-the same pattern already used for `azureOpenAiAccountName`), grants the API's runtime identity
-**Search Index Data Reader** only -- read-only query access, matching the baseline session's own
-least-privilege choice, verified against this real subscription
-(`az role definition list --name "Search Index Data Reader"`) rather than assumed, the same
-discipline `platform.bicep`'s own AcrPull-GUID comment documents -- and outputs the deterministic
-`https://<name>.search.windows.net` endpoint (Azure AI Search has no custom-domain property to
-look up the way Cognitive Services accounts do). `apps.bicep` threads that endpoint into
+**Fix.** `azureSearchServiceName` (blank by default) is a new `platform.bicep` parameter that
+computes the deterministic `https://<name>.search.windows.net` endpoint (Azure AI Search has no
+custom-domain property to look up the way Cognitive Services accounts do, so no `existing`
+resource reference is needed for this alone). `apps.bicep` threads that endpoint into
 `AZURE_SEARCH_ENDPOINT` with the same conditional-append pattern as `databaseEnv`/`evidenceEnv`.
 `azure-deploy.yml` gains an `azure_search_service_name` input (blank default, same opt-in shape
-as `evidence_storage_account_url`) and a new smoke test, gated on that input being set, that
-asks SPEC-M6's own recall-failure fixture question ("What is the connected load for Panel-E?")
-and requires the *directed* clarification naming `rfi_log_047.pdf` -- not "answered": retrieval
-only ever performs document location here, never answer synthesis, so asserting "answered" would
+as `evidence_storage_account_url`) and a new smoke test, gated on that input being set, that asks
+SPEC-M6's own recall-failure fixture question ("What is the connected load for Panel-E?") and
+requires the *directed* clarification naming `rfi_log_047.pdf` -- not "answered": retrieval only
+ever performs document location here, never answer synthesis, so asserting "answered" would
 itself be the wrong bar and would have masked exactly this kind of "wired but inert" gap in a
 future regression. `azureSearchIndexName`/`azureOpenAiEmbeddingDeployment` are left at
 `config.py`'s own defaults, which already match what the real index was built with.
 
-**Verification.** `az bicep build` on both edited templates, clean, no new warnings. Real-Azure
-verification (deployment against `armiem3-search`/`armiem3-api`, the new smoke test's result, and
-an independent check against the live app) follows in a same-day addendum below, per this
-project's own standard of not claiming a deployment-shaped fix works until it has actually run
-against the real service.
+**RBAC deliberately stays out of this template**, found live rather than assumed. A first version
+of this fix also added a `platform.bicep` role assignment granting the API identity **Search
+Index Data Reader**, mirroring `openAiUserAssignment`'s existing pattern -- and it failed on a
+real deployment: `Authorization failed ... does not have permission to perform action
+'Microsoft.Authorization/roleAssignments/write'`. Checked directly (`az role assignment list`),
+not guessed: the GitHub OIDC deploy identity holds "Role Based Access Control Administrator" with
+an ABAC condition restricting `roleAssignments/write` to exactly two role-definition GUIDs
+(AcrPull, Cognitive Services OpenAI User) -- itself D-012's deliberate fix for an unconditioned
+RBAC-delegation privilege-escalation path on this same identity. Adding a third allowed role here
+would have partially reopened exactly what D-012 closed, for the sake of one milestone's
+convenience. Corrected fix: RBAC for Search stays a manual, out-of-band step, the same pattern
+`data.bicep`/`evidence.bicep` already use for their own role assignments -- and it turns out this
+was already done for the real `armiem3-search`/`armiem3-identity` pair, during SPEC-M7's own
+baseline session (confirmed via `az role assignment list` against the live scope: `armiem3-
+identity` already holds Search Index Data Reader there), so no new manual step was actually
+needed to complete this fix.
+
+**Verification.** `az bicep build` on both edited templates, clean, no new warnings, after the
+RBAC correction above. Deployed for real via `workflow_dispatch` against
+`armiem3-search`/`armiem3-api`: the new smoke test's exact question, and an independent check
+against the live app afterward, are recorded in a same-day addendum below.
