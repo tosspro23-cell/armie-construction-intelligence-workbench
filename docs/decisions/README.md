@@ -878,3 +878,44 @@ first step of the previous version's own run, and unlike that run, with no clear
 anywhere in the log. Also confirmed end-to-end, not just in the log: the leaked value now returns
 `401` from the live API, and the newly-rotated secret (generated and set as the `API_SHARED_SECRET`
 repository secret in the same pass) returns `200`.
+
+## D-022 — Azure AI Search (SPEC-M7) was never actually wired into `azure-deploy.yml`
+
+Found while auditing what is genuinely live in production versus merged-but-inert, prompted by
+the same M8 deployment gap this session had just closed. SPEC-M7's own "Affected surfaces"
+section named `infra/bicep/` (embedding deployment, `armiem3-search`'s RBAC role assignment) as
+in scope, but the milestone shipped without it: the real `armiem3-search` service and its RBAC
+were provisioned by hand (`az role assignment create`, `az search index create`) during that
+milestone's own live baseline session, never codified in `platform.bicep`/`apps.bicep`, and
+`AZURE_SEARCH_ENDPOINT` was never one of `azure-deploy.yml`'s inputs. Confirmed directly against
+the live app, not inferred from the workflow file alone: `az containerapp show`'s env list for
+`armiem3-api` had no `AZURE_SEARCH_ENDPOINT` entry at all. The practical effect: every real
+deployment since M7 merged has been running SPEC-M6's naive keyword baseline for multi-document
+lookup, not M7's hybrid retrieval -- despite `PROJECT_STATE.md` correctly saying M7 was "already
+deployed/live-evidenced," which was true of the *baseline session's* ad hoc setup, not of the
+repeatable deploy pipeline this project otherwise treats as the source of truth for what is live.
+
+**Fix, mirroring D-020's exact shape.** `azureSearchServiceName` (blank by default) is a new
+`platform.bicep` parameter: when set, it references the existing Search service (`existing`,
+the same pattern already used for `azureOpenAiAccountName`), grants the API's runtime identity
+**Search Index Data Reader** only -- read-only query access, matching the baseline session's own
+least-privilege choice, verified against this real subscription
+(`az role definition list --name "Search Index Data Reader"`) rather than assumed, the same
+discipline `platform.bicep`'s own AcrPull-GUID comment documents -- and outputs the deterministic
+`https://<name>.search.windows.net` endpoint (Azure AI Search has no custom-domain property to
+look up the way Cognitive Services accounts do). `apps.bicep` threads that endpoint into
+`AZURE_SEARCH_ENDPOINT` with the same conditional-append pattern as `databaseEnv`/`evidenceEnv`.
+`azure-deploy.yml` gains an `azure_search_service_name` input (blank default, same opt-in shape
+as `evidence_storage_account_url`) and a new smoke test, gated on that input being set, that
+asks SPEC-M6's own recall-failure fixture question ("What is the connected load for Panel-E?")
+and requires the *directed* clarification naming `rfi_log_047.pdf` -- not "answered": retrieval
+only ever performs document location here, never answer synthesis, so asserting "answered" would
+itself be the wrong bar and would have masked exactly this kind of "wired but inert" gap in a
+future regression. `azureSearchIndexName`/`azureOpenAiEmbeddingDeployment` are left at
+`config.py`'s own defaults, which already match what the real index was built with.
+
+**Verification.** `az bicep build` on both edited templates, clean, no new warnings. Real-Azure
+verification (deployment against `armiem3-search`/`armiem3-api`, the new smoke test's result, and
+an independent check against the live app) follows in a same-day addendum below, per this
+project's own standard of not claiming a deployment-shaped fix works until it has actually run
+against the real service.

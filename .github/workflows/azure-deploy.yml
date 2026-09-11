@@ -41,6 +41,10 @@ on:
         description: "SPEC-M8, D-020: blob endpoint (infra/bicep/evidence.bicep output blobEndpoint, e.g. https://<storageAccountName>.blob.core.windows.net) for the already-provisioned evidence Storage Account. Blank (the default) keeps evidence crops local-filesystem-only -- they will not survive a revision replacement, exactly like every deployment before this milestone. This workflow does NOT provision infra/bicep/evidence.bicep itself, the same deliberate-separate-step pattern as data.bicep."
         required: false
         default: ""
+      azure_search_service_name:
+        description: "D-022 (SPEC-M7, D-018): name of an already-provisioned Azure AI Search service in the same resource group, e.g. armiem3-search. Blank (the default) keeps AZURE_SEARCH_ENDPOINT unset, so the retrieval fallback stays disabled -- SPEC-M7 shipped without this wired in at all, meaning the deployed API never actually had it enabled despite the code being merged. This workflow does NOT provision the Search service itself, the same deliberate-separate-step pattern as data.bicep/evidence.bicep -- create it out-of-band first."
+        required: false
+        default: ""
 
 permissions:
   id-token: write
@@ -91,6 +95,7 @@ jobs:
       # input is threaded that way).
       API_SHARED_SECRET: ${{ secrets.API_SHARED_SECRET }}
       EVIDENCE_STORAGE_ACCOUNT_URL: ${{ inputs.evidence_storage_account_url }}
+      AZURE_SEARCH_SERVICE_NAME: ${{ inputs.azure_search_service_name }}
     steps:
       - uses: actions/checkout@v4
 
@@ -148,6 +153,7 @@ jobs:
             --template-file infra/bicep/platform.bicep \
             --parameters namePrefix="$NAME_PREFIX" \
                          azureOpenAiAccountName="$AZURE_OPENAI_ACCOUNT_NAME" \
+                         azureSearchServiceName="$AZURE_SEARCH_SERVICE_NAME" \
             --query properties.outputs -o json > platform-outputs.json
           cat platform-outputs.json
           echo "acr_login_server=$(jq -r .acrLoginServer.value platform-outputs.json)" >> "$GITHUB_OUTPUT"
@@ -159,6 +165,7 @@ jobs:
           echo "log_analytics_name=$(jq -r .logAnalyticsName.value platform-outputs.json)" >> "$GITHUB_OUTPUT"
           echo "app_insights_connection_string=$(jq -r .appInsightsConnectionString.value platform-outputs.json)" >> "$GITHUB_OUTPUT"
           echo "azure_openai_endpoint=$(jq -r .azureOpenAiEndpoint.value platform-outputs.json)" >> "$GITHUB_OUTPUT"
+          echo "azure_search_endpoint=$(jq -r .azureSearchEndpoint.value platform-outputs.json)" >> "$GITHUB_OUTPUT"
 
       # `az acr build` (ACR Tasks / cloud build) is used by default on a lot
       # of tutorials, but new subscriptions often have it blocked outright
@@ -228,6 +235,7 @@ jobs:
                          databaseUrl="$DATABASE_URL" \
                          apiSharedSecret="$API_SHARED_SECRET" \
                          evidenceStorageAccountUrl="$EVIDENCE_STORAGE_ACCOUNT_URL" \
+                         azureSearchEndpoint="${{ steps.platform.outputs.azure_search_endpoint }}" \
             --query properties.outputs -o json > apps-outputs.json
           cat apps-outputs.json
           echo "web_app_fqdn=$(jq -r .webAppFqdn.value apps-outputs.json)" >> "$GITHUB_OUTPUT"
@@ -326,6 +334,30 @@ jobs:
           answer=$(echo "$second" | jq -r .answer_markdown)
           if [ "$disposition" != "answered" ] || ! grep -q "2" <<< "$answer"; then
             echo "::error::Follow-up question on the same thread_id returned disposition=$disposition (expected answered) or an answer that does not contain the expected count (2): $answer -- conversation context likely did not round-trip through the configured ConversationStore."
+            exit 1
+          fi
+
+      # Only meaningful once azure_search_service_name is set -- proves the
+      # retrieval fallback is actually wired end-to-end on the live app, not
+      # only that Bicep accepted the parameter. Uses SPEC-M6's own recall-
+      # failure fixture question (docs/reports/2026-09-10-m7-azure-ai-search-
+      # baseline.md): the correct outcome is a *directed* clarification
+      # naming rfi_log_047.pdf, not "answered" -- retrieval only ever
+      # performs document location here, never answer synthesis (SPEC-M7's
+      # own invariant), so asserting "answered" would be the wrong bar.
+      - name: Post-deploy smoke test (Azure AI Search retrieval, only if azure_search_service_name is set)
+        if: ${{ inputs.azure_search_service_name != '' }}
+        run: |
+          set -euo pipefail
+          base="https://${{ steps.apps.outputs.web_app_fqdn }}"
+          retrieval=$(curl -sf -X POST "$base/api/v1/chat" -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $API_SHARED_SECRET" \
+            -d '{"question": "What is the connected load for Panel-E?"}')
+          echo "$retrieval" | jq .
+          disposition=$(echo "$retrieval" | jq -r .disposition)
+          answer=$(echo "$retrieval" | jq -r .answer_markdown)
+          if [ "$disposition" != "clarification_required" ] || ! grep -q "rfi_log_047.pdf" <<< "$answer"; then
+            echo "::error::Panel-E retrieval smoke question returned disposition=$disposition (expected clarification_required) or did not name rfi_log_047.pdf: $answer -- the Azure AI Search retrieval fallback does not appear to be active on the deployed app."
             exit 1
           fi
 
