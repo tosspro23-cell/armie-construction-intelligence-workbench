@@ -926,7 +926,29 @@ baseline session (confirmed via `az role assignment list` against the live scope
 identity` already holds Search Index Data Reader there), so no new manual step was actually
 needed to complete this fix.
 
-**Verification.** `az bicep build` on both edited templates, clean, no new warnings, after the
-RBAC correction above. Deployed for real via `workflow_dispatch` against
-`armiem3-search`/`armiem3-api`: the new smoke test's exact question, and an independent check
-against the live app afterward, are recorded in a same-day addendum below.
+**Second real finding, same deployment attempt.** With the RBAC correction above, `Deploy
+Container Apps` succeeded and `AZURE_SEARCH_ENDPOINT` was genuinely present on the live
+`armiem3-api` -- but the new smoke test still failed: the Panel-E question returned
+`clarification_required`, correctly, but naming `DB-L1-A`/`DB-L2-B`/`Panel-A` (the single-
+document schedule's own records), not `rfi_log_047.pdf`. Root cause, found live rather than
+assumed: `armiem3-api` had never been deployed with SPEC-M6's multi-document corpus enabled
+either -- `PDF_FILES` was never one of `azure-deploy.yml`'s inputs any more than
+`AZURE_SEARCH_ENDPOINT` was, so `_execute_pdf_multi_document` (the retrieval fallback's only
+caller) never ran at all; the deployed app has been serving the pre-M6 single-document baseline
+this whole time, unrelated to whether Search is configured. This is not a defect in M6 itself --
+its own "Affected surfaces" section deliberately excluded this template, "so no deployment that
+doesn't override it changes behaviour" (its own `PROJECT_STATE.md` entry) -- it is simply a second
+opt-in setting that also needed threading through for the *deployed* app to exercise M7 at all.
+Fixed the same way: a `pdfFiles` `apps.bicep` parameter (blank default) and a `pdf_files`
+`azure-deploy.yml` input, conditionally appended into env exactly like `databaseEnv`/`evidenceEnv`/
+`searchEnv`. Confirmed the JSON-array value survives `az deployment group create --parameters
+pdfFiles="$JSON_ARRAY"` unmangled -- checked directly via `az deployment group validate`'s own
+`properties.parameters.pdfFiles` output, not assumed, since a value that *looks* like JSON passed
+through a CLI `key=value` parameter is a genuine, real risk of misparsing worth checking rather
+than guessing correct.
+
+**Verification.** `az bicep build` on both edited templates, clean, no new warnings, after both
+corrections above. Deployed for real via `workflow_dispatch` against `armiem3-search`/
+`armiem3-api` with both `azure_search_service_name` and `pdf_files` set: the new smoke test's
+exact question, and an independent check against the live app afterward, are recorded in a
+same-day addendum below.

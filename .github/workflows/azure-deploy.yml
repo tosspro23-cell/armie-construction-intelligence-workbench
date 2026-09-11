@@ -42,7 +42,11 @@ on:
         required: false
         default: ""
       azure_search_service_name:
-        description: "D-022 (SPEC-M7, D-018): name of an already-provisioned Azure AI Search service in the same resource group, e.g. armiem3-search. Blank (the default) keeps AZURE_SEARCH_ENDPOINT unset, so the retrieval fallback stays disabled -- SPEC-M7 shipped without this wired in at all, meaning the deployed API never actually had it enabled despite the code being merged. This workflow does NOT provision the Search service itself, the same deliberate-separate-step pattern as data.bicep/evidence.bicep -- create it out-of-band first."
+        description: "D-022 (SPEC-M7, D-018): name of an already-provisioned Azure AI Search service in the same resource group, e.g. armiem3-search. Blank (the default) keeps AZURE_SEARCH_ENDPOINT unset, so the retrieval fallback stays disabled -- SPEC-M7 shipped without this wired in at all, meaning the deployed API never actually had it enabled despite the code being merged. This workflow does NOT provision the Search service itself, the same deliberate-separate-step pattern as data.bicep/evidence.bicep -- create it out-of-band first. Has no effect by itself unless pdf_files below is also set: the retrieval fallback only runs inside the multi-document code path."
+        required: false
+        default: ""
+      pdf_files:
+        description: "D-022 addendum (SPEC-M6): JSON array matching Settings.pdf_files, e.g. .env.example's own PDF_FILES format -- the full corpus is [\"armie_demo_schedule.pdf\",\"corpus/door_spec_sheet_package_a.pdf\",\"corpus/door_spec_sheet_package_b.pdf\",\"corpus/meeting_minutes_2026_02_10.pdf\",\"corpus/meeting_minutes_2026_02_24.pdf\",\"corpus/meeting_minutes_2026_03_10.pdf\",\"corpus/rfi_log_047.pdf\",\"corpus/rfi_log_052.pdf\",\"corpus/rfi_log_058.pdf\",\"corpus/rfi_log_061.pdf\",\"corpus/schedule_l2_east.pdf\",\"corpus/schedule_l2_west.pdf\",\"corpus/schedule_l3_east.pdf\",\"corpus/schedule_l3_west.pdf\",\"corpus/schedule_mezzanine.pdf\",\"corpus/schedule_roof_plant.pdf\",\"corpus/window_spec_sheet_package_a.pdf\",\"corpus/window_spec_sheet_package_b.pdf\"]. Blank (the default) keeps config.py's single-document default -- found live while verifying azure_search_service_name's own smoke test: without this, armiem3-api has never actually run the M6/M7 multi-document corpus in production, regardless of azure_search_service_name above."
         required: false
         default: ""
 
@@ -96,6 +100,7 @@ jobs:
       API_SHARED_SECRET: ${{ secrets.API_SHARED_SECRET }}
       EVIDENCE_STORAGE_ACCOUNT_URL: ${{ inputs.evidence_storage_account_url }}
       AZURE_SEARCH_SERVICE_NAME: ${{ inputs.azure_search_service_name }}
+      PDF_FILES_INPUT: ${{ inputs.pdf_files }}
     steps:
       - uses: actions/checkout@v4
 
@@ -236,6 +241,7 @@ jobs:
                          apiSharedSecret="$API_SHARED_SECRET" \
                          evidenceStorageAccountUrl="$EVIDENCE_STORAGE_ACCOUNT_URL" \
                          azureSearchEndpoint="${{ steps.platform.outputs.azure_search_endpoint }}" \
+                         pdfFiles="$PDF_FILES_INPUT" \
             --query properties.outputs -o json > apps-outputs.json
           cat apps-outputs.json
           echo "web_app_fqdn=$(jq -r .webAppFqdn.value apps-outputs.json)" >> "$GITHUB_OUTPUT"
