@@ -37,9 +37,6 @@ on:
         description: "Independent-review fix: leaving database_url blank on a redeploy of an API that currently has persistence enabled used to silently revert it to in-memory/JSONL mode, with no warning. This workflow now refuses that outright unless you set this to 'yes', confirming the downgrade is deliberate. Irrelevant (ignored) on a first deploy, or any deploy where database_url is set."
         required: false
         default: "no"
-      api_shared_secret:
-        description: "SPEC-M5, OD-28: the shared secret every /api/v1/* request must present as 'Authorization: Bearer <secret>'. Required, no default -- unlike database_url, leaving this blank would silently mean 'no auth,' the exact gap this milestone closes (D-012 Finding 1). workflow_dispatch string inputs are not masked automatically like repository secrets; this workflow masks it explicitly (::add-mask::) as its first step so it never appears in this run's own logs even by accident."
-        required: true
       evidence_storage_account_url:
         description: "SPEC-M8, D-020: blob endpoint (infra/bicep/evidence.bicep output blobEndpoint, e.g. https://<storageAccountName>.blob.core.windows.net) for the already-provisioned evidence Storage Account. Blank (the default) keeps evidence crops local-filesystem-only -- they will not survive a revision replacement, exactly like every deployment before this milestone. This workflow does NOT provision infra/bicep/evidence.bicep itself, the same deliberate-separate-step pattern as data.bicep."
         required: false
@@ -77,18 +74,37 @@ jobs:
       IMAGE_TAG: ${{ inputs.image_tag || github.sha }}
       DATABASE_URL: ${{ inputs.database_url }}
       ALLOW_DISABLING_PERSISTENCE: ${{ inputs.allow_disabling_persistence }}
-      API_SHARED_SECRET: ${{ inputs.api_shared_secret }}
+      # D-021: sourced from a repository secret, not a workflow_dispatch
+      # input, after an independent review found the previous input-based
+      # version leaked the secret in cleartext in this run's own log --
+      # GitHub prints a per-step "environment" debug annotation before that
+      # step's own commands execute, so the prior manual `::add-mask::`
+      # step (necessarily its own first step, to mask it before any later
+      # step could echo it) still showed the raw value in its own
+      # annotation, since the mask directive is itself a runtime command
+      # that hadn't run yet at that point. `secrets.*` values are masked by
+      # the runner from before the job starts, including in that same
+      # annotation -- confirmed against GitHub's own documentation, not
+      # assumed (a workflow_dispatch input has no "secret" type; this is
+      # the only way to get that guarantee for a value threaded through
+      # job-level `env:`, see this file's own header comment on why every
+      # input is threaded that way).
+      API_SHARED_SECRET: ${{ secrets.API_SHARED_SECRET }}
       EVIDENCE_STORAGE_ACCOUNT_URL: ${{ inputs.evidence_storage_account_url }}
     steps:
-      # First step, before anything else can echo it by accident:
-      # workflow_dispatch string inputs are not masked in logs the way
-      # repository/organization secrets are (GitHub only masks values it
-      # already knows are secret) -- this tells the log renderer to treat
-      # this value as one anyway, for the rest of this run.
-      - name: Mask the API shared secret in this run's logs
-        run: echo "::add-mask::$API_SHARED_SECRET"
-
       - uses: actions/checkout@v4
+
+      # A repository secret (unlike a required workflow_dispatch input)
+      # cannot be enforced as "required" by GitHub itself -- an unset repo
+      # secret just resolves to an empty string here. Fail closed instead
+      # of deploying Container Apps with no auth, the exact gap D-015/D-012
+      # Finding 1 closed.
+      - name: Verify the API_SHARED_SECRET repository secret is set
+        run: |
+          if [ -z "$API_SHARED_SECRET" ]; then
+            echo "::error::Repository secret API_SHARED_SECRET is not set. Set it once via 'gh secret set API_SHARED_SECRET' (owner-only) before dispatching this workflow."
+            exit 1
+          fi
 
       # OIDC federated login: no client secret is stored anywhere in this
       # repository, matching this milestone's Managed-Identity-only

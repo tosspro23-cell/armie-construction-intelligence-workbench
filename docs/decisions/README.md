@@ -825,3 +825,46 @@ pass (241 + 6 new); `ruff check --select F,E9,I,F401 apps/api tests` clean; `npm
 bicep/evidence.bicep` and the `apps.bicep`/`azure-deploy.yml` wiring exist and are validated, but
 exercising them against the live `armiem3-api` environment is a separate, owner-authorized step
 not taken in this pass, the same as D-018's own still-unexercised Azure AI Search deploy wiring.
+
+## D-021 — `API_SHARED_SECRET` moved from a `workflow_dispatch` input to a repository secret
+
+Found while reviewing `azure-deploy.yml`'s CI history for D-020's deployment: the 2026-09-09
+run's own log (`gh run view <id> --log`) shows `API_SHARED_SECRET` in cleartext once, in the
+job-level environment annotation GitHub prints ahead of that run's very first step -- the same
+step (`Mask the API shared secret in this run's logs`, `echo "::add-mask::$API_SHARED_SECRET"`)
+that was supposed to prevent exactly this. Every later step's own annotation shows the value
+correctly masked (`***`), confirming the mask directive worked from the moment it ran -- the gap
+is specifically that GitHub renders a step's environment annotation before that step's commands
+execute, so the one step whose job was to mask the value could not mask its own annotation.
+`workflow_dispatch` inputs have no "secret" type (only `string`/`boolean`/`choice`/`environment`/
+`number`), so a value threaded in as one is, by construction, an ordinary string GitHub has no
+prior reason to treat specially -- `::add-mask::` is a request to mask output *from that point
+forward*, not a retroactive or preemptive guarantee.
+
+**Fix, not a workaround**: `api_shared_secret` is no longer a workflow input at all.
+`azure-deploy.yml` now reads `${{ secrets.API_SHARED_SECRET }}` directly -- a genuine GitHub
+Actions secret, which the runner masks from before the job starts, in every log line including
+that same early environment annotation, per GitHub's own documentation on secret redaction. The
+manual `::add-mask::` step is removed as no longer necessary (and, on its own, not sufficient --
+leaving it would misstate where the guarantee actually comes from). Because `required: true` on
+an input has no equivalent for a repository secret (an unset one silently resolves to an empty
+string), a new pre-flight step fails the run closed if `API_SHARED_SECRET` is empty, rather than
+deploying Container Apps with no auth enforced -- mirroring the existing "verify the model
+deployments exist" and "refuse to silently disable persistence" guards' fail-closed shape.
+
+**Remediation, not just prevention**: the leaked value was rotated (a fresh secret generated and
+set as the `API_SHARED_SECRET` repository secret; the previous value stops working the moment the
+next deploy runs, since the Container App's own `API_SHARED_SECRET` env value is replaced too).
+The historical leak lived only in that one run's own log, visible to anyone with read access to
+this already-public repository's Actions history -- not a secret meant to gate anything beyond
+this demo's shared-secret auth (D-015, OD-28) in the first place, but rotated on the same
+fail-closed principle as any exposed credential regardless of its blast radius.
+
+**Verification note, stated honestly rather than overclaimed**: GitHub's secret-masking guarantee
+is a platform behavior, not something this repository's own test suite can fault-inject or
+independently reproduce the way D-020's blob dual-write was verified. What was checked directly:
+`grep` confirms no remaining reference to `inputs.api_shared_secret` anywhere in the workflow;
+the edited YAML parses (`yaml.safe_load`); and the new pre-flight step was read against GitHub's
+documented behavior for empty `secrets.*` values (silently `''`, never a workflow parse error).
+The actual masking behavior itself will be confirmed the next time this workflow is dispatched --
+by inspecting that run's own log for the environment-annotation lines this incident came from.
