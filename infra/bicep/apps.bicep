@@ -58,6 +58,9 @@ param evidenceStorageAccountUrl string = ''
 @description('D-022 addendum: JSON array matching Settings.pdf_files (SPEC-M6), e.g. .env.example\'s own PDF_FILES format. Empty (the default) keeps config.py\'s single-document default -- SPEC-M6\'s own Affected Surfaces section deliberately did not touch this template, "so no deployment that doesn\'t override it changes behaviour" (its own PROJECT_STATE.md entry). Found live while verifying D-022\'s own retrieval smoke test: without this, armiem3-api has never actually run the M6/M7 multi-document corpus in production at all, regardless of AZURE_SEARCH_ENDPOINT above -- _execute_pdf_multi_document (the only caller of the retrieval fallback) never runs against a single-element pdf_files list.')
 param pdfFiles string = ''
 
+@description('SPEC-M9, D-023: adls.bicep output dfsEndpoint (https://<account>.dfs.core.windows.net), for the already-provisioned multi-project ADLS Gen2 account. Empty (the default) keeps ADLS_ACCOUNT_URL unset, so app/services.py\'s ServiceContainer.get_project only ever resolves "demo" from the local filesystem, exactly like every deployment before this milestone. This template does NOT provision infra/bicep/adls.bicep itself, the same deliberate-separate-step pattern as data.bicep/evidence.bicep.')
+param adlsAccountUrl string = ''
+
 var containerAppsEnvName = '${namePrefix}-env'
 var apiAppName = '${namePrefix}-api'
 var webAppName = '${namePrefix}-web'
@@ -96,6 +99,12 @@ var searchEnv = empty(azureSearchEndpoint) ? [] : [
 // above.
 var pdfFilesEnv = empty(pdfFiles) ? [] : [
   { name: 'PDF_FILES', value: pdfFiles }
+]
+
+// Same conditional-append reasoning as databaseEnv/evidenceEnv/searchEnv/
+// pdfFilesEnv above.
+var adlsEnv = empty(adlsAccountUrl) ? [] : [
+  { name: 'ADLS_ACCOUNT_URL', value: adlsAccountUrl }
 ]
 
 resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2022-10-01' existing = {
@@ -204,7 +213,7 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
             // secretRef, not value (SPEC-M5 §C): pulls from the Container
             // Apps secret declared above, never inlined as plain text here.
             { name: 'API_SHARED_SECRET', secretRef: 'api-shared-secret' }
-          ], databaseEnv, evidenceEnv, searchEnv, pdfFilesEnv)
+          ], databaseEnv, evidenceEnv, searchEnv, pdfFilesEnv, adlsEnv)
         }
       ]
     }

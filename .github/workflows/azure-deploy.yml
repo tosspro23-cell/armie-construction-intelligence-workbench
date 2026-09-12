@@ -49,6 +49,10 @@ on:
         description: "D-022 addendum (SPEC-M6): JSON array matching Settings.pdf_files, e.g. .env.example's own PDF_FILES format -- the full corpus is [\"armie_demo_schedule.pdf\",\"corpus/door_spec_sheet_package_a.pdf\",\"corpus/door_spec_sheet_package_b.pdf\",\"corpus/meeting_minutes_2026_02_10.pdf\",\"corpus/meeting_minutes_2026_02_24.pdf\",\"corpus/meeting_minutes_2026_03_10.pdf\",\"corpus/rfi_log_047.pdf\",\"corpus/rfi_log_052.pdf\",\"corpus/rfi_log_058.pdf\",\"corpus/rfi_log_061.pdf\",\"corpus/schedule_l2_east.pdf\",\"corpus/schedule_l2_west.pdf\",\"corpus/schedule_l3_east.pdf\",\"corpus/schedule_l3_west.pdf\",\"corpus/schedule_mezzanine.pdf\",\"corpus/schedule_roof_plant.pdf\",\"corpus/window_spec_sheet_package_a.pdf\",\"corpus/window_spec_sheet_package_b.pdf\"]. Blank (the default) keeps config.py's single-document default -- found live while verifying azure_search_service_name's own smoke test: without this, armiem3-api has never actually run the M6/M7 multi-document corpus in production, regardless of azure_search_service_name above."
         required: false
         default: ""
+      adls_account_url:
+        description: "SPEC-M9, D-023: dfsEndpoint output (infra/bicep/adls.bicep), e.g. https://<storageAccountName>.dfs.core.windows.net, for the already-provisioned multi-project ADLS Gen2 account. Blank (the default) keeps ADLS_ACCOUNT_URL unset, so ServiceContainer.get_project only ever resolves \"demo\" from the local filesystem -- the multi-project selector stays hidden in the frontend and GET /api/v1/projects returns []. This workflow does NOT provision infra/bicep/adls.bicep itself, the same deliberate-separate-step pattern as data.bicep/evidence.bicep."
+        required: false
+        default: ""
 
 permissions:
   id-token: write
@@ -101,6 +105,7 @@ jobs:
       EVIDENCE_STORAGE_ACCOUNT_URL: ${{ inputs.evidence_storage_account_url }}
       AZURE_SEARCH_SERVICE_NAME: ${{ inputs.azure_search_service_name }}
       PDF_FILES_INPUT: ${{ inputs.pdf_files }}
+      ADLS_ACCOUNT_URL: ${{ inputs.adls_account_url }}
     steps:
       - uses: actions/checkout@v4
 
@@ -242,6 +247,7 @@ jobs:
                          evidenceStorageAccountUrl="$EVIDENCE_STORAGE_ACCOUNT_URL" \
                          azureSearchEndpoint="${{ steps.platform.outputs.azure_search_endpoint }}" \
                          pdfFiles="$PDF_FILES_INPUT" \
+                         adlsAccountUrl="$ADLS_ACCOUNT_URL" \
             --query properties.outputs -o json > apps-outputs.json
           cat apps-outputs.json
           echo "web_app_fqdn=$(jq -r .webAppFqdn.value apps-outputs.json)" >> "$GITHUB_OUTPUT"
@@ -364,6 +370,55 @@ jobs:
           answer=$(echo "$retrieval" | jq -r .answer_markdown)
           if [ "$disposition" != "clarification_required" ] || ! grep -q "rfi_log_047.pdf" <<< "$answer"; then
             echo "::error::Panel-E retrieval smoke question returned disposition=$disposition (expected clarification_required) or did not name rfi_log_047.pdf: $answer -- the Azure AI Search retrieval fallback does not appear to be active on the deployed app."
+            exit 1
+          fi
+
+      # SPEC-M9: proves project switching actually works end-to-end on the
+      # deployed app, not just that Bicep accepted the parameter. "Panel-A"
+      # is deliberately repeated across both projects with a different
+      # value (demo: 44.50, westgate: 51.20) -- the direct test that a
+      # question against one project can never resolve using the other's
+      # data.
+      - name: Post-deploy smoke test (multi-project ADLS, only if adls_account_url is set)
+        if: ${{ inputs.adls_account_url != '' }}
+        run: |
+          set -euo pipefail
+          base="https://${{ steps.apps.outputs.web_app_fqdn }}"
+          projects=$(curl -sf "$base/api/v1/projects" -H "Authorization: Bearer $API_SHARED_SECRET")
+          echo "$projects" | jq .
+          if ! echo "$projects" | jq -e 'map(.project_id) | contains(["demo", "westgate"])' > /dev/null; then
+            echo "::error::GET /api/v1/projects did not list both demo and westgate: $projects"
+            exit 1
+          fi
+
+          demo_answer=$(curl -sf -X POST "$base/api/v1/chat" -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $API_SHARED_SECRET" \
+            -d '{"project_id": "demo", "question": "What is the connected load for Panel-A?"}')
+          echo "$demo_answer" | jq .
+          if [ "$(echo "$demo_answer" | jq -r .disposition)" != "answered" ] || ! grep -q "44.50" <<< "$(echo "$demo_answer" | jq -r .answer_markdown)"; then
+            echo "::error::demo project's Panel-A question did not answer 44.50: $demo_answer"
+            exit 1
+          fi
+
+          westgate_answer=$(curl -sf -X POST "$base/api/v1/chat" -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $API_SHARED_SECRET" \
+            -d '{"project_id": "westgate", "question": "What is the connected load for Panel-A?"}')
+          echo "$westgate_answer" | jq .
+          if [ "$(echo "$westgate_answer" | jq -r .disposition)" != "answered" ] || ! grep -q "51.20" <<< "$(echo "$westgate_answer" | jq -r .answer_markdown)"; then
+            echo "::error::westgate project's Panel-A question did not answer 51.20 (its own distinct value): $westgate_answer"
+            exit 1
+          fi
+
+          # A thread bound to demo must be rejected against westgate, before
+          # any tool/model call -- the actual claim SPEC-M9 SS D exists to
+          # prove, not merely that each project answers correctly in
+          # isolation.
+          demo_thread=$(echo "$demo_answer" | jq -r .thread_id)
+          mismatch_status=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$base/api/v1/chat" -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $API_SHARED_SECRET" \
+            -d "{\"thread_id\": \"$demo_thread\", \"project_id\": \"westgate\", \"question\": \"test\"}")
+          if [ "$mismatch_status" != "409" ]; then
+            echo "::error::Continuing a demo-bound thread against westgate returned HTTP $mismatch_status, expected 409 -- thread/project binding does not appear to be enforced on the deployed app."
             exit 1
           fi
 
