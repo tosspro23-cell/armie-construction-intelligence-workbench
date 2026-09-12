@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 
 import fitz
 import ifcopenshell
 import ifcopenshell.api
 import numpy as np
-
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "demo_data"
@@ -384,9 +385,50 @@ def make_westgate_pdf() -> None:
     document.save(WESTGATE_DIR / "westgate_schedule.pdf")
 
 
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def write_projects_registry() -> None:
+    """SPEC-M9 §B/§F: the committed project registry + frozen source manifest.
+
+    A static, checked-in JSON file (like ``pdf_files``'s own default is
+    static fixture shape, not a runtime setting) -- not computed at process
+    startup, so a corrupted or substituted fixture file is a diffable,
+    reviewable change to this file, not a silent runtime recomputation.
+    ``source_set_id`` is a fixed string for this milestone (OD-41): updating
+    a fixture's content means regenerating this file with a new id, never
+    editing content behind an existing one.
+    """
+    registry = {
+        "demo": {
+            "display_name": "ARMIE Demo Project",
+            "source_set_id": "demo-v1",
+            "ifc_file": "armie_demo.ifc",
+            "pdf_files": ["armie_demo_schedule.pdf"],
+            "files": {
+                "armie_demo.ifc": {"content_sha256": _sha256(DATA / "armie_demo.ifc")},
+                "armie_demo_schedule.pdf": {"content_sha256": _sha256(DATA / "armie_demo_schedule.pdf")},
+            },
+        },
+        "westgate": {
+            "display_name": "Westgate Distribution Center",
+            "source_set_id": "westgate-v1",
+            "ifc_file": "westgate.ifc",
+            "pdf_files": ["westgate_schedule.pdf"],
+            "files": {
+                "westgate.ifc": {"content_sha256": _sha256(WESTGATE_DIR / "westgate.ifc")},
+                "westgate_schedule.pdf": {"content_sha256": _sha256(WESTGATE_DIR / "westgate_schedule.pdf")},
+            },
+        },
+    }
+    (DATA / "projects_registry.json").write_text(json.dumps(registry, indent=2, sort_keys=True) + "\n")
+
+
 if __name__ == "__main__":
     make_ifc()
     make_pdf()
     make_document_corpus()
     make_westgate_ifc()
     make_westgate_pdf()
+    write_projects_registry()
