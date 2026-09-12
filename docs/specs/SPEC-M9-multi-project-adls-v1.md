@@ -25,12 +25,20 @@ reasoning rather than contradicting it).** D-020 correctly kept evidence-crop st
 on plain Blob Storage because that need is opaque-filename lookup with no hierarchy.
 This milestone's need is the opposite of that: real folder-per-project organization,
 where a project's IFC and PDF files are naturally addressed by a path
-(`projects/<project_id>/ifc/...`, `projects/<project_id>/pdf/...`), and where
-directory-scoped access control is a real, demonstrable requirement (see §F) — exactly
-the two properties ADLS Gen2's hierarchical namespace (HNS) provides over flat Blob
-Storage and that D-020 found absent from the evidence-crop use case. This is the first
-Azure resource in this project where ADLS Gen2 is the *correct* choice, not a
-disproportionate one.
+(`projects/<project_id>/ifc/...`, `projects/<project_id>/pdf/...`), with atomic
+directory-level operations and real POSIX-style directory ACLs available on that path
+— exactly the hierarchical-namespace (HNS) properties Blob Storage's flat namespace
+does not have, and that D-020 found unnecessary for the evidence-crop use case. This
+is the first Azure resource in this project where ADLS Gen2 is the *correct* choice,
+not a disproportionate one. **Independent review correction (against `b390d53`):**
+an earlier draft of this section also cited "directory-scoped access control" as an
+ADLS-specific property and planned to demonstrate it via an ABAC role-assignment
+condition (§F) — checked against Microsoft's own documentation and found wrong:
+attribute-based conditions on a role assignment are a Blob/Data-Lake-API-shared RBAC
+feature, not an HNS-exclusive one, so a passing ABAC test would not actually prove
+ADLS was necessary. §F now uses real Data Lake Gen2 directory ACLs (genuinely
+HNS-exclusive) as the access-control proof, and treats hierarchical, atomic directory
+organization — not access control — as this section's actual justification.
 
 **Why this doesn't reopen SPEC-M7's "no ADLS/indexer pipeline" decision.** SPEC-M7
 deliberately chose push-based indexing over an ADLS-backed Azure AI Search indexer
@@ -62,6 +70,26 @@ milestone's real engineering content.
   document_analyzer(s), settings.ifc_path}` directly, with no project dimension
   anywhere in the request path. `ChatRequest` (`apps/api/app/schemas/models.py`) has
   no project field either.
+- **Two additional call sites, found by independent review of `b390d53` and confirmed
+  directly, not present in that draft's Affected surfaces.** (1) `main.py:313-321`'s
+  `resume()` reconstructs `ChatRequest(thread_id=thread_id, question=request.answer)`
+  with no project information at all — under a naive "`ChatRequest.project_id` defaults
+  to `demo`" design, resuming a clarification on any other project's thread would
+  silently answer against `demo` instead. (2) `apps/api/app/agent/graph.py`'s viewer
+  execution path (`_execute_viewer`) builds its `Evidence` with
+  `source_file=self.settings.ifc_file` — the deployment-wide global, not whichever
+  project the request actually resolved — so viewer-snapshot evidence would carry the
+  wrong project's filename even after `_execute_pdf`/IFC-query paths are made
+  project-aware.
+- `apps/web/src/IfcViewer.tsx:81` fetches `/api/v1/project/viewer-elements` directly,
+  independently of `apps/web/src/main.tsx`'s own request logic and with no project
+  parameter — a project selector added only to `main.tsx` would leave the 3D viewer
+  itself still showing whichever project's geometry the backend defaults to.
+- `apps/api/app/persistence/conversation_store.py` — `ConversationStore`'s entire
+  interface today is `get(thread_id) -> dict | None` / `set(thread_id, context: dict)
+  -> None`; there is no concept of a thread's project anywhere, and no atomic
+  "claim this thread_id for project X unless someone already has" operation to build
+  one on top of without a race.
 - `IfcRepository.__init__(self, path: Path)` and
   `DocumentAnalyzer.__init__(self, pdf_path: Path, evidence_dir: Path, ...)` both take
   plain local `Path`s — neither has any Azure- or project-awareness today, and neither
@@ -104,94 +132,190 @@ display name and its `ifc_file`/`pdf_files` (relative to that project's own root
 deployed) and `"westgate"` (new, from §A).
 
 **C. `ServiceContainer` resolves per-project resources lazily, cached for the process
-lifetime.** A new `ProjectResources` (ifc_repository + document_analyzers, mirroring
-today's two `ServiceContainer` fields exactly) and a `ServiceContainer.get_project
-(project_id: str) -> ProjectResources` method:
+lifetime, under an explicit load protocol.** A new `ProjectResources` (ifc_repository
++ document_analyzers, mirroring today's two `ServiceContainer` fields exactly, plus
+the resolved `SourceManifest` from §F) and a `ServiceContainer.get_project(project_id:
+str) -> ProjectResources` method:
 - When `adls_account_url` is unset: the only valid `project_id` is `"demo"`,
   resolved directly from `settings.ifc_path`/`settings.pdf_paths` exactly as today —
   this path is not new, just given a name, so every existing deployment is provably
   unaffected.
-- When set: on first request for a given `project_id` in this process's lifetime,
-  download that project's files from `projects/<project_id>/{ifc,pdf}/...` on ADLS
-  into a local cache directory (`Settings.project_cache_dir`, new, default
-  `./runtime/project_cache`) via `azure-storage-file-datalake`
-  (`DataLakeServiceClient`, Managed Identity only — no API-key path, continuing every
-  prior Azure resource's posture in this project), then build `IfcRepository`/
-  `DocumentAnalyzer`s pointed at the cached local paths exactly as `ServiceContainer.
-  __init__` does today, and cache the resulting `ProjectResources` in a dict keyed by
-  `project_id` for reuse by later requests — the same in-process-cache trade-off
-  already accepted for OD-22's single-replica pin, not a new architectural risk.
-  An unknown `project_id` is a 404, not a silent fallback to `"demo"`.
+- When set: `project_id` is resolved only against `demo_data/projects_registry.json`
+  (§B) — never against a caller-supplied path — and the resulting relative paths are
+  rejected if they escape that project's own prefix (the same basename/containment
+  discipline `GET /api/v1/evidence/{filename}` already enforces, applied to a new
+  surface). An unknown `project_id` is a 404, never a silent fallback to `"demo"`.
+- **Concurrency and failure contract, addressing the gap an independent review of
+  `b390d53` correctly flagged** ("one replica" bounds cross-*process* races, not
+  cross-*request* ones — this process already serves concurrent requests today): a
+  per-`project_id` `asyncio.Lock` guards the first load, so concurrent first-requests
+  for the same uncached project await one real download rather than triggering two.
+  Files are downloaded (via `azure-storage-file-datalake`'s `DataLakeServiceClient`,
+  Managed Identity only, run through `asyncio.to_thread` like every other blocking
+  Azure SDK call already in this codebase) into a temporary directory, each verified
+  against §F's manifest `content_sha256` before anything is published; the local
+  cache directory is only atomically renamed into place (`Settings.
+  project_cache_dir`, new, default `./runtime/project_cache`) once every file for
+  that project has verified successfully. A failed or interrupted download is never
+  cached, never partially published, and never silently resolved to `"demo"` — the
+  request fails (502/503) and the *next* request retries the download from scratch,
+  under the same lock.
+- `ProjectResources` is returned to, and passed explicitly through, each call site
+  that needs it (§D) — never written onto a shared mutable field on `container`
+  itself. This is deliberate, not a style preference: the independent review's
+  cross-project-contamination concerns (§D/§E below) are all instances of the same
+  underlying risk — treating "switch project" as *mutating shared state* rather than
+  *resolving a value scoped to one request* — and this is the one place in the
+  design that risk gets closed structurally instead of by convention.
 
-**D. Request path threads `project_id` through, defaulting to `"demo"`.**
-`ChatRequest.project_id: str | None = None` (`None` means `"demo"` — every existing
-caller that has never heard of this field gets identical behaviour to before this
-milestone). `/api/v1/project/*` endpoints gain a `project_id` query parameter with the
-same default. `AgentService`/`graph.py`'s `_execute_pdf`/`_execute_pdf_multi_document`/
-IFC execution paths receive the resolved `ProjectResources` for the request's
-`project_id` instead of reading `container.document_analyzers`/`container.
-ifc_repository` as deployment-wide globals — the actual refactor this milestone's
-"real app-level switching" choice requires, confined to call sites that already read
-those two fields (grep-verified before implementation, per this project's own
-"verify, don't assume" discipline for scoping).
+**D. Every conversation thread is permanently bound to one project; the request path
+enforces it, not just the frontend.** `ChatRequest.project_id: str | None = None`
+(`None` on a *new* thread means `"demo"`, preserving every existing caller's
+behaviour). `ConversationStore` (`apps/api/app/persistence/conversation_store.py`)
+gains one new method, implemented by both backends:
+`bind_project(thread_id: str, project_id: str) -> str` — atomically claims
+`project_id` for a thread that has never been bound, or returns the
+*already-bound* project_id unchanged if one exists (so a second, differently-projected
+request never silently overwrites the first). `InMemoryConversationStore` guards this
+with a per-thread `threading.Lock` (calls arrive via `asyncio.to_thread`, i.e. real OS
+threads, so a plain dict `setdefault` is not race-safe); `PostgresConversationStore`
+adds one additive column (`project_id`, matching D-014's own "one additive SQL file"
+precedent, not a new relation table) and claims it with a single `INSERT ... ON
+CONFLICT (thread_id) DO NOTHING`-shaped statement, avoiding a read-then-write race at
+the database level. Every pre-M9 thread is implicitly `"demo"` on first read after
+this migration.
+- `POST /api/v1/chat`: calls `bind_project` before resolving `ProjectResources` or
+  making any tool/model call; if the returned (bound) project_id differs from the
+  request's, the request is rejected with `409 project_mismatch` — before any work
+  happens, not after.
+- `POST /api/v1/chat/{thread_id}/resume`: today reconstructs
+  `ChatRequest(thread_id=thread_id, question=request.answer)` with no project
+  information at all (confirmed live in `main.py:313-321` by the independent review)
+  — fixed to look up the thread's already-bound project_id and use it, never a
+  request-supplied or defaulted value. `ClarificationResumeRequest` gains an optional
+  `project_id` purely for a defense-in-depth consistency check (mismatch → the same
+  `409 project_mismatch`), never as the source of truth.
+- `apps/api/app/agent/graph.py`'s `_execute_pdf`/`_execute_pdf_multi_document`/IFC
+  execution paths, and `_execute_viewer`'s `Evidence(source_file=...)` construction
+  (confirmed by the independent review to currently read the deployment-wide
+  `self.settings.ifc_file` global, not any per-request value), all take the resolved
+  `ProjectResources`/`SourceManifest` (§C/§F) as an explicit argument instead of
+  reading `container.document_analyzers`/`container.ifc_repository`/`self.settings.
+  ifc_file` — every call site that reads either field, grep-verified against the
+  real file before implementation, not assumed complete from this list alone.
 
-**E. Frontend: a project selector.** A dropdown (`apps/web/src/main.tsx`), populated
-from a new `GET /api/v1/projects` endpoint (list of `{project_id, display_name}` —
-empty behind the "demo"-only default when ADLS is unset, so the control can hide
-itself entirely in that mode rather than presenting a meaningless single-item choice).
-Selecting a project sends `project_id` on every subsequent request and — mirroring the
-existing "New conversation" affordance — starts a new conversation, per Owner decision
-OD-38.
+**E. Frontend: a project selector that actually reaches every surface that renders
+project-scoped content, with stale-response protection.** A dropdown (`apps/web/src/
+main.tsx`), populated from a new `GET /api/v1/projects` endpoint (list of
+`{project_id, display_name}` — empty behind the "demo"-only default when ADLS is
+unset, so the control can hide itself entirely rather than presenting a meaningless
+single-item choice). Selecting a project:
+- Starts a new conversation (mirroring the existing "New conversation" affordance),
+  per Owner decision OD-40.
+- Clears the current selection, viewer snapshot, and evidence focus state — an
+  independent-review finding that switching projects without clearing these would
+  let a stale selection/evidence reference from the old project linger visually even
+  though the backend has moved on.
+- Is threaded into **`apps/web/src/IfcViewer.tsx`**, not only `main.tsx` — confirmed
+  by the independent review to fetch `/api/v1/project/viewer-elements` independently
+  (line 81), with no project parameter today. The viewer reloads its geometry from
+  the newly-selected project's `project_id`.
+- Tags every in-flight request with a monotonically increasing switch sequence
+  number; a response that arrives after a *later* switch has already happened is
+  discarded on receipt (never applied to conversation/audit/viewer state), and the
+  superseded in-flight request is cancelled rather than merely ignored, closing the
+  "project A's late response corrupts project B's now-active view" race the
+  independent review raised.
 
-**F. Azure infrastructure: `infra/bicep/adls.bicep` (new).** One Storage Account with
+**F. A minimal, frozen source-provenance manifest — not a full CDE, an explicit,
+small addition addressing a real traceability gap.** An independent review correctly
+found that a globally-unique crop filename (D-020) proves no filename collision, but
+proves nothing about *which project* a piece of evidence came from or *which version*
+of a source document produced it. `demo_data/projects_registry.json` (§B) is extended
+with, per project, a `source_set_id` (a fixed string for this milestone — see Owner
+decisions) and, per file, its `content_sha256` — computed once, checked into the
+registry, and treated as immutable for this milestone: **updating a fixture's content
+requires a new `source_set_id`, never an in-place overwrite of an existing one** (this
+milestone's fixtures are static and public, so this is a real, checkable constraint,
+not aspirational). `Evidence.locator` and every relevant `AuditEvent.payload` gain
+`project_id` and `source_set_id` fields, so a trace is fully attributable end-to-end:
+which project, which frozen source set, which document, produced this answer and this
+evidence crop. `ServiceContainer.get_project`'s local cache (§C) is keyed by
+`(project_id, source_set_id)`, not `project_id` alone, so a future source-set bump
+cannot silently serve stale cached content under the same key.
+
+**G. Azure infrastructure: `infra/bicep/adls.bicep` (new).** One Storage Account with
 `isHnsEnabled: true`, `allowSharedKeyAccess: false` (Managed Identity only, matching
 every other Azure resource in this project), one filesystem (container) named
-`projects`. Two RBAC role assignments, both granted manually/out-of-band per D-022's
-own corrected precedent (this template's own deploying identity has no more authority
-to self-assign new roles here than it did for Azure AI Search):
+`projects`.
 - The API's runtime identity (`armiem3-identity`) granted **Storage Blob Data
-  Reader** at the filesystem scope — it must be able to read any project a caller
-  selects, so no narrower scope is possible for the identity that actually serves
-  requests.
-- A second, narrower role assignment **scoped by an ABAC path condition** to exactly
-  one project's directory (e.g. `projects/westgate/*`), granted to a second principal
-  (the operator's own identity is sufficient — no new service principal needs
-  minting for a demonstration) — the concrete, falsifiable proof that ADLS Gen2's
-  per-directory access control genuinely works, not merely asserted from the Bicep
-  template's shape. Acceptance criteria (below) requires a real, observed `403`
-  attempting to read outside that scope with the narrowly-scoped credential.
+  Reader** (an ARM role assignment) at the filesystem scope — it must be able to
+  read any project a caller selects, so no narrower scope is possible for the
+  identity that actually serves requests. Per D-022's confirmed precedent, the
+  GitHub OIDC deploy identity's RBAC-delegation authority is conditioned to two
+  specific role GUIDs and cannot self-assign a third — this assignment is granted
+  manually/out-of-band, the same as every prior resource's RBAC in this project.
+- A genuinely HNS-exclusive proof, corrected after independent review found the
+  original plan (an ABAC role-assignment condition) does not actually demonstrate
+  anything specific to ADLS Gen2 — ABAC conditions apply equally to plain Blob
+  Storage. Instead: real Data Lake **directory ACLs** (a data-plane operation —
+  `az storage fs access set` / the SDK's ACL API — distinct from, and not
+  necessarily gated by, the ARM-level RBAC-delegation restriction above; **which
+  identity is actually authorized to set a Gen2 ACL is a fact to verify live during
+  implementation, not assumed to need the same manual workaround as D-022's ARM role
+  assignment** — the two are different authorization mechanisms) grant a second,
+  dedicated identity — freshly created for this test, holding **no other role or
+  ACL** on this storage account, verified by listing its assignments before the
+  test runs — read access to exactly `projects/westgate/` and nothing else. See
+  Acceptance criteria for the three-part verification this identity must pass
+  (positive read, negative read, and a check that no other authorization path
+  explains the result), matching Microsoft's own documented caution that other
+  authorization paths (a broader role, a parent-scope ACL) can make a narrow grant
+  look effective when it is not actually what is being tested.
 
-**G. Tests + a real deployment-baseline report.** Unit tests for `ServiceContainer.
-get_project`'s caching/opt-in behaviour using a fake Data Lake client (D-007
-discipline, no live Azure in CI) mirroring `tests/test_azure_ai_search_retrieval.py`'s
-and `tests/test_evidence_blob_persistence.py`'s existing fake-client pattern; a
+**H. Tests + a real deployment-baseline report.** Unit tests for `ServiceContainer.
+get_project`'s caching, locking, and opt-in behaviour using a fake Data Lake client
+(D-007 discipline, no live Azure in CI) mirroring `tests/test_azure_ai_search_
+retrieval.py`'s and `tests/test_evidence_blob_persistence.py`'s existing fake-client
+pattern, including a test that two concurrent first-requests for the same uncached
+project trigger exactly one download; `ConversationStore.bind_project`'s
+claim-once/reject-mismatch semantics, including a concurrent-first-bind test; a
 `TestClient(app)`-based test proving `"demo"` behaves identically with
-`adls_account_url` unset versus set (same IFC/PDF content resolved either way); a
-regression test that every M1–M8 single-project test still passes with no
-`project_id` supplied at all. A real deployment-baseline report following this
-project's established format: both projects' data actually uploaded to a live ADLS
-Gen2 account, a real question answered against each project through the deployed (or
-locally-run-against-real-Azure) app, and the §F ABAC-scoped-credential `403` test
-performed against the real service, not simulated.
+`adls_account_url` unset versus set; a regression test that every M1–M8
+single-project test still passes with no `project_id` supplied anywhere in them. A
+real deployment-baseline report following this project's established format: both
+projects' data actually uploaded to a live ADLS Gen2 account, a real question
+answered against each project through the deployed (or locally-run-against-real-
+Azure) app, and the §G directory-ACL identity's three-part verification performed
+against the real service, not simulated. See Acceptance criteria for the full,
+independent-review-derived list this report must satisfy.
 
 ## Explicitly excluded scope
 
 - **Per-project Azure AI Search retrieval.** `"westgate"` ships with a single PDF and
   no corpus; M7's retrieval fallback continues to apply only to `"demo"`'s existing
-  index, exactly as D-022 deployed it. Building a second index or a
-  `project_id`-filterable single index is real, separate scope for a future milestone,
-  not folded in here to avoid this milestone growing into "M7 again, twice."
-- **Per-project evidence-crop namespacing.** The existing flat `evidence` Blob
-  container (D-020) is unaffected — crop filenames are already globally unique
-  (`uuid4().hex`), so cross-project collision was never a real risk requiring
-  reorganization.
-- **Postgres schema changes for project-scoped conversation/audit isolation.** A
-  `thread_id` is not validated against a single `project_id` across its turns; the
-  frontend's own "start a new conversation on project switch" behaviour (§E) is the
-  only enforcement this milestone provides. Documented as a known limitation, not
-  silently assumed safe — revisit only if a real cross-project-context bug is ever
-  observed, per this project's own "don't design for hypothetical requirements"
-  discipline.
+  index, exactly as D-022 deployed it. This is enforced as a real invariant, not an
+  accident of `"westgate"` having too few documents to reach the multi-document
+  branch (an independent review correctly flagged the original draft's phrasing as
+  relying on the latter) — `_execute_pdf_multi_document` for a non-`"demo"` project
+  must make zero calls through the search-client factory, asserted by call count in
+  tests, the same D-007-style proof the M7 precision-failure case already uses to
+  show retrieval never runs where it should not. Building a second index or a
+  `project_id`-filterable single index is real, separate scope for a future
+  milestone, not folded in here to avoid this milestone growing into "M7 again,
+  twice."
+- **Per-project evidence-crop namespacing beyond §F's manifest tagging.** The
+  existing flat `evidence` Blob container (D-020) keeps its current key space —
+  crop filenames are already globally unique (`uuid4().hex`); §F adds `project_id`/
+  `source_set_id` to the locator/audit *metadata* around a crop, not a new storage
+  layout for the crops themselves.
+- **A full configuration-management/document-versioning system.** §F's manifest is
+  deliberately minimal — a fixed `source_set_id` per project and a `content_sha256`
+  per file, sufficient to make this milestone's two static fixtures traceable and to
+  make an in-place overwrite a checkable violation rather than a silent one. It is
+  not check-in/check-out, revision history, or a general versioning capability; a
+  real content-management need for future non-fixture (e.g. uploaded, mutable)
+  projects is separate, larger scope this milestone does not attempt.
 - **True multi-tenant security isolation.** One shared `API_SHARED_SECRET` still
   gates the entire deployment (D-015); any holder can select any project. This
   milestone demonstrates data organization and Azure-side directory RBAC, not a
@@ -210,19 +334,28 @@ performed against the real service, not simulated.
 ## Affected surfaces
 
 `apps/api/app/config.py`, `apps/api/app/services.py` (`ServiceContainer`,
-`ProjectResources`, `get_project`), `apps/api/app/adls.py` (new, the Data Lake client
-factory + download logic, mirroring `evidence_storage.py`'s factory shape),
-`apps/api/app/schemas/models.py` (`ChatRequest.project_id`), `apps/api/app/main.py`
-(every `/api/v1/project/*` endpoint, new `GET /api/v1/projects`, `/api/v1/chat`),
-`apps/api/app/agent/graph.py` (threading resolved `ProjectResources` instead of
-reading `container.document_analyzers`/`container.ifc_repository` as globals),
-`apps/api/pyproject.toml` (`azure-storage-file-datalake`), `scripts/
-generate_demo_data.py` (new project-fixture generator functions),
-`demo_data/projects/westgate/` (new fixture), `demo_data/projects_registry.json`
-(new), `apps/web/src/main.tsx` (project selector), `.env.example`, `infra/bicep/
-adls.bicep` (new), `infra/bicep/apps.bicep`/`.github/workflows/azure-deploy.yml`
-(threading `adls_account_url` the same opt-in way as every prior Azure setting), new
-tests, a new deployment-baseline report.
+`ProjectResources`, `get_project`, the per-project `asyncio.Lock`/download/publish
+protocol), `apps/api/app/adls.py` (new, the Data Lake client factory + verified
+download logic, mirroring `evidence_storage.py`'s factory shape),
+`apps/api/app/persistence/conversation_store.py`/`postgres_store.py`
+(`bind_project`, the additive `project_id` column/migration),
+`apps/api/app/schemas/models.py` (`ChatRequest.project_id`,
+`ClarificationResumeRequest.project_id`, `Evidence.locator`'s new fields),
+`apps/api/app/main.py` (every `/api/v1/project/*` endpoint, new
+`GET /api/v1/projects`, `/api/v1/chat`, `/api/v1/chat/{thread_id}/resume`),
+`apps/api/app/agent/graph.py` (`_execute_pdf`, `_execute_pdf_multi_document`, and
+`_execute_viewer`'s `Evidence(source_file=...)` construction — all three, not only
+the first two — threading resolved `ProjectResources`/`SourceManifest` instead of
+reading `container.document_analyzers`/`container.ifc_repository`/`self.settings.
+ifc_file` as globals), `apps/api/pyproject.toml` (`azure-storage-file-datalake`),
+`scripts/generate_demo_data.py` (new project-fixture generator functions, plus a
+`content_sha256` manifest-writing step), `demo_data/projects/westgate/` (new
+fixture), `demo_data/projects_registry.json` (new), `apps/web/src/main.tsx` (project
+selector, switch-sequence/cancellation logic), `apps/web/src/IfcViewer.tsx` (project
+parameter, reload on switch), `.env.example`, `infra/bicep/adls.bicep` (new),
+`infra/bicep/apps.bicep`/`.github/workflows/azure-deploy.yml` (threading
+`adls_account_url` the same opt-in way as every prior Azure setting), new tests, a
+new deployment-baseline report.
 
 ## Invariants
 
@@ -230,10 +363,22 @@ All prior invariants unchanged, including SPEC-M6's "every existing single-docum
 deployment is unaffected by default" precedent, now extended one level: every existing
 single-*project* deployment (i.e., every deployment before this milestone, and every
 deployment that leaves `adls_account_url` unset after it) must be provably unaffected.
-New: a `project_id` never implicitly falls back to another project on a miss (an
-unknown `project_id` is a 404, matching this project's existing "no guessed answer"
-discipline applied to a new dimension); retrieval and IFC/PDF answers for one project
-must never be able to name or cite another project's documents.
+New:
+- A `project_id` never implicitly falls back to another project on a miss (an unknown
+  `project_id` is a 404, matching this project's existing "no guessed answer"
+  discipline applied to a new dimension).
+- A conversation thread is permanently bound to the `project_id` of its first turn
+  (`ConversationStore.bind_project`); any later turn — including a clarification
+  resume — naming a different project is rejected with `409 project_mismatch` before
+  any tool or model call, not merely discouraged by frontend convention.
+- Retrieval and IFC/PDF answers, citations, and audit events for one project must
+  never name, cite, or read another project's documents, IFC model, or source files
+  — checked, not merely believed, via the `project_id`/`source_set_id` tagging in §F
+  and the zero-search-calls assertion for non-`"demo"` projects.
+- A project's local resource cache is never served, and never falls back to a
+  previous version, once its content has failed integrity verification against §F's
+  manifest — a corrupted or partial download is a hard failure for that request, not
+  a degraded answer.
 
 ## Acceptance criteria
 
@@ -245,39 +390,77 @@ must never be able to name or cite another project's documents.
 - `(cd apps/web && npm run build)` passes.
 - `infra/bicep/adls.bicep` (and any edited existing `.bicep` files) validate with
   `az bicep build`.
-- If deployed: a real question answered correctly against `"westgate"` through the
-  live app, naming only `"westgate"`'s own IFC/PDF content; the same for `"demo"`,
-  unaffected; and a real, observed `403` from the §F ABAC-scoped credential attempting
-  to read outside its granted project directory — not asserted from the Bicep
-  template's shape alone.
+- **Cross-project isolation, exercised with genuinely overlapping fixture shapes, not
+  just two different questions.** `"demo"` and `"westgate"` each contain at least one
+  document/record/tag sharing the same name (e.g. the same board ID or storey name)
+  but a different value; a question against each project must return that project's
+  own correct value, never the other's.
+- A thread's project binding is enforced *before* any tool or model call: a request
+  that tries to continue a `"demo"`-bound thread against `"westgate"` (or vice versa)
+  is rejected with `409 project_mismatch`, verified by asserting zero calls reached
+  any provider/search/tool factory for that request.
+- A clarification issued against `"westgate"` and resumed via
+  `POST /api/v1/chat/{thread_id}/resume` stays resolved against `"westgate"` — the
+  direct regression test for the `resume()` gap the independent review found live in
+  `main.py:313-321`.
+- Two requests against different projects, issued concurrently, each resolve their
+  own project's resources and produce independently correct, non-cross-contaminated
+  answers and evidence.
+- A frontend project switch while a request for the previous project is still
+  in-flight: that request's late response, if it arrives at all, must not alter the
+  now-active project's conversation, viewer, or evidence state.
+- An interrupted/corrupted download for a project never leaves a usable cache; the
+  next request for that project retries cleanly and succeeds once the download
+  completes without error.
+- `"westgate"` (or any non-`"demo"` project) makes zero calls through the
+  search-client factory for any question, asserted by call count, not inferred from
+  "there is only one document."
+- The §G directory-ACL identity's verification is three-part, not a single `403`:
+  (1) it successfully reads a known file inside its granted `projects/westgate/`
+  scope, with content matching §F's manifest; (2) it fails to read a known-existing
+  file under `projects/demo/`; (3) its role/ACL assignments on this storage account
+  are listed and confirmed to grant nothing beyond that scope, ruling out the result
+  being explained by some other authorization path (Microsoft's own documented
+  caution about ABAC/ACL interaction, applied here to a plain-ACL setup with no ABAC
+  condition at all, so the same caution about "check what else could explain this"
+  is followed regardless of mechanism).
 - Every place this project's documentation has previously said ADLS Gen2 is
   unnecessary (D-018's OD-37, D-020's own framing) is updated to point at this
   milestone as the concrete case where it became justified, rather than left
-  contradicting it.
+  contradicting it — and to state precisely *which* ADLS property (hierarchical,
+  atomic directory organization and real directory ACLs) justified it, not access
+  control in general.
 
 ## Documentation requirements
 
 `D-023` (architecture decision record): why ADLS Gen2 is the right choice here
 specifically (contrasted directly against D-020's Blob-Storage choice, not just
-asserted), the `ServiceContainer`/`ProjectResources` refactor, and the ABAC
-path-condition RBAC proof. `PROJECT_STATE.md` M9 milestone entry. `docs/decisions/
-REVIEW_REQUIRED.md`: a new entry for the explicitly-excluded Postgres
-thread/project-isolation gap (§ Explicitly excluded), matching this project's
-established practice of tracking a known, deliberate limitation rather than letting
-it go unrecorded.
+asserted, and naming hierarchical-namespace/directory-ACL as the specific property —
+not ABAC, per the independent-review correction above), the `ServiceContainer`/
+`ProjectResources` refactor and its concurrency/failure contract, the
+`ConversationStore.bind_project` thread-binding mechanism, and the directory-ACL
+proof's three-part verification. `PROJECT_STATE.md` M9 milestone entry, explicitly
+crediting the independent review of `b390d53` for the thread-binding, resume-path,
+frontend-surface, provenance, and ABAC/ACL corrections it made before any code was
+written. No new `REVIEW_REQUIRED.md` entry for thread/project isolation is needed —
+unlike the earlier draft, this is now an enforced invariant (§D), not a documented
+gap.
 
 ## Git / stop conditions
 
-One commit per subsection (A–G), spec committed alone first. Branch:
+One commit per subsection (A–H), spec committed alone first. Branch:
 `feat/m9-multi-project-adls`. Stop and report rather than proceeding if: a
-`container.document_analyzers`/`container.ifc_repository` call site is found during
-implementation that this spec's Affected Surfaces list missed (i.e., `graph.py` or
-`main.py` reads either field from somewhere not already named above) — that means the
-refactor's actual surface is bigger than scoped, not a detail to patch around
-silently; or if ADLS Gen2's ABAC path-condition role assignment turns out not to
-enforce the way §F assumes on a real, live test (report the negative result plainly,
-per this project's own established precedent for an unfavorable real-service result,
-rather than quietly downgrading the acceptance criterion).
+`container.document_analyzers`/`container.ifc_repository`/`self.settings.ifc_file`
+call site is found during implementation that this spec's Affected Surfaces list
+missed — that means the refactor's actual surface is bigger than scoped, not a detail
+to patch around silently; if `ConversationStore.bind_project`'s atomicity guarantee
+cannot actually be made race-free against the real `PostgresConversationStore` schema
+without a larger migration than "one additive column" — report and re-scope, don't
+quietly weaken the guarantee to "usually correct"; or if the §G directory-ACL role
+assignment turns out not to enforce the way that section assumes on a real, live
+test (report the negative result plainly, per this project's own established
+precedent for an unfavorable real-service result, rather than quietly downgrading
+the acceptance criterion).
 
 ## Owner decisions
 
@@ -288,8 +471,16 @@ rather than quietly downgrading the acceptance criterion).
 - **OD-39 (owner-confirmed this session).** One new synthetic project in addition to
   the existing one (two total), not two new projects (three total) — enough to prove
   cross-project isolation without a second full corpus-scale fixture build.
-- **OD-40 (this spec's default, flagged for owner review).** Switching a project on
-  the frontend implicitly starts a new conversation, and the backend does not
-  validate a thread's `project_id` consistency across turns (no Postgres schema
-  change this pass) — revisit only if a real cross-project-context bug is observed
-  in practice, not preemptively.
+- **OD-40 (revised after independent review of `b390d53`; this spec's default,
+  flagged for owner review).** Switching a project on the frontend implicitly starts
+  a new conversation (unchanged from the original draft) — but the backend *also*
+  enforces one project per thread via `ConversationStore.bind_project` and a
+  `409 project_mismatch` rejection (§D), correcting the original draft's reliance on
+  frontend convention alone, which the independent review correctly identified as
+  insufficient against a direct API caller, a stale tab, or a reused session.
+- **OD-41 (this spec's default, flagged for owner review).** Each synthetic
+  project's fixture is versioned by a single, fixed `source_set_id` for the life of
+  this milestone — updating fixture content requires minting a new `source_set_id`
+  (and therefore a new cache key, §F), never editing content behind an existing one.
+  Revisit only if a future milestone needs living, editable project content, which
+  is explicitly not this milestone's scope.
