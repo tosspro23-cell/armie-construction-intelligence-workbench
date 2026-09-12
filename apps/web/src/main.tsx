@@ -99,7 +99,21 @@ function App() {
 
   const loadMetadata = useCallback(() => {
     const query = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
-    api<Record<string, any>>(`/api/v1/project/metadata${query}`).then((value) => { setMetadata(value); setApiState("ready"); setNeedsApiKey(false); void ensureSessionId(); })
+    api<Record<string, any>>(`/api/v1/project/metadata${query}`).then((value) => {
+      setMetadata(value); setApiState("ready"); setNeedsApiKey(false); void ensureSessionId();
+      // Fetched here, not from its own mount-time effect: this app has no
+      // gate component wrapping it, so a mount-time effect with an empty
+      // dependency array fires immediately, before the access-key gate
+      // below has resolved -- sessionStorage has no key yet on a fresh
+      // tab, so that fetch always 401ed, permanently latched `projects`
+      // to [] for the rest of the session even after a correct key was
+      // submitted (submitApiKey only re-runs loadMetadata, never that
+      // separate effect). Found live: the deployed multi-project selector
+      // never appeared at all, on every fresh session, regardless of
+      // whether ADLS mode was actually on. Fetching alongside metadata
+      // guarantees this only runs once the API key is already known good.
+      api<ProjectOption[]>("/api/v1/projects").then(setProjects).catch(() => setProjects([]));
+    })
       .catch((error: Error) => {
         if (error instanceof ApiAuthError) { setNeedsApiKey(true); return; }
         console.error(error); setApiState("unavailable"); setApiError("The local API is unavailable. Start FastAPI on port 8000 and reload.");
@@ -108,11 +122,6 @@ function App() {
 
   const handleSelection = useCallback((element: Selected | null) => { setSelected(element); setSelectionCleared(false); }, []);
   useEffect(() => { loadMetadata(); }, [loadMetadata]);
-  // GET /api/v1/projects returns [] whenever ADLS multi-project mode is
-  // off (app/main.py's own opt-in gate) -- the selector below hides
-  // itself entirely in that case rather than showing a meaningless
-  // single-item "demo"-only choice.
-  useEffect(() => { api<ProjectOption[]>("/api/v1/projects").then(setProjects).catch(() => setProjects([])); }, []);
 
   function submitApiKey(event: FormEvent) {
     event.preventDefault();
