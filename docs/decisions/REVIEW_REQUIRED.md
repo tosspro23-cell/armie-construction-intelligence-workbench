@@ -308,6 +308,25 @@ reconcile with the pre-existing `asyncio.to_thread` cancellation gap (D-012/`doc
 2026-09-09-m3-independent-review-and-fixes.md`: cancelling the awaited future does not stop the
 worker thread already running `agent.invoke`).
 
+## M9: project-resolution cache/lock is also in-process-only, same OD-22 limitation
+
+Identified while scoping SPEC-M9 (`docs/decisions/README.md` D-023), not fixed, and explicitly
+not a new gap -- the same limitation the M4 entry above already documents, applied to a second
+piece of in-process state. `ServiceContainer._project_resources`/`_project_locks`
+(`apps/api/app/services.py`) cache each project's downloaded-and-verified `ProjectResources` and
+guard its first-access download with a per-`project_id` `asyncio.Lock`, both plain in-memory
+dicts with no cross-process representation. This closes the cross-*request* race an independent
+review of the first spec draft correctly flagged (two concurrent first-requests for the same
+uncached project, inside one process, now correctly await one download instead of racing two --
+covered live by `tests/test_multi_project_adls.py`'s real `ThreadPoolExecutor` test) but does
+**not** close the cross-*replica* version of the same race, which OD-22's `minReplicas:
+maxReplicas: 1` pin already rules out for every other piece of in-process state this project
+carries (conversation/request-tracking state, and now this). Lifting OD-22 in the future would
+need this cache to move to shared storage (or accept redundant per-replica downloads, which is
+merely wasteful, not incorrect, since the underlying source-of-truth files are immutable per
+`source_set_id`) alongside whatever mechanism eventually addresses the M4 entry above -- not
+scheduled, no owner decision requested yet.
+
 ## RESOLVED by owner decision: should CI run a real Postgres, and does a service container fit the "no network egress" policy?
 
 Raised by a second independent review of SPEC-M4 (D-014 addendum): `tests/test_postgres_persistence.py`
