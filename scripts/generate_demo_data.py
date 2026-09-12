@@ -293,7 +293,100 @@ def make_document_corpus() -> None:
     )
 
 
+# SPEC-M9: a second, independent synthetic project ("westgate"), proving the
+# app can serve more than one project rather than just more than one
+# document within one project (M6). Deliberately separate from make_ifc/
+# make_pdf above -- not a refactor of them into a shared parametrized
+# helper -- so armie_demo.ifc/armie_demo_schedule.pdf (and everything that
+# depends on their exact content: SPEC-M2's Tag/reconciliation fixture,
+# SPEC-M6/M7's corpus) are provably untouched by this addition. Deliberately
+# smaller than the "demo" project (1 storey, not 2; 1 door/window, not 2
+# per level) -- this milestone's claim is about project *switching*, not
+# about repeating M6's corpus-scale fixture work a second time.
+WESTGATE_DIR = DATA / "projects" / "westgate"
+
+
+def make_westgate_ifc() -> None:
+    model = ifcopenshell.api.run("project.create_file", version="IFC4")
+    project = ifcopenshell.api.run("root.create_entity", model, ifc_class="IfcProject", name="Westgate Distribution Center")
+    site = ifcopenshell.api.run("root.create_entity", model, ifc_class="IfcSite", name="Westgate Site")
+    building = ifcopenshell.api.run("root.create_entity", model, ifc_class="IfcBuilding", name="Westgate Distribution Center")
+    # Same storey name ("Level 01") as the "demo" project, deliberately --
+    # SPEC-M9's own acceptance criteria requires at least one overlapping
+    # name/tag across projects with a different value, to prove a question
+    # against one project can never resolve using the other's data.
+    storey = ifcopenshell.api.run("root.create_entity", model, ifc_class="IfcBuildingStorey", name="Level 01", predefined_type=None)
+    storey.Elevation = 0.0
+
+    ifcopenshell.api.run("unit.assign_unit", model, length={"is_metric": True, "raw": "METERS"})
+    model_context = ifcopenshell.api.run("context.add_context", model, context_type="Model")
+    body_context = ifcopenshell.api.run(
+        "context.add_context", model, context_type="Model", context_identifier="Body", target_view="MODEL_VIEW", parent=model_context
+    )
+
+    for children, parent in (([site], project), ([building], site), ([storey], building)):
+        ifcopenshell.api.run("aggregate.assign_object", model, products=children, relating_object=parent)
+
+    walls = []
+    for x1, y1, x2, y2 in ((0, 0, 20, 0), (20, 0, 20, 14), (20, 14, 0, 14), (0, 14, 0, 0)):
+        wall = ifcopenshell.api.run("root.create_entity", model, ifc_class="IfcWall", name=f"{storey.Name} perimeter wall")
+        representation = ifcopenshell.api.run("geometry.create_2pt_wall", model, element=wall, context=body_context, p1=(x1, y1), p2=(x2, y2), elevation=0.0, height=3.5, thickness=0.25)
+        ifcopenshell.api.run("geometry.assign_representation", model, product=wall, representation=representation)
+        walls.append(wall)
+    ifcopenshell.api.run("spatial.assign_container", model, products=walls, relating_structure=storey)
+
+    door = ifcopenshell.api.run("root.create_entity", model, ifc_class="IfcDoor", name=f"{storey.Name} Door 1")
+    door.OverallHeight = 2.4
+    door.OverallWidth = 1.5
+    door_qto = ifcopenshell.api.run("pset.add_qto", model, product=door, name="Qto_DoorBaseQuantities")
+    ifcopenshell.api.run("pset.edit_qto", model, qto=door_qto, properties={"Height": 2.4, "Width": 1.5})
+    representation = ifcopenshell.api.run("geometry.add_door_representation", model, context=body_context, overall_height=2.4, overall_width=1.5)
+    ifcopenshell.api.run("geometry.assign_representation", model, product=door, representation=representation)
+    ifcopenshell.api.run("geometry.edit_object_placement", model, product=door, matrix=np.array([[1, 0, 0, 2.0], [0, 1, 0, 0.1], [0, 0, 1, 0.0], [0, 0, 0, 1.0]]))
+    ifcopenshell.api.run("spatial.assign_container", model, products=[door], relating_structure=storey)
+
+    window = ifcopenshell.api.run("root.create_entity", model, ifc_class="IfcWindow", name=f"{storey.Name} Window 1")
+    window.OverallHeight = 2.0
+    window.OverallWidth = 3.0
+    window_qto = ifcopenshell.api.run("pset.add_qto", model, product=window, name="Qto_WindowBaseQuantities")
+    ifcopenshell.api.run("pset.edit_qto", model, qto=window_qto, properties={"Height": 2.0, "Width": 3.0})
+    representation = ifcopenshell.api.run("geometry.add_window_representation", model, context=body_context, overall_height=2.0, overall_width=3.0)
+    ifcopenshell.api.run("geometry.assign_representation", model, product=window, representation=representation)
+    ifcopenshell.api.run("geometry.edit_object_placement", model, product=window, matrix=np.array([[1, 0, 0, 8.0], [0, 1, 0, 13.9], [0, 0, 1, 0.8], [0, 0, 0, 1.0]]))
+    ifcopenshell.api.run("spatial.assign_container", model, products=[window], relating_structure=storey)
+
+    WESTGATE_DIR.mkdir(parents=True, exist_ok=True)
+    model.write(WESTGATE_DIR / "westgate.ifc")
+
+
+def make_westgate_pdf() -> None:
+    """One table, reusing armie_demo_schedule.pdf's exact column geometry
+    (D-009's characterized layout) so DocumentAnalyzer.native_lookup works
+    unmodified against it. "Panel-A" is repeated from the "demo" project's
+    own schedule on purpose, with a different value (51.20 vs. 44.50) --
+    SPEC-M9's acceptance criteria requires a genuinely overlapping name
+    across projects to prove a question against one never resolves using
+    the other's value.
+    """
+    WESTGATE_DIR.mkdir(parents=True, exist_ok=True)
+    document = fitz.open()
+    page = document.new_page(width=842, height=595)
+    page.insert_text((42, 45), "WESTGATE DISTRIBUTION CENTER ENGINEERING SCHEDULE", fontsize=16, fontname="helv", color=(0.1, 0.25, 0.15))
+    page.insert_text((42, 66), "Synthetic public fixture · not a real project document", fontsize=9, fontname="helv", color=(0.3, 0.3, 0.3))
+    rows = [("Board", "Connected Load (kW)", "Diversity Factor"), ("Panel-A", "51.20", "0.73"), ("Panel-W", "9.80", "0.60")]
+    x = [48, 250, 495, 700]
+    y = 125
+    for row_index, row in enumerate(rows):
+        top = y + row_index * 58
+        page.draw_rect(fitz.Rect(x[0], top - 25, x[-1], top + 20), color=(0.35, 0.5, 0.4), fill=(0.93, 0.97, 0.94) if row_index == 0 else (1, 1, 1), width=0.8)
+        for col, value in enumerate(row):
+            page.insert_text((x[col] + 8, top), value, fontsize=11 if row_index else 10, fontname="helv", color=(0.05, 0.15, 0.1))
+    document.save(WESTGATE_DIR / "westgate_schedule.pdf")
+
+
 if __name__ == "__main__":
     make_ifc()
     make_pdf()
     make_document_corpus()
+    make_westgate_ifc()
+    make_westgate_pdf()
