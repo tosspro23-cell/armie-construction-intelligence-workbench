@@ -374,9 +374,20 @@ jobs:
           fi
 
       # SPEC-M9: proves project switching actually works end-to-end on the
-      # deployed app, not just that Bicep accepted the parameter. "Panel-A"
-      # is deliberately repeated across both projects with a different
-      # value (demo: 44.50, westgate: 51.20) -- the direct test that a
+      # deployed app, not just that Bicep accepted the parameter.
+      #
+      # demo is verified with "DB-L1-A" (18.50), not "Panel-A": D-023's
+      # corpus-mismatch fix (6c224ff) expanded demo's registry to the full
+      # SPEC-M6 corpus, and "Panel-A" is a genuine, deliberate precision-
+      # failure collision across three of demo's own documents
+      # (armie_demo_schedule.pdf, corpus/schedule_l2_east.pdf, corpus/
+      # schedule_l2_west.pdf) -- asking about it now correctly returns
+      # clarification_required, not a single answered value. "DB-L1-A"
+      # only ever appears in armie_demo_schedule.pdf, so it stays
+      # unambiguous regardless of how large demo's corpus grows.
+      # westgate keeps "Panel-A" (51.20): its own corpus is a single
+      # document, so no collision is possible there, and reusing the same
+      # board name as demo's corpus is itself part of the proof that a
       # question against one project can never resolve using the other's
       # data.
       - name: Post-deploy smoke test (multi-project ADLS, only if adls_account_url is set)
@@ -393,10 +404,10 @@ jobs:
 
           demo_answer=$(curl -sf -X POST "$base/api/v1/chat" -H "Content-Type: application/json" \
             -H "Authorization: Bearer $API_SHARED_SECRET" \
-            -d '{"project_id": "demo", "question": "What is the connected load for Panel-A?"}')
+            -d '{"project_id": "demo", "question": "What is the connected load for DB-L1-A?"}')
           echo "$demo_answer" | jq .
-          if [ "$(echo "$demo_answer" | jq -r .disposition)" != "answered" ] || ! grep -q "44.50" <<< "$(echo "$demo_answer" | jq -r .answer_markdown)"; then
-            echo "::error::demo project's Panel-A question did not answer 44.50: $demo_answer"
+          if [ "$(echo "$demo_answer" | jq -r .disposition)" != "answered" ] || ! grep -q "18.50" <<< "$(echo "$demo_answer" | jq -r .answer_markdown)"; then
+            echo "::error::demo project's DB-L1-A question did not answer 18.50: $demo_answer"
             exit 1
           fi
 
