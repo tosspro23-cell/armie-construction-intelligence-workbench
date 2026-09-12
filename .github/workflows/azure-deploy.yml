@@ -130,7 +130,7 @@ jobs:
       # (repo:org@id/repo@id:ref:...), not just names -- found live the
       # first time this workflow actually ran (D-012).
       - name: Log in to Azure (OIDC)
-        uses: azure/login@v2
+        uses: azure/login@v3
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
