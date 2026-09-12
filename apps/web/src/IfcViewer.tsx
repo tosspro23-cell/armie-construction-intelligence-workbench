@@ -26,6 +26,11 @@ type Props = {
   onSnapshot: (base64: string | null) => void;
   onStatus: (status: ViewerStatus) => void;
   focusGlobalId?: string;
+  // SPEC-M9: found live by independent review -- this component fetches
+  // its own viewer-elements independently of main.tsx's request logic, so
+  // a project selector added only there would leave the 3D viewer itself
+  // still showing whichever project the backend defaults to.
+  projectId?: string;
 };
 
 export type ViewerStatus = {
@@ -34,7 +39,7 @@ export type ViewerStatus = {
   progress?: number;
 };
 
-export function IfcViewer({ onSelection, onSnapshot, onStatus, focusGlobalId }: Props) {
+export function IfcViewer({ onSelection, onSnapshot, onStatus, focusGlobalId, projectId }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const [status, setStatus] = useState<ViewerStatus>({ phase: "initializing", message: "Preparing IFC viewer…" });
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
@@ -78,7 +83,8 @@ export function IfcViewer({ onSelection, onSnapshot, onStatus, focusGlobalId }: 
     const loadProjection = async () => {
       try {
         publishStatus({ phase: "loading", message: "Loading the ARMIE synthetic IFC demo through the local adapter…" });
-        const response = await fetch("/api/v1/project/viewer-elements", withAuthHeader());
+        const query = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
+        const response = await fetch(`/api/v1/project/viewer-elements${query}`, withAuthHeader());
         if (!response.ok) throw new Error(`Viewer source request failed (${response.status}).`);
         publishStatus({ phase: "parsing", message: "Building browser geometry from synthetic IFC elements…", progress: 20 });
         const payload = await response.json() as { elements: ViewerElement[] };
@@ -160,7 +166,12 @@ export function IfcViewer({ onSelection, onSnapshot, onStatus, focusGlobalId }: 
       renderer.dispose();
       host.replaceChildren();
     };
-  }, [onSelection, onStatus]);
+    // projectId is in this effect's dependency array on purpose: switching
+    // projects tears down the whole scene (the existing cleanup below
+    // already disposes geometry/materials/renderer) and rebuilds it for
+    // the newly-selected project's IFC, rather than trying to patch an
+    // existing scene's meshes in place.
+  }, [onSelection, onStatus, projectId]);
 
   useEffect(() => {
     if (!focusGlobalId) return;
