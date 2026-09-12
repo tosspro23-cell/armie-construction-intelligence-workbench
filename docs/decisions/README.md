@@ -958,3 +958,141 @@ event shows real Azure AI Search hybrid scores against all 18 corpus documents -
 score for this exact question -- at `model_call_count: 0`. This is the actual, deployed-app
 version of SPEC-M7's central claim; M7 was previously live-evidenced only against the baseline
 session's own ad hoc setup, never through the repeatable deploy pipeline until this fix.
+
+## D-023 — Multi-project workspace via Azure Data Lake Storage Gen2 (SPEC-M9)
+
+Owner-chosen next step after M8, over the alternative of AKS/BI expansion (Phase 4-5):
+`ServiceContainer` resolved exactly one implicit project (`ifc_file`/`pdf_files` as global
+settings) through every milestone up to M8 -- SPEC-M6 made the *document* dimension plural
+within that one project; this is the first milestone to make the *project* dimension itself
+plural. Real, application-level project switching (OD-38, chosen over an infrastructure-only
+proof), one additional project (`westgate`, OD-39) alongside `demo`.
+
+**Why ADLS Gen2, not plain Blob Storage (correcting an early instinct to reuse D-020's
+reasoning).** D-020 already corrected the informal "evidence crops need ADLS" framing --
+opaque-filename PNG lookup with no hierarchy needs nothing HNS-specific. Multi-project source
+storage is different in kind, not degree: each project is a real, named directory tree
+(`<project>/ifc/...`, `<project>/pdf/...`) an operator can `ls`, and directory-scoped POSIX ACLs
+(`user:<oid>:rwx`, HNS-exclusive) are the access-control mechanism this spec's §G explicitly set
+out to prove -- not RBAC role-assignment conditions (ABAC), which work identically on plain Blob
+Storage and would not have proven anything ADLS-specific. Confirmed live with a fresh, minimal
+service principal (created via `az ad sp create-for-rbac --skip-assignment`, never the operator's
+own `az` session) and direct REST calls to the `.dfs.core.windows.net` endpoint, deliberately
+bypassing the API's own broader RBAC grant to isolate the ACL mechanism itself: a positive read
+against `westgate/` returned `200` with hash-identical content; the identical call against
+`demo/` returned `403 AuthorizationPermissionMismatch`; and an audit of the storage account's
+role assignments plus the directory's own ACL confirmed the test identity held zero RBAC roles
+and an ACL scoped to exactly `westgate/` and its parent traversal path -- so the `200` above is
+attributable to the ACL, not some other authorization path RBAC/ACL being OR'd could have masked.
+
+**Design.** `ServiceContainer.get_project(project_id)` resolves a `SourceManifest` from a
+committed registry (`demo_data/projects_registry.json`, OD-41: one frozen `source_set_id` per
+project -- a content change mints a new one, never edits behind an existing one) to a
+`ProjectResources` (its own `ifc_repository`/`document_analyzers`), download-verify-then-
+atomically-publish per project on first access, guarded by a per-`project_id` `asyncio.Lock` so
+two concurrent first-requests for the same uncached project await one real download rather than
+racing two. `GraphState["project_resources"]` threads through `AgentService.invoke()`'s initial
+state and every one of `graph.py`'s 9 call sites that previously read `self.container`/
+`self.settings` directly (a spec's stated 3-method affected-surfaces estimate turned out
+incomplete once in the code -- expanded to the real 9 per this project's own stop-condition
+discipline, owner-authorized rather than narrowed). `ConversationStore.bind_project(thread_id,
+project_id)` gives one thread exactly one project for its lifetime via atomic claim-or-read
+semantics (`dict.setdefault` under a lock in-memory; `INSERT ... ON CONFLICT DO UPDATE SET
+thread_id = thread_projects.thread_id RETURNING project_id` in Postgres, a new `thread_projects`
+table rather than a column on `conversations`, preserving `resume()`'s None-vs-populated `.get()`
+distinction) -- enforced backend-side with a `409 project_mismatch`, not merely a frontend
+convention, per the independent review that flagged the first spec draft's OD-40 as
+under-specified.
+
+**Independent review before implementation.** A review of the first committed spec draft found
+several P1/P2 gaps before any code was written: OD-40 relying on frontend convention alone (no
+backend enforcement); `resume()`'s `ChatRequest` reconstruction losing project info entirely;
+`IfcViewer.tsx` fetching viewer elements independently of `main.tsx`'s own project state; evidence
+UUIDs alone not proving provenance (no committed content hash); the ABAC/ACL conflation above; no
+stated concurrency/failure contract; and retrieval's `project_id != "demo"` exclusion looking like
+an accident of corpus scale rather than an asserted gate. All revised into the spec before
+implementation began, not discovered mid-build.
+
+15 new tests (`tests/test_multi_project_adls.py`: opt-in/no-fallback, download-verify-cache,
+concurrency via a real `ThreadPoolExecutor` race, corruption-then-clean-retry, cache-key
+scoping by `source_set_id` not `project_id` alone, `bind_project` claim/mismatch semantics, and
+three `TestClient`-based end-to-end cases) plus mechanical `project_resources=` fallout across 9
+existing test files. 262 tests pass; `ruff` clean; `npm run build` clean.
+
+**First real deployment attempt surfaced three more real defects, none catchable by the CI-safe
+suite above -- each following this project's own "verify against the real service" discipline.**
+
+1. **Missing migration and missing grant (live Postgres only).** `thread_projects` existed in
+   `apps/api/migrations/0003_thread_projects.sql` but had never been applied against the real
+   Azure Database for PostgreSQL -- only against CI's ephemeral instance -- so the first
+   deployment's retrieval smoke test failed with `relation "thread_projects" does not exist`.
+   Applied directly (Entra-admin AAD token as the connection password, a temporary firewall rule
+   for the operator's IP, removed after). The very next request then failed with `permission
+   denied for table thread_projects`: the migration created the table but never granted the
+   API's own runtime role access to it. Fixed with a second migration
+   (`0004_grant_thread_projects.sql`) and the same temporary-firewall-rule procedure.
+
+2. **Demo's ADLS registry entry didn't match its real deployed corpus.** `demo_data/
+   projects_registry.json`'s "demo" entry listed only `armie_demo_schedule.pdf`, while the real
+   production `PDF_FILES` (D-022) carries the full 18-document SPEC-M6 corpus -- two
+   independently-maintained configuration sources with nothing enforcing they match, and once
+   ADLS mode resolves "demo" from the registry's `manifest.pdf_files` instead of
+   `settings.pdf_files`, they silently diverged. The retrieval smoke test's Panel-E question
+   returned the single-document disambiguation message instead of naming `rfi_log_047.pdf`.
+   Fixed (`fix/m9-demo-corpus-registry-mismatch`, merged): `generate_demo_data.py` gained
+   `DEMO_PDF_FILES` and regenerated the registry with demo's full corpus (`source_set_id` bumped
+   to `demo-v2`, OD-41); `ServiceContainer._download_and_publish` fixed to create each
+   `pdf_file`'s own parent directory individually (a latent bug never exercised until a
+   `corpus/`-nested path was actually downloaded); the 17 remaining corpus PDFs uploaded to ADLS.
+
+3. **ADLS-mode `document_analyzers` keyed by the nested manifest path, not the basename.**
+   After fix 2 above, a *third* deployment attempt failed differently again: a blanket miss
+   naming nothing, with zero `retrieval_evaluated`/`error`/`model_called` audit events in the
+   live trace at all -- meaning `_retrieve_relevant_documents` ran but its own `name in
+   analyzers` filter silently dropped every candidate. Root cause: `ServiceContainer.
+   _load_project_sync` (this milestone's ADLS-mode `get_project` path) keyed
+   `document_analyzers` by the manifest's own `corpus/rfi_log_047.pdf`-style path, while every
+   other consumer of that dict -- `ServiceContainer.__init__`'s own eager, non-ADLS dict, and
+   the Azure AI Search index built by `scripts/index_document_corpus.py` -- already keys by the
+   bare basename. Fixed by keying `_load_project_sync`'s dict by `Path(pdf_file).name` instead,
+   with a regression test that fails without the fix and passes with it.
+
+**A fourth defect, in the smoke test itself, not the application.** With fixes 1-3 live, the
+Azure AI Search retrieval smoke test finally passed -- but the multi-project ADLS smoke test
+failed the first time it ever actually ran to completion: its "demo" verification question asked
+about "Panel-A" expecting `44.50`, written back when demo's registry pointed at only
+`armie_demo_schedule.pdf`. Fix 2 above expanded demo's registry to the full corpus, in which
+"Panel-A" is SPEC-M6's own deliberate, genuine precision-failure collision across three of
+demo's documents -- the deployed app correctly returned `clarification_required`; the smoke
+test's own expectation was the stale part. Fixed by switching demo's check to "DB-L1-A"
+(`18.50`), a board name that only ever appears in `armie_demo_schedule.pdf`; westgate's own
+check keeps "Panel-A" (`51.20`), since its corpus is a single document and no collision is
+possible there.
+
+**A fifth defect, frontend-only, found by the owner's own live walkthrough after all backend
+smoke tests passed.** The multi-project selector -- this milestone's whole point -- never
+rendered on the real deployed app, in any session, regardless of whether ADLS mode was
+genuinely on. Root cause: `App` (`apps/web/src/main.tsx`) has no gate component wrapping it --
+the access-key prompt is an early `return` inside the same component -- so its `GET /api/v1/
+projects` effect (empty dependency array) fired on first mount, before `sessionStorage` had a
+key (a fresh tab always starts with none), always got a `401`, and latched `projects` to `[]`
+via its own `.catch`; `submitApiKey` only re-invokes the metadata fetch, never that separate
+effect, so the empty list was permanent for the rest of the session even after a correct key was
+entered. Fixed by fetching `/api/v1/projects` from inside the metadata-load success callback
+instead (the same point `ensureSessionId()` already runs from), guaranteeing it only ever fires
+once the API key is already known good. No test caught this because no frontend test exercises
+the fresh-session access-key-gate flow combined with the project selector -- exactly the kind of
+gap this project's established live-walkthrough practice exists to catch.
+
+**Verification.** All five defects fixed and redeployed; the full `azure-deploy.yml` run
+(including the multi-project ADLS smoke test, run to completion for the first time) passed
+end-to-end: `GET /api/v1/projects` lists `demo`/`westgate`; demo answers `DB-L1-A` at `18.50`;
+westgate answers `Panel-A` at `51.20` (a deliberately shared board name across the two
+projects' own corpora, with a different value in each, proving one project's question can never
+resolve using the other's data); a demo-bound thread continued against `westgate` returns `409`.
+Independently re-verified in a real browser against the redeployed app, not only via the
+workflow's own smoke test: the project selector now renders both projects, switching to
+`westgate` rebuilds the IFC viewer with its own geometry and resets the conversation, and a
+live chat question against each project answers correctly with its own cited evidence. Full
+account, including the ADLS directory-ACL three-part verification's exact commands, in
+`docs/reports/2026-09-12-m9-multi-project-adls-baseline.md`.
