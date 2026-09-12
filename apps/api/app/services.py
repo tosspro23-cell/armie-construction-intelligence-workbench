@@ -246,11 +246,18 @@ class ServiceContainer:
             )
         tmp_dir = Path(tempfile.mkdtemp(dir=str(self.settings.project_cache_dir)))
         try:
-            (tmp_dir / "ifc").mkdir(parents=True, exist_ok=True)
-            (tmp_dir / "pdf").mkdir(parents=True, exist_ok=True)
-            self._download_verified(client, project_id, "ifc", manifest.ifc_file, manifest.file_hashes[manifest.ifc_file], tmp_dir / "ifc" / manifest.ifc_file)
+            ifc_dest = tmp_dir / "ifc" / manifest.ifc_file
+            ifc_dest.parent.mkdir(parents=True, exist_ok=True)
+            self._download_verified(client, project_id, "ifc", manifest.ifc_file, manifest.file_hashes[manifest.ifc_file], ifc_dest)
             for pdf_file in manifest.pdf_files:
-                self._download_verified(client, project_id, "pdf", pdf_file, manifest.file_hashes[pdf_file], tmp_dir / "pdf" / pdf_file)
+                # pdf_file may itself carry a subdirectory (e.g. SPEC-M6's
+                # "corpus/rfi_log_047.pdf", matching Settings.pdf_files'
+                # own relative-path convention) -- mkdir per-file, not
+                # once for a flat "pdf/" directory, found live when a
+                # registry entry first carried a nested path.
+                pdf_dest = tmp_dir / "pdf" / pdf_file
+                pdf_dest.parent.mkdir(parents=True, exist_ok=True)
+                self._download_verified(client, project_id, "pdf", pdf_file, manifest.file_hashes[pdf_file], pdf_dest)
             cache_dir.parent.mkdir(parents=True, exist_ok=True)
             tmp_dir.rename(cache_dir)
         except Exception:

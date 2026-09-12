@@ -389,6 +389,21 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+# SPEC-M9 addendum: "demo"'s registry entry must list the same pdf_files
+# D-022/D-022-addendum actually deployed via the PDF_FILES env var (the
+# full SPEC-M6 corpus, for SPEC-M7's retrieval to have something to rank)
+# -- found live, not assumed: a first version of this registry only listed
+# armie_demo_schedule.pdf, so once ADLS mode resolved "demo" from this
+# registry instead of from settings.pdf_files, the real deployed app's
+# Azure AI Search retrieval smoke test silently regressed to the single-
+# document baseline. The two must describe the same corpus, not two
+# independently-maintained lists that can drift.
+DEMO_PDF_FILES = [
+    "armie_demo_schedule.pdf",
+    *(f"corpus/{path.name}" for path in sorted(CORPUS_DIR.glob("*.pdf"))),
+]
+
+
 def write_projects_registry() -> None:
     """SPEC-M9 §B/§F: the committed project registry + frozen source manifest.
 
@@ -403,12 +418,15 @@ def write_projects_registry() -> None:
     registry = {
         "demo": {
             "display_name": "ARMIE Demo Project",
-            "source_set_id": "demo-v1",
+            "source_set_id": "demo-v2",
             "ifc_file": "armie_demo.ifc",
-            "pdf_files": ["armie_demo_schedule.pdf"],
+            "pdf_files": DEMO_PDF_FILES,
             "files": {
                 "armie_demo.ifc": {"content_sha256": _sha256(DATA / "armie_demo.ifc")},
-                "armie_demo_schedule.pdf": {"content_sha256": _sha256(DATA / "armie_demo_schedule.pdf")},
+                **{
+                    pdf_file: {"content_sha256": _sha256(DATA / pdf_file)}
+                    for pdf_file in DEMO_PDF_FILES
+                },
             },
         },
         "westgate": {

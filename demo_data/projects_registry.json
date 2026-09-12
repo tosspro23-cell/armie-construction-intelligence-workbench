@@ -7,13 +7,81 @@
       },
       "armie_demo_schedule.pdf": {
         "content_sha256": "8103b0bcb5ce9805b892ce176248cd0ca01ae741c4b92f259fdd7d403ac1ba33"
+      },
+      "corpus/door_spec_sheet_package_a.pdf": {
+        "content_sha256": "54cf3a0b47d2bf983656cf0e3ba065facaa66730c097a8b6ee7cf6ac5453c25a"
+      },
+      "corpus/door_spec_sheet_package_b.pdf": {
+        "content_sha256": "8690170d2714ee1c8a1a30de7024892d0e0b3adc1e0e6c73818453e532074b61"
+      },
+      "corpus/meeting_minutes_2026_02_10.pdf": {
+        "content_sha256": "496842007823cce96e87e9fa9572b7a4b9d5598e4b0ce36c07efb30f0ee13892"
+      },
+      "corpus/meeting_minutes_2026_02_24.pdf": {
+        "content_sha256": "698302d37111d65a0be153008cb32e84352fdbd0e67b8248b939081599395895"
+      },
+      "corpus/meeting_minutes_2026_03_10.pdf": {
+        "content_sha256": "4a504789ec88f62710e1add9d9908478c1908cee906941bb9fd158b25f0b7f11"
+      },
+      "corpus/rfi_log_047.pdf": {
+        "content_sha256": "9c9be14096fef3f5d55e2ff0941bf4fab9cc7c81baeb769522ff2064e693275e"
+      },
+      "corpus/rfi_log_052.pdf": {
+        "content_sha256": "3890ceb3bb5c962e60fdf1e70bde38a5e84071d1e6bf194f907a49bf80eeb4e5"
+      },
+      "corpus/rfi_log_058.pdf": {
+        "content_sha256": "21ef7a08e23691557538f0d80aae5f3e768b98ea8ae45e771a1ef1f221110b84"
+      },
+      "corpus/rfi_log_061.pdf": {
+        "content_sha256": "ac82ea25a0f8b54188db1b43425cf85d25a9956030b43e2ed375878d421aa8e1"
+      },
+      "corpus/schedule_l2_east.pdf": {
+        "content_sha256": "19470af12688ba4540be4c315a935bba876ffe3dec6532e746a3f9106c553551"
+      },
+      "corpus/schedule_l2_west.pdf": {
+        "content_sha256": "a5f8898695f2c7986982078e20e7bca93de696180be7658840dbac467070ff86"
+      },
+      "corpus/schedule_l3_east.pdf": {
+        "content_sha256": "8a8c02e08c85b4a913bef022c1ec4a2a16bc33cf43435bf9a4be53b321303e91"
+      },
+      "corpus/schedule_l3_west.pdf": {
+        "content_sha256": "0a9145d56ef9c2e8114d37d1e15ca5c7a9b5e32f9bd4d3e74a3d9c08e238f215"
+      },
+      "corpus/schedule_mezzanine.pdf": {
+        "content_sha256": "0f2564d4c65a08a236d6e152cf149e081254b34aea3671db086ca35c16224cc3"
+      },
+      "corpus/schedule_roof_plant.pdf": {
+        "content_sha256": "8e6bfd0f47fdd917d6803b9506fe141182334f153dda4ff31bbf502544018bdf"
+      },
+      "corpus/window_spec_sheet_package_a.pdf": {
+        "content_sha256": "0c4969174878efec623d34d8df69d8801a6c73da6d168cc245332397d4391bbc"
+      },
+      "corpus/window_spec_sheet_package_b.pdf": {
+        "content_sha256": "6af89c3e46b03a88302766d83da31d2cc8dc8e4cfee40d7f491524c41550e457"
       }
     },
     "ifc_file": "armie_demo.ifc",
     "pdf_files": [
-      "armie_demo_schedule.pdf"
+      "armie_demo_schedule.pdf",
+      "corpus/door_spec_sheet_package_a.pdf",
+      "corpus/door_spec_sheet_package_b.pdf",
+      "corpus/meeting_minutes_2026_02_10.pdf",
+      "corpus/meeting_minutes_2026_02_24.pdf",
+      "corpus/meeting_minutes_2026_03_10.pdf",
+      "corpus/rfi_log_047.pdf",
+      "corpus/rfi_log_052.pdf",
+      "corpus/rfi_log_058.pdf",
+      "corpus/rfi_log_061.pdf",
+      "corpus/schedule_l2_east.pdf",
+      "corpus/schedule_l2_west.pdf",
+      "corpus/schedule_l3_east.pdf",
+      "corpus/schedule_l3_west.pdf",
+      "corpus/schedule_mezzanine.pdf",
+      "corpus/schedule_roof_plant.pdf",
+      "corpus/window_spec_sheet_package_a.pdf",
+      "corpus/window_spec_sheet_package_b.pdf"
     ],
-    "source_set_id": "demo-v1"
+    "source_set_id": "demo-v2"
   },
   "westgate": {
     "display_name": "Westgate Distribution Center",

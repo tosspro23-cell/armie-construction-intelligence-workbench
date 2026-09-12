@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import json
 import threading
 from pathlib import Path
 
@@ -81,13 +82,22 @@ def _westgate_files() -> dict[str, bytes]:
 
 
 def _demo_files() -> dict[str, bytes]:
-    # SPEC-M9 §B: once ADLS mode is on, "demo" is just another project_id
-    # in the registry, backed by ADLS like westgate is -- it does NOT stay
-    # on the local-filesystem path just because it is the pre-M9 default.
-    return {
-        "demo/ifc/armie_demo.ifc": (ROOT / "demo_data" / "armie_demo.ifc").read_bytes(),
-        "demo/pdf/armie_demo_schedule.pdf": (ROOT / "demo_data" / "armie_demo_schedule.pdf").read_bytes(),
-    }
+    """SPEC-M9 §B: once ADLS mode is on, "demo" is just another project_id
+    in the registry, backed by ADLS like westgate is -- it does NOT stay
+    on the local-filesystem path just because it is the pre-M9 default.
+
+    Built from the committed registry itself, not a hardcoded file list --
+    found live, not assumed: a hardcoded two-file version of this helper
+    silently went stale the moment "demo"'s registry entry grew to the
+    full SPEC-M6 corpus (D-022's own real deployment configuration), and
+    the drift was invisible here (CI-safe fakes) even though it broke the
+    real deployed app's Azure AI Search retrieval smoke test.
+    """
+    manifest = json.loads((ROOT / "demo_data" / "projects_registry.json").read_text())["demo"]
+    files = {f"demo/ifc/{manifest['ifc_file']}": (ROOT / "demo_data" / manifest["ifc_file"]).read_bytes()}
+    for pdf_file in manifest["pdf_files"]:
+        files[f"demo/pdf/{pdf_file}"] = (ROOT / "demo_data" / pdf_file).read_bytes()
+    return files
 
 
 # --- opt-in-when-unconfigured, no silent fallback to "demo" ------------------------
@@ -286,27 +296,41 @@ def test_demo_is_unaffected_by_adls_mode_being_available_for_other_projects(monk
     for "demo" itself once ADLS mode is on -- SPEC-M9 §B: "demo" becomes
     just another registry entry, backed by ADLS like westgate is, not a
     permanently-local-only special case) or off entirely.
+
+    Uses an IFC question, not a PDF one, deliberately: found live that
+    "demo"'s local-mode `pdf_files` default (this test's own `_settings`
+    helper: just armie_demo_schedule.pdf) and its ADLS-mode registry entry
+    (the full SPEC-M6 corpus, matching D-022's real deployed
+    configuration) are two independently-configured document sets that
+    are not required to match -- "Panel-A" genuinely, correctly resolves
+    differently between them (unambiguous in the first, a deliberate M6
+    precision-failure collision in the second), so it is the wrong
+    question to prove this invariant with. An IFC question never touches
+    pdf_files at all, sidestepping that distinction entirely.
     """
     import app.main as main_module
     from app.config import get_settings
 
     _configure_env(monkeypatch, tmp_path / "local")
     with TestClient(main_module.app) as client:
-        response_local = client.post("/api/v1/chat", json={"question": "What is the connected load for Panel-A?"})
+        response_local = client.post("/api/v1/chat", json={"question": "How many doors are in this project?"})
     get_settings.cache_clear()
 
     _configure_env(monkeypatch, tmp_path / "adls", ADLS_ACCOUNT_URL="https://fake.dfs.core.windows.net")
     fake_client = FakeDataLakeClient({**_demo_files(), **_westgate_files()})
     with TestClient(main_module.app) as client:
         main_module.app.state.container.datalake_client_factory = lambda s: fake_client
-        response_adls = client.post("/api/v1/chat", json={"question": "What is the connected load for Panel-A?"})
+        response_adls = client.post("/api/v1/chat", json={"question": "How many doors are in this project?"})
     get_settings.cache_clear()
 
     assert response_local.status_code == response_adls.status_code == 200
-    assert response_local.json()["answer_markdown"] == response_adls.json()["answer_markdown"] == "44.50"
-    # Only "demo"'s two files were ever requested -- "westgate" was never
-    # touched by a request that never named it.
-    assert sorted(fake_client.read_calls) == sorted(["demo/ifc/armie_demo.ifc", "demo/pdf/armie_demo_schedule.pdf"])
+    assert response_local.json()["answer_markdown"] == response_adls.json()["answer_markdown"] == "The project contains **4** doors."
+    # Only "demo"'s own files were ever requested -- "westgate" was never
+    # touched by a request that never named it. get_project downloads a
+    # project's whole registered file set on first access (not lazily per
+    # question), so this is "demo"'s full file list, not just the one PDF
+    # this particular question happened to need.
+    assert sorted(fake_client.read_calls) == sorted(_demo_files().keys())
 
 
 def test_continuing_a_bound_thread_against_a_different_project_is_rejected_with_409(monkeypatch, tmp_path: Path) -> None:
