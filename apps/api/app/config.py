@@ -137,6 +137,27 @@ class Settings(BaseSettings):
     model_call_timeout_seconds: float = 90.0
     request_timeout_seconds: float = 180.0
 
+    # Multi-project workspace via Azure Data Lake Storage Gen2 (SPEC-M9,
+    # D-023), opt-in like every other Azure setting above: unset means the
+    # only project is the implicit one described by ifc_file/pdf_files
+    # above, exactly as every deployment before this milestone -- no
+    # Data Lake SDK is ever imported, no project registry is read, and
+    # `project_id` on a request is accepted but ignored (only `"demo"` is
+    # ever valid). Managed Identity only, the same posture as every other
+    # Azure resource in this project -- no API-key path exists.
+    adls_account_url: str | None = None
+    adls_filesystem_name: str = "projects"
+    # Local cache for a project's downloaded IFC/PDF files once ADLS mode is
+    # on (SPEC-M9 §C) -- one subdirectory per (project_id, source_set_id),
+    # never reused across a source_set_id change, and never left holding a
+    # partially-downloaded project (see ServiceContainer.get_project's own
+    # download-verify-then-atomic-publish protocol).
+    project_cache_dir: Path = Path("./runtime/project_cache")
+    # The committed project registry + frozen source manifest (SPEC-M9 SS
+    # B/F) -- static fixture shape, like pdf_files' own default, not a
+    # runtime setting; overridable only for tests.
+    projects_registry_path: Path = Path("./demo_data/projects_registry.json")
+
     @property
     def ifc_path(self) -> Path:
         return self.data_dir / self.ifc_file
@@ -148,6 +169,7 @@ class Settings(BaseSettings):
     def ensure_runtime_directories(self) -> None:
         self.audit_store_path.parent.mkdir(parents=True, exist_ok=True)
         self.evidence_dir.mkdir(parents=True, exist_ok=True)
+        self.project_cache_dir.mkdir(parents=True, exist_ok=True)
 
 
 @lru_cache
