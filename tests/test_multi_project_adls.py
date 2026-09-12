@@ -153,6 +153,38 @@ def test_get_project_downloads_and_verifies_westgate_when_adls_is_configured(tmp
     assert sorted(fake_client.read_calls) == sorted(["westgate/ifc/westgate.ifc", "westgate/pdf/westgate_schedule.pdf"])
 
 
+def test_get_project_keys_document_analyzers_by_basename_not_the_nested_manifest_path(tmp_path: Path) -> None:
+    """Found live (2026-09-12 deployment): once ADLS mode resolves "demo"
+    through this method instead of ServiceContainer's own eager dict, a
+    corpus/-nested pdf_file like "corpus/rfi_log_047.pdf" was used
+    verbatim as the document_analyzers key. Azure AI Search's index (see
+    scripts/index_document_corpus.py) stores `filename` as the bare
+    basename, matching the pre-existing convention every other
+    document_analyzers consumer already assumes (ServiceContainer.__init__
+    keys its own eager dict by `pdf_path.name`) -- so
+    _retrieve_relevant_documents' `name in analyzers` filter silently
+    dropped every corpus/-nested document's retrieval candidate, with no
+    error and no audit event, because the keys could never match.
+
+    This asserts the invariant directly, independent of the retrieval
+    code path itself: an ADLS-mode project's document_analyzers keys must
+    equal the corpus's basenames, exactly like the non-ADLS container's
+    document_analyzers already do for the same files.
+    """
+    settings = _settings(tmp_path, adls_account_url="https://fake.dfs.core.windows.net")
+    fake_client = FakeDataLakeClient(_demo_files())
+    container = ServiceContainer(settings, datalake_client_factory=lambda s: fake_client)
+
+    resources = asyncio.run(container.get_project("demo"))
+
+    manifest = json.loads((ROOT / "demo_data" / "projects_registry.json").read_text())["demo"]
+    expected_keys = {Path(pdf_file).name for pdf_file in manifest["pdf_files"]}
+    assert set(resources.document_analyzers.keys()) == expected_keys
+    # A nested file must be reachable under its basename, not its manifest path.
+    assert "rfi_log_047.pdf" in resources.document_analyzers
+    assert "corpus/rfi_log_047.pdf" not in resources.document_analyzers
+
+
 def test_get_project_caches_across_calls_with_no_further_downloads(tmp_path: Path) -> None:
     settings = _settings(tmp_path, adls_account_url="https://fake.dfs.core.windows.net")
     fake_client = FakeDataLakeClient(_westgate_files())
