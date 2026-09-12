@@ -14,13 +14,19 @@ fake itself rather than silently succeeding.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
 from app.agent.graph import AgentService
 from app.config import Settings
-from app.services import ServiceContainer
+from app.services import ProjectResources, ServiceContainer
 from fakes.fake_provider import FakeModelProvider
+
+
+def _demo(container: ServiceContainer) -> ProjectResources:
+    return asyncio.run(container.get_project("demo"))
+
 
 ROOT = Path(__file__).resolve().parents[1]
 CORPUS = "corpus"
@@ -46,10 +52,10 @@ def _settings(tmp_path: Path, pdf_files: list[str]) -> Settings:
     return settings
 
 
-def _service(settings: Settings) -> AgentService:
+def _service(settings: Settings) -> tuple[ServiceContainer, AgentService]:
     fake = FakeModelProvider()
     container = ServiceContainer(settings, text_provider_factory=lambda s: fake, vision_provider_factory=lambda s: fake)
-    return AgentService(container)
+    return container, AgentService(container)
 
 
 # --- ServiceContainer plumbing (§A) -----------------------------------------------
@@ -94,9 +100,9 @@ def test_a_field_answerable_from_two_documents_is_refused_not_guessed(tmp_path: 
     label) -- naming only "Panel-A" is genuinely answerable from either.
     """
     settings = _settings(tmp_path, [f"{CORPUS}/schedule_l2_east.pdf", f"{CORPUS}/schedule_l2_west.pdf"])
-    service = _service(settings)
+    container, service = _service(settings)
 
-    response = service.invoke(thread_id="collision", viewer_context=None, question="What is the connected load for Panel-A?")
+    response = service.invoke(project_resources=_demo(container), thread_id="collision", viewer_context=None, question="What is the connected load for Panel-A?")
 
     assert response.disposition.value == "clarification_required"
     assert "schedule_l2_east.pdf" in response.answer_markdown
@@ -112,9 +118,9 @@ def test_a_field_answerable_from_only_one_of_several_documents_still_answers(tmp
     is configured.
     """
     settings = _settings(tmp_path, [f"{CORPUS}/schedule_l2_east.pdf", f"{CORPUS}/schedule_l2_west.pdf"])
-    service = _service(settings)
+    container, service = _service(settings)
 
-    response = service.invoke(thread_id="unique-match", viewer_context=None, question="What is the connected load for Panel-C?")
+    response = service.invoke(project_resources=_demo(container), thread_id="unique-match", viewer_context=None, question="What is the connected load for Panel-C?")
 
     assert response.disposition.value == "answered"
     assert "19.50" in response.answer_markdown
@@ -136,9 +142,9 @@ def test_an_answer_that_exists_only_in_different_vocabulary_is_an_honest_miss(tm
     settings = _settings(tmp_path, [
         f"{CORPUS}/schedule_l2_east.pdf", f"{CORPUS}/schedule_l2_west.pdf", f"{CORPUS}/rfi_log_047.pdf",
     ])
-    service = _service(settings)
+    container, service = _service(settings)
 
-    response = service.invoke(thread_id="recall-failure", viewer_context=None, question="What is the connected load for Panel-E?")
+    response = service.invoke(project_resources=_demo(container), thread_id="recall-failure", viewer_context=None, question="What is the connected load for Panel-E?")
 
     assert response.disposition.value == "clarification_required"
     assert "15.75" not in response.answer_markdown  # never fabricated from the prose it cannot parse
@@ -155,9 +161,9 @@ def test_narrative_documents_never_produce_a_false_table_match(tmp_path: Path) -
         f"{CORPUS}/rfi_log_047.pdf", f"{CORPUS}/rfi_log_052.pdf", f"{CORPUS}/rfi_log_058.pdf", f"{CORPUS}/rfi_log_061.pdf",
         f"{CORPUS}/meeting_minutes_2026_02_10.pdf", f"{CORPUS}/meeting_minutes_2026_02_24.pdf", f"{CORPUS}/meeting_minutes_2026_03_10.pdf",
     ])
-    service = _service(settings)
+    container, service = _service(settings)
 
-    response = service.invoke(thread_id="all-narrative", viewer_context=None, question="What is the connected load for Panel-A?")
+    response = service.invoke(project_resources=_demo(container), thread_id="all-narrative", viewer_context=None, question="What is the connected load for Panel-A?")
 
     assert response.disposition.value == "clarification_required"
     assert response.execution_metadata.get("model_call_count", 0) == 0
@@ -167,9 +173,9 @@ def test_narrative_documents_never_produce_a_false_table_match(tmp_path: Path) -
 
 def test_the_full_corpus_loads_and_answers_correctly_across_all_document_types(tmp_path: Path) -> None:
     settings = _settings(tmp_path, FULL_CORPUS)
-    service = _service(settings)
+    container, service = _service(settings)
 
-    response = service.invoke(thread_id="full-corpus", viewer_context=None, question="What is the connected load for Panel-H?")
+    response = service.invoke(project_resources=_demo(container), thread_id="full-corpus", viewer_context=None, question="What is the connected load for Panel-H?")
 
     assert response.disposition.value == "answered"
     assert "12.00" in response.answer_markdown

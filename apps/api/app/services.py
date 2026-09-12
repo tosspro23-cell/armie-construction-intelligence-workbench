@@ -284,6 +284,13 @@ class ServiceContainer:
         """
         return next(iter(self.document_analyzers.values()))
 
+    @property
+    def project_registry(self) -> dict[str, SourceManifest]:
+        """Read-only view of the committed project registry (SPEC-M9), for
+        `GET /api/v1/projects` -- never mutated after `__init__` loads it.
+        """
+        return self._project_registry
+
     def project_metadata(self) -> dict:
         return {
             "ifc_available": self.settings.ifc_path.exists(),

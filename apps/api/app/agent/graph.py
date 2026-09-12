@@ -46,7 +46,7 @@ from app.schemas.models import (
     VerifierResult,
 )
 from app.schemas.vision import VisionViewerInspection, VisionViewerVerification
-from app.services import ServiceContainer
+from app.services import ProjectResources, ServiceContainer
 from app.verification.verifiers import (
     DeterministicVerifier,
     EvidenceVerifier,
@@ -58,6 +58,13 @@ from app.verification.verifiers import (
 class GraphState(TypedDict, total=False):
     thread_id: str
     trace_id: str
+    # SPEC-M9: resolved once in AgentService.invoke's initial state (never
+    # reassigned mid-graph) and read by every execution node instead of
+    # self.container.ifc_repository/document_analyzers/self.settings.
+    # ifc_file -- propagates automatically through this module's existing
+    # `{**state, ...}` copy pattern, so no node signature needed to change
+    # to carry it explicitly.
+    project_resources: ProjectResources
     question: str
     viewer_context: dict[str, Any]
     conversation_context: dict[str, Any]
@@ -157,7 +164,7 @@ class AgentService:
         if viewer.get("selected_global_ids"):
             resolved_selection = None
             try:
-                resolved_selection = self.container.ifc_repository.resolve_selection(
+                resolved_selection = state["project_resources"].ifc_repository.resolve_selection(
                     viewer.get("selected_global_ids", []), viewer.get("selected_express_ids", []),
                 )
             except Exception as error:
@@ -564,7 +571,7 @@ Return only a corrected MultiQueryPlan JSON object."""
         if batch_ids:
             entity_types = [item.entity_type for item in batchable if item.entity_type]
             if entity_types:
-                batch_values = self.container.ifc_repository.execute_batch_counts(entity_types, batchable[0].filters)
+                batch_values = state["project_resources"].ifc_repository.execute_batch_counts(entity_types, batchable[0].filters)
                 self._audit(state, "decompose", "tool_called", "Deterministic scalar IFC count batch invoked.", {"operation": "count_multiple", "entity_types": entity_types, "filters": batchable[0].filters})
 
         for index, original in enumerate(multi_plan.subplans, start=1):
@@ -611,7 +618,7 @@ Return only a corrected MultiQueryPlan JSON object."""
     def _execute_ifc_count_from_batch(self, state: GraphState, plan: QueryPlan, value: int) -> dict:
         """Make a per-subtask verified record from a deterministic count batch."""
         query = IfcQueryInput(operation="count", entity_type=plan.entity_type, filters=plan.filters, group_by="none")
-        result = self.container.ifc_repository.execute(query)
+        result = state["project_resources"].ifc_repository.execute(query)
         # The independent tool query is intentionally used for evidence and
         # verification; the batch value is checked so a batch optimisation never
         # weakens deterministic assurance.
@@ -623,7 +630,7 @@ Return only a corrected MultiQueryPlan JSON object."""
         self._audit(state, "execution_consistency", "execution_consistency", "Scalar batch execution consistency checked.", {"status": "passed" if not consistency_issues else "failed", "issues": [issue.__dict__ for issue in consistency_issues], "result_shape": "scalar_count"})
         consistency = VerifierResult(verifier="intent_execution_consistency", passed=not consistency_issues, reason="Execution preserved the validated scalar count contract." if not consistency_issues else consistency_issues[0].message)
         status = verification_status([
-            DeterministicVerifier(self.container.ifc_repository).verify(query, result),
+            DeterministicVerifier(state["project_resources"].ifc_repository).verify(query, result),
             InvariantValidator().validate(evidence=result.evidence, citations=[Citation.model_validate(item) for item in citations], disposition="answered"),
             consistency,
         ])
@@ -683,7 +690,7 @@ Return only a corrected MultiQueryPlan JSON object."""
     # tolerance -- unambiguous by design.
     _RECONCILIATION_TOLERANCE_M = 0.01
 
-    def _reconciliation_ifc_items(self) -> dict[str, dict[str, Any]]:
+    def _reconciliation_ifc_items(self, project_resources: ProjectResources) -> dict[str, dict[str, Any]]:
         """Read every door/window's Tag and controlled width/height from the source IFC.
 
         Zero model calls, deterministic. Reads directly from the already-open
@@ -694,7 +701,7 @@ Return only a corrected MultiQueryPlan JSON object."""
         """
         import ifcopenshell.util.element as ifc_element_util
 
-        model = self.container.ifc_repository.model
+        model = project_resources.ifc_repository.model
         items: dict[str, dict[str, Any]] = {}
         for element in [*model.by_type("IfcDoor"), *model.by_type("IfcWindow")]:
             tag = getattr(element, "Tag", None)
@@ -715,7 +722,7 @@ Return only a corrected MultiQueryPlan JSON object."""
             }
         return items
 
-    def _reconciliation_pdf_items(self, page_number: int = 2) -> dict[str, dict[str, Any]]:
+    def _reconciliation_pdf_items(self, project_resources: ProjectResources, page_number: int = 2) -> dict[str, dict[str, Any]]:
         """Read every row of the schedule's page-2 Mark/Level/Type/Width/Height table.
 
         Reuses `DocumentAnalyzer._read_table` exactly as M2P1 built it --
@@ -734,7 +741,7 @@ Return only a corrected MultiQueryPlan JSON object."""
         caller report "checked, every IFC item missing from the PDF" when
         the schedule was never actually read (SPEC-M2 §4G).
         """
-        table = self.container.document_analyzer._read_table(page_number)
+        table = project_resources.document_analyzer._read_table(page_number)
         if table is None:
             raise RuntimeError(f"The schedule's page {page_number} table structure could not be read.")
         items: dict[str, dict[str, Any]] = {}
@@ -774,8 +781,8 @@ Return only a corrected MultiQueryPlan JSON object."""
         item-level breakdown lives in `reconciliation_items`, not in the
         disposition.
         """
-        ifc_items = self._reconciliation_ifc_items()
-        pdf_items = self._reconciliation_pdf_items()
+        ifc_items = self._reconciliation_ifc_items(state["project_resources"])
+        pdf_items = self._reconciliation_pdf_items(state["project_resources"])
         counts = {"matched": 0, "dimension_mismatch": 0, "missing_in_pdf": 0, "missing_in_ifc": 0}
         reconciliation_items: list[dict[str, Any]] = []
         evidence: list[Evidence] = []
@@ -809,10 +816,10 @@ Return only a corrected MultiQueryPlan JSON object."""
                 "detail": detail,
             })
             if ifc_item:
-                evidence.append(Evidence(source_type=SourceType.IFC, source_file=self.container.ifc_repository.path.name,
+                evidence.append(Evidence(source_type=SourceType.IFC, source_file=state["project_resources"].ifc_repository.path.name,
                     summary=f"IFC {ifc_item['entity_type']} Tag={tag}.", locator={"global_id": ifc_item["global_id"], "express_id": ifc_item["express_id"], "tag": tag}))
             if pdf_item:
-                evidence.append(Evidence(source_type=SourceType.PDF, source_file=self.container.document_analyzer.pdf_path.name,
+                evidence.append(Evidence(source_type=SourceType.PDF, source_file=state["project_resources"].document_analyzer.pdf_path.name,
                     summary=f"PDF schedule row Mark={tag}.", locator={"page": 2, "mark": tag}))
         answer = (
             "Door/window reconciliation between the IFC model and the PDF schedule (joined on Tag/Mark): "
@@ -937,7 +944,7 @@ Return only a corrected MultiQueryPlan JSON object."""
         )
         try:
             tool_call_count = state.get("tool_call_count", 0) + 1
-            result = self.container.ifc_repository.execute(query)
+            result = state["project_resources"].ifc_repository.execute(query)
             citations = self._citations(result.evidence)
             next_filters = dict(plan.filters)
             if plan.operation == "group_by" and plan.group_by == "storey" and isinstance(result.value, dict) and result.value:
@@ -980,7 +987,7 @@ Return only a corrected MultiQueryPlan JSON object."""
             self._audit(state, "execution_consistency", "execution_consistency", "Intent-to-plan-to-tool consistency checked.", {"status": "passed" if not consistency_issues else "failed", "issues": [issue.__dict__ for issue in consistency_issues], "query": query.model_dump()})
             consistency = VerifierResult(verifier="intent_execution_consistency", passed=not consistency_issues, reason="Tool invocation and result shape preserve the validated intent." if not consistency_issues else consistency_issues[0].message)
             status = verification_status([
-                DeterministicVerifier(self.container.ifc_repository).verify(query, result),
+                DeterministicVerifier(state["project_resources"].ifc_repository).verify(query, result),
                 InvariantValidator().validate(
                     evidence=result.evidence,
                     citations=[Citation.model_validate(item) for item in citations],
@@ -1046,6 +1053,14 @@ Return only a corrected MultiQueryPlan JSON object."""
         degrade to the existing blanket miss message, never surface as an
         unhandled error on top of an already-honest `clarification_required`.
         """
+        # SPEC-M9 §Explicitly excluded: retrieval is scoped to the "demo"
+        # project only -- an explicit, asserted gate, not an accident of a
+        # non-"demo" project happening to have too few documents to reach
+        # this branch. Checked before the search-client factory is even
+        # called, so a call-count assertion in tests can distinguish "never
+        # attempted" from "attempted and returned nothing."
+        if state["project_resources"].manifest.project_id != "demo":
+            return []
         search_client = self.container.search_client_factory(self.settings)
         if search_client is None:
             return []
@@ -1198,7 +1213,7 @@ Return only a corrected MultiQueryPlan JSON object."""
         try:
             tool_call_count = state.get("tool_call_count", 0) + 1
             model_call_count = state.get("model_call_count", 0)
-            analyzers = self.container.document_analyzers
+            analyzers = state["project_resources"].document_analyzers
             analyzer: Any = None
             if plan.requested_document is not None:
                 analyzer = analyzers.get(plan.requested_document)
@@ -1452,7 +1467,7 @@ Return only a corrected MultiQueryPlan JSON object."""
         claim = visual.claim or visual.observation or visual.classification or "The screenshot does not provide a sufficiently grounded observation."
         evidence = [Evidence(
             source_type=SourceType.VIEWER,
-            source_file=self.settings.ifc_file,
+            source_file=state["project_resources"].manifest.ifc_file,
             summary=f"Viewer snapshot: {claim}",
             locator={
                 "snapshot_id": viewer.get("snapshot_id"),
@@ -1546,6 +1561,7 @@ Return only a corrected MultiQueryPlan JSON object."""
     def invoke(
         self,
         *,
+        project_resources: ProjectResources,
         thread_id: str | None,
         question: str,
         viewer_context: dict | None,
@@ -1553,6 +1569,7 @@ Return only a corrected MultiQueryPlan JSON object."""
         source_preference: str = "auto",
     ) -> AgentResponse:
         initial: GraphState = {
+            "project_resources": project_resources,
             "thread_id": thread_id or str(uuid4()),
             "trace_id": str(uuid4()),
             "question": question,

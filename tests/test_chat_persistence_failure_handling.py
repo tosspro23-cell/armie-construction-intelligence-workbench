@@ -61,6 +61,13 @@ class _RaisingConversationStore:
     def set(self, thread_id: str, context: dict) -> None:
         pass
 
+    def bind_project(self, thread_id: str, project_id: str) -> str:
+        # SPEC-M9: chat() now calls this before the context read this test
+        # targets -- an unreachable store must surface identically here
+        # too, not raise an unrelated AttributeError from a fake that
+        # predates this method.
+        raise RuntimeError("simulated database outage")
+
 
 class _WriteFailingConversationStore(InMemoryConversationStore):
     """Reads succeed (so the agent runs and answers correctly); the final

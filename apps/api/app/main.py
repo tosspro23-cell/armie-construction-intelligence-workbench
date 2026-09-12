@@ -28,7 +28,7 @@ from app.security import (
     require_api_key,
     require_rate_limit,
 )
-from app.services import ServiceContainer
+from app.services import ProjectNotFoundError, ServiceContainer
 from app.telemetry import configure_telemetry
 
 
@@ -112,40 +112,78 @@ def health() -> dict:
     return {"status": "ok", "project": container.project_metadata()}
 
 
-@app.get("/api/v1/project/metadata")
-def project_metadata() -> dict:
+async def _resolve_project(project_id: str) -> tuple:
+    """Shared by every /api/v1/project/* endpoint below (SPEC-M9): resolves
+    `project_id` (default "demo") to its ProjectResources, or a 404 for an
+    unknown project -- never a silent fallback to "demo".
+    """
     container: ServiceContainer = app.state.container
-    metadata = container.project_metadata()
+    try:
+        return container, await container.get_project(project_id)
+    except ProjectNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Unknown project '{project_id}'.") from None
+
+
+@app.get("/api/v1/projects")
+def list_projects() -> list[dict]:
+    """SPEC-M9 §E: the frontend's project selector data source. Empty when
+    ADLS multi-project mode is off, so the control can hide itself entirely
+    rather than presenting a meaningless single-item ("demo"-only) choice.
+    """
+    container: ServiceContainer = app.state.container
+    if not container.settings.adls_account_url:
+        return []
+    return [
+        {"project_id": project_id, "display_name": manifest.display_name}
+        for project_id, manifest in container.project_registry.items()
+    ]
+
+
+@app.get("/api/v1/project/metadata")
+async def project_metadata(project_id: str = "demo") -> dict:
+    container, resources = await _resolve_project(project_id)
+    metadata = {
+        "ifc_available": resources.ifc_repository.available,
+        "pdf_available": resources.document_analyzer.available,
+        "ifc_file": resources.manifest.ifc_file,
+        "pdf_file": resources.document_analyzer.pdf_path.name,
+        "pdf_files": list(resources.document_analyzers.keys()),
+        "project_id": resources.manifest.project_id,
+        "capabilities": container.project_metadata()["capabilities"],
+    }
     if metadata["ifc_available"]:
-        metadata["ifc"] = container.ifc_repository.metadata()
+        metadata["ifc"] = resources.ifc_repository.metadata()
     if metadata["pdf_available"]:
-        metadata["pdf"] = container.document_analyzer.inspect()
+        metadata["pdf"] = resources.document_analyzer.inspect()
     return metadata
 
 
 @app.get("/api/v1/project/ifc")
-def project_ifc():
+async def project_ifc(project_id: str = "demo"):
     """Serve the configured local IFC only to the local viewer workflow."""
-    path = app.state.container.settings.ifc_path
+    _, resources = await _resolve_project(project_id)
+    path = resources.ifc_repository.path
     if not path.exists():
         raise HTTPException(status_code=404, detail="Configured IFC source file was not found.")
     return FileResponse(path, media_type="application/octet-stream", filename=path.name)
 
 
 @app.get("/api/v1/project/pdf")
-def project_pdf():
+async def project_pdf(project_id: str = "demo"):
     # The primary (first-configured) document only -- SPEC-M6 deliberately
     # does not make this viewer endpoint multi-document-aware; see
     # ServiceContainer.document_analyzer.
-    path = app.state.container.document_analyzer.pdf_path
+    _, resources = await _resolve_project(project_id)
+    path = resources.document_analyzer.pdf_path
     if not path.exists():
         raise HTTPException(status_code=404, detail="Configured PDF source file was not found.")
     return FileResponse(path, media_type="application/pdf", filename=path.name)
 
 
 @app.get("/api/v1/project/pdf/pages/{page_number}.png")
-def project_pdf_page(page_number: int):
-    analyzer = app.state.container.document_analyzer
+async def project_pdf_page(page_number: int, project_id: str = "demo"):
+    _, resources = await _resolve_project(project_id)
+    analyzer = resources.document_analyzer
     if page_number < 1 or not analyzer.available:
         raise HTTPException(status_code=404, detail="Requested PDF page was not found.")
     return FileResponse(analyzer.render_page(page_number, scale=1.5), media_type="image/png")
@@ -179,9 +217,15 @@ def evidence_file(filename: str):
 
 
 @app.get("/api/v1/project/viewer-elements")
-def project_viewer_elements() -> dict:
-    """Expose a lightweight projection of the real local IFC for the browser viewer."""
-    repository = app.state.container.ifc_repository
+async def project_viewer_elements(project_id: str = "demo") -> dict:
+    """Expose a lightweight projection of the real local IFC for the browser
+    viewer. SPEC-M9: confirmed live by independent review that
+    apps/web/src/IfcViewer.tsx calls this endpoint directly, independently
+    of apps/web/src/main.tsx's own request logic -- a project selector
+    added only to main.tsx would not have reached this call site.
+    """
+    _, resources = await _resolve_project(project_id)
+    repository = resources.ifc_repository
     if not repository.available:
         raise HTTPException(status_code=404, detail="Configured IFC source file was not found.")
     return {
@@ -218,13 +262,37 @@ async def _safe_audit_append(audit_store, event: AuditEvent) -> str | None:
 @app.post("/api/v1/chat", dependencies=[Depends(require_rate_limit)])
 async def chat(request: ChatRequest, x_session_id: str | None = Header(default=None)):
     agent: AgentService = app.state.agent
-    conversations: ConversationStore = app.state.container.conversation_store
+    container: ServiceContainer = app.state.container
+    conversations: ConversationStore = container.conversation_store
     request_id = request.request_id or str(uuid4())
+    # SPEC-M9: resolved here, once, rather than left to AgentService.invoke's
+    # own uuid4() fallback -- ConversationStore.bind_project needs a
+    # concrete thread_id *before* invoke ever runs, so the project-mismatch
+    # check below can reject a request before any tool/model call.
+    thread_id = request.thread_id or str(uuid4())
+    requested_project_id = request.project_id or "demo"
     # session_id (D-016): whoever's X-Session-Id created this record is
     # its only owner for /api/v1/requests/* below; None (no header sent)
     # keeps the record unrestricted, matching pre-D-016 behaviour.
     record = {"status": "running", "stage": "queued", "task": asyncio.current_task(), "trace_id": request_id, "session_id": x_session_id}
     app.state.requests[request_id] = record
+    try:
+        bound_project_id = await asyncio.to_thread(conversations.bind_project, thread_id, requested_project_id)
+    except Exception as error:
+        record.update(status="error", stage="project_bind_error", error=str(error))
+        return _terminal_response(request, request_id, Disposition.ERROR, f"The request failed safely: could not resolve project binding: {error}")
+    if bound_project_id != requested_project_id:
+        record.update(status="error", stage="project_mismatch")
+        raise HTTPException(
+            status_code=409,
+            detail=f"This thread is bound to project '{bound_project_id}', not '{requested_project_id}'. "
+                   "Start a new conversation to switch projects.",
+        )
+    try:
+        project_resources = await container.get_project(bound_project_id)
+    except ProjectNotFoundError:
+        record.update(status="error", stage="project_not_found")
+        raise HTTPException(status_code=404, detail=f"Unknown project '{bound_project_id}'.") from None
     try:
         # await asyncio.to_thread, not a direct call: with SPEC-M4's
         # Postgres-backed ConversationStore configured, this is a real
@@ -236,7 +304,7 @@ async def chat(request: ChatRequest, x_session_id: str | None = Header(default=N
         # endpoint's normal honest `error` disposition (D-004/D-010), not
         # an unhandled exception that bypasses it entirely -- confirmed by
         # fault injection in tests/test_chat_persistence_failure_handling.py.
-        context = await asyncio.to_thread(conversations.get, request.thread_id or "") or {}
+        context = await asyncio.to_thread(conversations.get, thread_id) or {}
     except Exception as error:
         record.update(status="error", stage="context_read_error", error=str(error))
         return _terminal_response(request, request_id, Disposition.ERROR, f"The request failed safely: could not read conversation context: {error}")
@@ -245,7 +313,8 @@ async def chat(request: ChatRequest, x_session_id: str | None = Header(default=N
     try:
         response = await asyncio.wait_for(asyncio.to_thread(
             agent.invoke,
-            thread_id=request.thread_id,
+            project_resources=project_resources,
+            thread_id=thread_id,
             question=request.question,
             viewer_context=request.viewer_context.model_dump() if request.viewer_context else None,
             conversation_context=context,
@@ -319,7 +388,26 @@ async def resume(thread_id: str, request: ClarificationResumeRequest, x_session_
         raise HTTPException(status_code=503, detail=f"Could not read conversation state: {error}") from error
     if existing is None:
         raise HTTPException(status_code=404, detail="No resumable conversation was found for this thread.")
-    return await chat(ChatRequest(thread_id=thread_id, question=request.answer), x_session_id=x_session_id)
+    # SPEC-M9: found live by independent review -- this previously
+    # reconstructed ChatRequest with no project information at all, so a
+    # resume on any project's thread silently answered against "demo".
+    # bind_project on an already-bound thread just returns the existing
+    # binding unchanged (never "demo" unless that is genuinely what was
+    # bound) -- the source of truth, never request.project_id, which is
+    # accepted only for an optional defense-in-depth consistency check.
+    try:
+        bound_project_id = await asyncio.to_thread(conversations.bind_project, thread_id, "demo")
+    except Exception as error:
+        raise HTTPException(status_code=503, detail=f"Could not resolve project binding: {error}") from error
+    if request.project_id is not None and request.project_id != bound_project_id:
+        raise HTTPException(
+            status_code=409,
+            detail=f"This thread is bound to project '{bound_project_id}', not '{request.project_id}'.",
+        )
+    return await chat(
+        ChatRequest(thread_id=thread_id, question=request.answer, project_id=bound_project_id),
+        x_session_id=x_session_id,
+    )
 
 
 @app.post("/api/v1/requests/{request_id}/cancel")
