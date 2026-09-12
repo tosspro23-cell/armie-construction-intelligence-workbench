@@ -221,8 +221,19 @@ class ServiceContainer:
         if not cache_dir.exists():
             self._download_and_publish(project_id, manifest, cache_dir)
         ifc_repository = IfcRepository(cache_dir / "ifc" / manifest.ifc_file)
+        # Keyed by basename, not the manifest's own nested `pdf_file` path
+        # (e.g. "corpus/rfi_log_047.pdf") -- matching the pre-existing
+        # convention in ServiceContainer.__init__ above (`pdf_path.name`),
+        # which every other consumer of a document_analyzers dict already
+        # assumes: _retrieve_relevant_documents (app/agent/graph.py)
+        # filters Azure AI Search hits (indexed by bare basename, see
+        # scripts/index_document_corpus.py) against these keys, and a
+        # mismatch here silently zeroed out retrieval for every corpus/-
+        # nested document once ADLS mode resolved "demo" through this
+        # method instead of the container's own eager dict (found live,
+        # see the 2026-09-12 deployment trace).
         document_analyzers = {
-            pdf_file: DocumentAnalyzer(
+            Path(pdf_file).name: DocumentAnalyzer(
                 pdf_path=cache_dir / "pdf" / pdf_file, evidence_dir=self.settings.evidence_dir,
                 blob_container_client_factory=lambda: self.blob_container_client_factory(self.settings),
             )
