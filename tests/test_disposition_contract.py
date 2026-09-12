@@ -11,16 +11,21 @@ No Ollama, no network, no downloaded model.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from app.agent.graph import AgentService
 from app.agent.router import heuristic_multi_plan, heuristic_plan
 from app.config import Settings
 from app.schemas.models import MultiQueryPlan, QueryPlan, ResponseLanguage
-from app.services import ServiceContainer
+from app.services import ProjectResources, ServiceContainer
 from fakes.fake_provider import FakeModelProvider
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _demo(container: ServiceContainer) -> ProjectResources:
+    return asyncio.run(container.get_project("demo"))
 
 
 def _settings(tmp_path: Path, **overrides) -> Settings:
@@ -46,7 +51,7 @@ def test_answered_via_the_deterministic_ifc_fast_path(tmp_path: Path) -> None:
     fake = FakeModelProvider()  # zero scripted responses: fast path must not call a model
     container, service = _service(settings, fake)
 
-    response = service.invoke(thread_id="disp-answered", question="How many doors are there?", viewer_context=None)
+    response = service.invoke(project_resources=_demo(container), thread_id="disp-answered", question="How many doors are there?", viewer_context=None)
 
     assert response.disposition.value == "answered"
     assert fake.calls == []
@@ -65,7 +70,7 @@ def test_partially_answered_when_one_of_two_subplans_is_capability_rejected(tmp_
     fake.script("response_language", ResponseLanguage(code="en"))
     container, service = _service(settings, fake)
 
-    response = service.invoke(thread_id="disp-partial", question="Please describe the doors and furniture in this project.", viewer_context=None)
+    response = service.invoke(project_resources=_demo(container), thread_id="disp-partial", question="Please describe the doors and furniture in this project.", viewer_context=None)
 
     assert response.disposition.value == "partially_answered"
 
@@ -83,7 +88,7 @@ def test_clarification_required_for_a_structural_pdf_record_miss_with_zero_model
     fake = FakeModelProvider()  # zero scripted responses: a model call would raise
     container, service = _service(settings, fake)
 
-    response = service.invoke(thread_id="disp-clarify-q7", question="What is the total connected load?", viewer_context=None)
+    response = service.invoke(project_resources=_demo(container), thread_id="disp-clarify-q7", question="What is the total connected load?", viewer_context=None)
 
     assert response.disposition.value == "clarification_required"
     assert fake.calls == []
@@ -111,7 +116,7 @@ def test_clarification_required_when_semantic_validation_issues_persist(tmp_path
     container = ServiceContainer(settings, text_provider_factory=lambda s: fake, vision_provider_factory=lambda s: fake, escalation_provider_factory=lambda s: escalation_fake)
     service = AgentService(container)
 
-    response = service.invoke(thread_id="disp-clarify-semantic", question="Please describe the situation with the windows in this project.", viewer_context=None)
+    response = service.invoke(project_resources=_demo(container), thread_id="disp-clarify-semantic", question="Please describe the situation with the windows in this project.", viewer_context=None)
 
     assert response.disposition.value == "clarification_required"
 
@@ -129,7 +134,7 @@ def test_unsupported_for_a_cross_source_join_with_zero_tool_and_model_calls(tmp_
     fake = FakeModelProvider()  # zero scripted responses: any other path would call a model
     container, service = _service(settings, fake)
 
-    response = service.invoke(thread_id="disp-unsupported-join", question="Please join the PDF connected load data with the IFC room area.", viewer_context=None)
+    response = service.invoke(project_resources=_demo(container), thread_id="disp-unsupported-join", question="Please join the PDF connected load data with the IFC room area.", viewer_context=None)
 
     assert response.disposition.value == "unsupported"
     assert response.execution_metadata.get("tool_call_count") == 0
@@ -148,7 +153,7 @@ def test_unsupported_for_a_capability_gate_rejection_via_the_semantic_path(tmp_p
     fake.script("response_language", ResponseLanguage(code="en"))
     container, service = _service(settings, fake)
 
-    response = service.invoke(thread_id="disp-unsupported-capability", question="Please describe the situation in this project regarding room adjacency.", viewer_context=None)
+    response = service.invoke(project_resources=_demo(container), thread_id="disp-unsupported-capability", question="Please describe the situation in this project regarding room adjacency.", viewer_context=None)
 
     assert response.disposition.value == "unsupported"
 
@@ -162,7 +167,7 @@ def test_error_when_bounded_repair_itself_fails(tmp_path: Path) -> None:
     fake.script("multi_query_plan_repair", ConnectionError("connection refused"))
     container, service = _service(settings, fake)
 
-    response = service.invoke(thread_id="disp-error", question="Please describe the situation with the stairs in this project.", viewer_context=None)
+    response = service.invoke(project_resources=_demo(container), thread_id="disp-error", question="Please describe the situation with the stairs in this project.", viewer_context=None)
 
     assert response.disposition.value == "error"
     assert not any(char.isdigit() for char in response.answer_markdown)

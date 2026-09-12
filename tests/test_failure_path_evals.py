@@ -24,10 +24,14 @@ from app.config import Settings
 from app.providers.ollama_provider import StructuredOutputError, _extract_json
 from app.schemas.models import ChatRequest, MultiQueryPlan, QueryPlan, ResponseLanguage
 from app.schemas.vision import VisionEvidenceVerification, VisionFieldExtraction
-from app.services import ServiceContainer
+from app.services import ProjectResources, ServiceContainer
 from fakes.fake_provider import FakeModelProvider, sleep_past_deadline
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _demo(container: ServiceContainer) -> ProjectResources:
+    return asyncio.run(container.get_project("demo"))
 
 
 def _settings(tmp_path: Path, **overrides) -> Settings:
@@ -67,7 +71,7 @@ def test_f1_malformed_output_repair_succeeds(tmp_path: Path) -> None:
     fake.script("multi_query_plan_repair", _count_plan("IfcDoor"))
     container, service = _service(settings, fake)
 
-    response = service.invoke(thread_id="f1", question=QUESTION, viewer_context=None)
+    response = service.invoke(project_resources=_demo(container), thread_id="f1", question=QUESTION, viewer_context=None)
 
     assert response.disposition.value == "answered"
     assert response.verification.status == "passed"
@@ -92,7 +96,7 @@ def test_f2_malformed_output_repair_also_fails(tmp_path: Path) -> None:
     fake.script("multi_query_plan_repair", StructuredOutputError("still bad json"))
     container, service = _service(settings, fake)
 
-    response = service.invoke(thread_id="f2", question=QUESTION, viewer_context=None)
+    response = service.invoke(project_resources=_demo(container), thread_id="f2", question=QUESTION, viewer_context=None)
 
     assert response.disposition.value == "error"
     assert response.verification.status != "passed"
@@ -142,7 +146,7 @@ def test_f4_semantically_wrong_plan_caught_by_validation_and_repaired(tmp_path: 
     fake.script("multi_query_plan_repair", fixed_plan)
     container, service = _service(settings, fake)
 
-    response = service.invoke(thread_id="f4", question="Please describe the situation with the windows in this project.", viewer_context=None)
+    response = service.invoke(project_resources=_demo(container), thread_id="f4", question="Please describe the situation with the windows in this project.", viewer_context=None)
 
     assert response.disposition.value == "answered"
     trace = container.audit_store.by_trace(response.trace_id)
@@ -179,7 +183,7 @@ def test_f5_persistent_failure_escalates_then_clarifies_when_escalation_unavaila
 
     container, service = _service(settings, fake, escalation_factory=lambda s: escalation_fake)
 
-    response = service.invoke(thread_id="f5", question="Please describe the situation with the windows in this project.", viewer_context=None)
+    response = service.invoke(project_resources=_demo(container), thread_id="f5", question="Please describe the situation with the windows in this project.", viewer_context=None)
 
     assert response.disposition.value == "clarification_required"
     assert not any(char.isdigit() for char in response.answer_markdown)
@@ -206,7 +210,7 @@ def test_f5_escalation_skipped_when_not_configured(tmp_path: Path) -> None:
     fake.script("multi_query_plan_repair", bad_plan.model_copy(update={"rationale": "still bad"}))
     container, service = _service(settings, fake)
 
-    response = service.invoke(thread_id="f5b", question="Please describe the situation with the windows in this project.", viewer_context=None)
+    response = service.invoke(project_resources=_demo(container), thread_id="f5b", question="Please describe the situation with the windows in this project.", viewer_context=None)
 
     trace = container.audit_store.by_trace(response.trace_id)
     not_configured = [event for event in trace if event.event_type == "model_failed" and "not configured" in event.summary.lower()]
@@ -230,7 +234,7 @@ def test_f6_transport_error_produces_a_safe_non_answer(tmp_path: Path) -> None:
     fake.script("multi_query_plan_repair", ConnectionError("connection refused"))
     container, service = _service(settings, fake)
 
-    response = service.invoke(thread_id="f6", question=QUESTION, viewer_context=None)
+    response = service.invoke(project_resources=_demo(container), thread_id="f6", question=QUESTION, viewer_context=None)
 
     assert response.disposition.value == "error"
     assert response.verification.status != "passed"
@@ -280,7 +284,7 @@ def test_f8_unsupported_capability_is_refused_with_rationale_and_no_tool_call(tm
     fake.script("response_language", ResponseLanguage(code="en"))
     container, service = _service(settings, fake)
 
-    response = service.invoke(thread_id="f8", question="Please describe the situation in this project regarding room adjacency.", viewer_context=None)
+    response = service.invoke(project_resources=_demo(container), thread_id="f8", question="Please describe the situation in this project regarding room adjacency.", viewer_context=None)
 
     assert response.disposition.value == "unsupported"
     assert reason in response.answer_markdown
@@ -295,7 +299,7 @@ def test_f9_cross_source_join_rejected_before_any_tool_call(tmp_path: Path) -> N
     container, service = _service(settings, fake)
 
     response = service.invoke(
-        thread_id="f9", viewer_context=None,
+        project_resources=_demo(container), thread_id="f9", viewer_context=None,
         question="Please join the PDF connected load data with the IFC room area.",
     )
 
@@ -344,7 +348,7 @@ def test_f11_result_shape_mismatch_is_not_answered(tmp_path: Path) -> None:
     fake.script("response_language", ResponseLanguage(code="en"))
     container, service = _service(settings, fake)
 
-    response = service.invoke(thread_id="f11", question=QUESTION, viewer_context=None)
+    response = service.invoke(project_resources=_demo(container), thread_id="f11", question=QUESTION, viewer_context=None)
 
     assert response.disposition.value == "error"
     assert response.disposition.value != "answered"
@@ -388,7 +392,7 @@ def test_f12_low_confidence_vision_extraction_clarifies_without_fabricating_a_va
     container, service = _service(settings, fake)
 
     response = service.invoke(
-        thread_id="f12", viewer_context=None,
+        project_resources=_demo(container), thread_id="f12", viewer_context=None,
         question="What is the after diversity load for Panel-A in this drawing?",
     )
 

@@ -72,6 +72,12 @@ class ViewerContext(BaseModel):
 class ChatRequest(BaseModel):
     request_id: str | None = None
     thread_id: str | None = None
+    # SPEC-M9: None means "demo" on a *new* thread -- every caller from
+    # before this milestone gets identical behaviour. On an existing
+    # thread, the thread's already-bound project always wins (main.py
+    # rejects a mismatch with 409 before any tool/model call); this field
+    # only matters for a brand-new thread_id or a thread-less call.
+    project_id: str | None = None
     question: str = Field(min_length=1, max_length=4000)
     viewer_context: ViewerContext | None = None
     source_preference: Literal["auto", "ifc", "pdf", "viewer_snapshot"] = "auto"
@@ -79,6 +85,11 @@ class ChatRequest(BaseModel):
 
 class ClarificationResumeRequest(BaseModel):
     answer: str = Field(min_length=1, max_length=4000)
+    # SPEC-M9: optional, defense-in-depth only -- the source of truth is
+    # the thread's already-bound project (ConversationStore.bind_project),
+    # never a value supplied here. A mismatch is rejected the same way as
+    # /api/v1/chat's own 409 project_mismatch.
+    project_id: str | None = None
 
 
 class ConversationContext(BaseModel):

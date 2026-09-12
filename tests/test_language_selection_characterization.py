@@ -16,6 +16,7 @@ with a failing test as the signal, rather than by silent regression.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from app.agent.graph import AgentService
@@ -23,10 +24,14 @@ from app.agent.plan_validation import enforce_grouped_request_contract
 from app.agent.router import heuristic_multi_plan, selected_element_plan
 from app.config import Settings
 from app.schemas.models import MultiQueryPlan, QueryPlan
-from app.services import ServiceContainer
+from app.services import ProjectResources, ServiceContainer
 from fakes.fake_provider import FakeModelProvider
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _demo(container: ServiceContainer) -> ProjectResources:
+    return asyncio.run(container.get_project("demo"))
 
 
 def _multi_plan(response_language: str = "zh-CN", corrections=None, requires_clarification: bool = False) -> MultiQueryPlan:
@@ -62,7 +67,7 @@ def test_codepoint_scan_selects_zh_cn_for_chinese_deictic_fast_path(tmp_path: Pa
     fake = FakeModelProvider()
     container = ServiceContainer(settings, text_provider_factory=lambda s: fake, vision_provider_factory=lambda s: fake)
     service = AgentService(container)
-    response = service.invoke(thread_id="cjk-deictic", question="这个是什么", viewer_context={"selected_global_ids": ["1$fakeGlobalId"], "selected_entity_type": "IfcDoor"})
+    response = service.invoke(project_resources=_demo(container), thread_id="cjk-deictic", question="这个是什么", viewer_context={"selected_global_ids": ["1$fakeGlobalId"], "selected_entity_type": "IfcDoor"})
     assert response.execution_metadata.get("response_language") == "zh-CN"
 
 
@@ -98,7 +103,7 @@ def test_hardcoded_chinese_board_ambiguity_clarification(tmp_path: Path) -> None
     fake = FakeModelProvider()  # no scripted responses: this path must not call the model
     container = ServiceContainer(settings, text_provider_factory=lambda s: fake, vision_provider_factory=lambda s: fake)
     service = AgentService(container)
-    response = service.invoke(thread_id="cjk-board", question="这张图里的板有多少", viewer_context=None)
+    response = service.invoke(project_resources=_demo(container), thread_id="cjk-board", question="这张图里的板有多少", viewer_context=None)
     assert response.disposition.value == "clarification_required"
     assert response.answer_markdown == "我需要知道你指的是哪一种板或数据源。请明确 IFC 楼板数量，或指定工程图纸中的配电板/回路。"
 

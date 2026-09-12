@@ -163,6 +163,28 @@ class PostgresConversationStore:
             )
             conn.commit()
 
+    def bind_project(self, thread_id: str, project_id: str) -> str:
+        # A separate table (migrations/0003_thread_projects.sql), not a
+        # column on `conversations` -- see conversation_store.py's own
+        # docstring for why. The no-op `DO UPDATE SET thread_id =
+        # thread_projects.thread_id` is a standard idiom to make
+        # `RETURNING` fire on conflict too, so this single round trip both
+        # claims an unbound thread and fetches an already-bound one --
+        # avoiding a read-then-write race at the database level.
+        with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                INSERT INTO thread_projects (thread_id, project_id)
+                VALUES (%s, %s)
+                ON CONFLICT (thread_id) DO UPDATE SET thread_id = thread_projects.thread_id
+                RETURNING project_id
+                """,
+                (thread_id, project_id),
+            )
+            row = cur.fetchone()
+            conn.commit()
+            return row["project_id"]
+
     def close(self) -> None:
         self._pool.close()
 

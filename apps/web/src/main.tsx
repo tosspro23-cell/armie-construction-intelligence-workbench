@@ -55,8 +55,23 @@ function auditStage(event: TraceEvent): AuditStage {
   return "Final Response";
 }
 
+type ProjectOption = { project_id: string; display_name: string };
+
 function App() {
   const [metadata, setMetadata] = useState<Record<string, any> | null>(null);
+  // SPEC-M9: undefined means the backend's own "demo" default (every
+  // deployment before this milestone, and any deployment that leaves
+  // ADLS unset, has exactly this one implicit project). `projects` stays
+  // empty in that mode too, so the selector below never renders.
+  const [projectId, setProjectId] = useState<string | undefined>(undefined);
+  const [projects, setProjects] = useState<ProjectOption[]>([]);
+  // Bumped on every project switch; a request's response is discarded
+  // (never applied to conversation/viewer/evidence state) if this counter
+  // has moved on by the time it resolves -- closes the "a switch happens
+  // while project A's request is still in flight, and its late response
+  // corrupts project B's now-active view" race an independent review of
+  // this milestone's spec raised.
+  const switchSeqRef = useRef(0);
   const [threadId, setThreadId] = useState<string | undefined>();
   const [question, setQuestion] = useState("");
   const [turns, setTurns] = useState<ConversationTurn[]>([]);
@@ -83,15 +98,21 @@ function App() {
   const [apiKeyInput, setApiKeyInput] = useState("");
 
   const loadMetadata = useCallback(() => {
-    api<Record<string, any>>("/api/v1/project/metadata").then((value) => { setMetadata(value); setApiState("ready"); setNeedsApiKey(false); void ensureSessionId(); })
+    const query = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
+    api<Record<string, any>>(`/api/v1/project/metadata${query}`).then((value) => { setMetadata(value); setApiState("ready"); setNeedsApiKey(false); void ensureSessionId(); })
       .catch((error: Error) => {
         if (error instanceof ApiAuthError) { setNeedsApiKey(true); return; }
         console.error(error); setApiState("unavailable"); setApiError("The local API is unavailable. Start FastAPI on port 8000 and reload.");
       });
-  }, []);
+  }, [projectId]);
 
   const handleSelection = useCallback((element: Selected | null) => { setSelected(element); setSelectionCleared(false); }, []);
   useEffect(() => { loadMetadata(); }, [loadMetadata]);
+  // GET /api/v1/projects returns [] whenever ADLS multi-project mode is
+  // off (app/main.py's own opt-in gate) -- the selector below hides
+  // itself entirely in that case rather than showing a meaningless
+  // single-item "demo"-only choice.
+  useEffect(() => { api<ProjectOption[]>("/api/v1/projects").then(setProjects).catch(() => setProjects([])); }, []);
 
   function submitApiKey(event: FormEvent) {
     event.preventDefault();
@@ -114,6 +135,7 @@ function App() {
     event.preventDefault();
     if (!question.trim() || busy) return;
     const requestId = crypto.randomUUID();
+    const switchSeqAtStart = switchSeqRef.current;
     const controller = new AbortController();
     controllerRef.current = controller;
     cancelledRef.current = false;
@@ -123,7 +145,7 @@ function App() {
     }, 600);
     try {
       const response = await api<Response>("/api/v1/chat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({
-        request_id: requestId, thread_id: threadId, question, source_preference: sourcePreference,
+        request_id: requestId, thread_id: threadId, project_id: projectId, question, source_preference: sourcePreference,
         viewer_context: {
           selected_global_ids: selected?.globalId ? [selected.globalId] : [],
           selected_express_ids: selected?.expressId === undefined ? [] : [selected.expressId],
@@ -139,6 +161,10 @@ function App() {
       }), signal: controller.signal });
       const responseTrace = await api<TraceEvent[]>(`/api/v1/traces/${response.trace_id}`);
       if (cancelledRef.current) return;
+      // A project switch happened while this request was still in flight
+      // -- discard the response rather than let it corrupt the
+      // now-active project's conversation/viewer/evidence state.
+      if (switchSeqRef.current !== switchSeqAtStart) return;
       setThreadId(response.thread_id); setTurns((current) => [...current, { id: response.trace_id, user: question.trim(), assistant: response, timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }), trace: responseTrace }]); setQuestion("");
       setTrace(responseTrace);
     } catch (error) {
@@ -163,6 +189,19 @@ function App() {
   }
 
   function newConversation() { setThreadId(undefined); setTurns([]); setTrace([]); setSelected(null); setSelectionCleared(false); setSnapshot(null); setSnapshotCleared(false); setSourcePreference("auto"); setDrawingEvidence(null); }
+
+  function switchProject(nextProjectId: string) {
+    // OD-40: switching projects implicitly starts a new conversation (the
+    // backend also enforces one project per thread -- this is belt and
+    // suspenders, not the only guard). Cancel any in-flight request and
+    // bump the switch sequence first, so a response that was already on
+    // its way back from the old project cannot land in the new one.
+    switchSeqRef.current += 1;
+    cancelledRef.current = true;
+    controllerRef.current?.abort();
+    setProjectId(nextProjectId || undefined);
+    newConversation();
+  }
   useEffect(() => { timelineRef.current?.scrollTo({ top: timelineRef.current.scrollHeight, behavior: "smooth" }); }, [turns, busy]);
 
   function adjustDrawingZoom(next: number) { setDrawingZoom(Math.max(.25, Math.min(5, next))); }
@@ -203,13 +242,14 @@ function App() {
     <header><div><p className="eyebrow">ARMIE · auditable multi-source project intelligence</p><h1>ARMIE Construction Intelligence Workbench</h1></div><span className="status">{status}</span></header>
     {apiState === "unavailable" && <p className="runtime-error" role="alert">{apiError}</p>}
     <div className="top-controls">
+      {projects.length > 0 && <label>Project <select value={projectId || "demo"} onChange={(e) => switchProject(e.target.value)}>{projects.map((p) => <option key={p.project_id} value={p.project_id}>{p.display_name}</option>)}</select></label>}
       <label>Source <select value={sourcePreference} onChange={(e) => setSourcePreference(e.target.value as SourcePreference)}><option value="auto">Auto</option><option value="ifc">IFC Model</option><option value="pdf">Engineering Drawing</option><option value="viewer_snapshot">Current Viewer Snapshot</option></select></label>
       <button type="button" onClick={newConversation}>New conversation</button><button type="button" onClick={() => { setSelected(null); setSelectionCleared(true); }}>Clear selection</button><button type="button" onClick={() => { setSnapshot(null); setSnapshotCleared(true); }}>Clear snapshot</button>
     </div>
     <section className="workspace">
       <aside className="viewer"><div className="tabs"><button className={tab === "bim" ? "active" : ""} onClick={() => setTab("bim")}>BIM Model</button><button className={tab === "drawing" ? "active" : ""} onClick={() => setTab("drawing")}>Drawing</button><button className={tab === "snapshot" ? "active" : ""} onClick={() => setTab("snapshot")}>Viewer Snapshot</button></div>
-        {tab === "bim" && <><h2>IFC Viewer</h2><IfcViewer onSelection={handleSelection} onSnapshot={(value) => { setSnapshot(value); setSnapshotCleared(false); }} onStatus={setViewerStatus} focusGlobalId={selected?.globalId} /><dl className="selection-details"><div><dt>Element</dt><dd>{selected ? `${selected.type}: ${selected.name}` : "No IFC element selected"}</dd></div><div><dt>IFC type</dt><dd>{selected?.type || "—"}</dd></div><div><dt>ExpressID</dt><dd>{selected?.expressId ?? "—"}</dd></div><div><dt>GlobalId</dt><dd>{selected?.globalId || "—"}</dd></div></dl></>}
-        {tab === "drawing" && <section className="drawing"><h2>Engineering Drawing</h2><p>{metadata?.pdf_file || "synthetic schedule"} · page {drawingEvidence?.page ?? 1}</p><div className="drawing-toolbar"><button type="button" onClick={() => adjustDrawingZoom(drawingZoom - .25)}>−</button><span>{Math.round(drawingZoom * 100)}%</span><button type="button" onClick={() => adjustDrawingZoom(drawingZoom + .25)}>+</button><button type="button" onClick={() => setDrawingZoom(1)}>Fit page</button><button type="button" onClick={() => setDrawingZoom(1.15)}>Fit width</button><button type="button" onClick={() => setDrawingZoom(1)}>100%</button>{drawingEvidence && <button type="button" onClick={() => { setDrawingEvidence(null); setDrawingZoom(1); }}>Clear evidence focus</button>}</div><div className="drawing-stage" aria-label="Zoomable engineering drawing. Pinch to zoom; two-finger scroll pans." onWheel={onDrawingWheel}><div className="drawing-page" style={{ transform: `scale(${drawingZoom})` }}><AuthedImage src={`/api/v1/project/pdf/pages/${drawingEvidence?.page ?? 1}.png`} alt={`Engineering load schedule page ${drawingEvidence?.page ?? 1}`} />{drawingEvidence?.bbox && <div ref={drawingEvidenceRef} className="drawing-evidence-box" style={{ left: `${(drawingEvidence.bbox[0] / 1191) * 100}%`, top: `${(drawingEvidence.bbox[1] / 842) * 100}%`, width: `${((drawingEvidence.bbox[2] - drawingEvidence.bbox[0]) / 1191) * 100}%`, height: `${((drawingEvidence.bbox[3] - drawingEvidence.bbox[1]) / 842) * 100}%` }} title={`${drawingEvidence.board || "PDF evidence"}${drawingEvidence.field ? ` · ${drawingEvidence.field}` : ""}`} />}</div></div><p className="empty">{drawingEvidence ? `Focused evidence: ${drawingEvidence.board || "drawing region"}${drawingEvidence.field ? ` · ${drawingEvidence.field}` : ""}.` : "Pinch to zoom and use two-finger scrolling to pan; citations focus a cited drawing region."}</p></section>}
+        {tab === "bim" && <><h2>IFC Viewer</h2><IfcViewer projectId={projectId} onSelection={handleSelection} onSnapshot={(value) => { setSnapshot(value); setSnapshotCleared(false); }} onStatus={setViewerStatus} focusGlobalId={selected?.globalId} /><dl className="selection-details"><div><dt>Element</dt><dd>{selected ? `${selected.type}: ${selected.name}` : "No IFC element selected"}</dd></div><div><dt>IFC type</dt><dd>{selected?.type || "—"}</dd></div><div><dt>ExpressID</dt><dd>{selected?.expressId ?? "—"}</dd></div><div><dt>GlobalId</dt><dd>{selected?.globalId || "—"}</dd></div></dl></>}
+        {tab === "drawing" && <section className="drawing"><h2>Engineering Drawing</h2><p>{metadata?.pdf_file || "synthetic schedule"} · page {drawingEvidence?.page ?? 1}</p><div className="drawing-toolbar"><button type="button" onClick={() => adjustDrawingZoom(drawingZoom - .25)}>−</button><span>{Math.round(drawingZoom * 100)}%</span><button type="button" onClick={() => adjustDrawingZoom(drawingZoom + .25)}>+</button><button type="button" onClick={() => setDrawingZoom(1)}>Fit page</button><button type="button" onClick={() => setDrawingZoom(1.15)}>Fit width</button><button type="button" onClick={() => setDrawingZoom(1)}>100%</button>{drawingEvidence && <button type="button" onClick={() => { setDrawingEvidence(null); setDrawingZoom(1); }}>Clear evidence focus</button>}</div><div className="drawing-stage" aria-label="Zoomable engineering drawing. Pinch to zoom; two-finger scroll pans." onWheel={onDrawingWheel}><div className="drawing-page" style={{ transform: `scale(${drawingZoom})` }}><AuthedImage src={`/api/v1/project/pdf/pages/${drawingEvidence?.page ?? 1}.png${projectId ? `?project_id=${encodeURIComponent(projectId)}` : ""}`} alt={`Engineering load schedule page ${drawingEvidence?.page ?? 1}`} />{drawingEvidence?.bbox && <div ref={drawingEvidenceRef} className="drawing-evidence-box" style={{ left: `${(drawingEvidence.bbox[0] / 1191) * 100}%`, top: `${(drawingEvidence.bbox[1] / 842) * 100}%`, width: `${((drawingEvidence.bbox[2] - drawingEvidence.bbox[0]) / 1191) * 100}%`, height: `${((drawingEvidence.bbox[3] - drawingEvidence.bbox[1]) / 842) * 100}%` }} title={`${drawingEvidence.board || "PDF evidence"}${drawingEvidence.field ? ` · ${drawingEvidence.field}` : ""}`} />}</div></div><p className="empty">{drawingEvidence ? `Focused evidence: ${drawingEvidence.board || "drawing region"}${drawingEvidence.field ? ` · ${drawingEvidence.field}` : ""}.` : "Pinch to zoom and use two-finger scrolling to pan; citations focus a cited drawing region."}</p></section>}
         {tab === "snapshot" && <section className="snapshot"><h2>Viewer Snapshot</h2>{snapshot ? <img src={snapshot} alt="Captured IFC viewer context" /> : <p className="empty">Capture a BIM view to enable image-grounded inspection.</p>}<p>Selected: {selected?.globalId || "none"}</p></section>}
       </aside>
       <section className="chat"><h2>Conversation</h2><div className="messages" ref={timelineRef}>{turns.length === 0 ? <p className="empty">Ask a BIM, drawing, or current-view question. Auto chooses the source; overrides remain in technical details.</p> : turns.map((turn) => <React.Fragment key={turn.id}><div className="message-row user"><article className="message user-message"><div className="message-meta"><span>User</span><time>{turn.timestamp}</time></div><p>{turn.user}</p></article></div><div className="message-row assistant"><article className={`message assistant-message ${turn.assistant.disposition}`}><div className="message-meta"><span>Assistant</span><span>{turn.assistant.disposition.replace(/_/g, " ")}</span><span className={turn.assistant.verification.status}>{turn.assistant.verification.status}</span><time>{turn.timestamp}</time></div><p>{turn.assistant.answer_markdown}</p>{turn.assistant.citations.length > 0 && <div className="turn-citations">{turn.assistant.citations.slice(0, 3).map((citation) => <button type="button" key={stableCitationKey(citation)} onClick={() => openCitation(citation)}>View {citation.source_type} evidence</button>)}</div>}<details className="technical-details"><summary>Technical details</summary><small>Source: {turn.assistant.execution_metadata.source || "—"} · Planner: {turn.assistant.execution_metadata.planning_mode || "—"} · Models: {turn.assistant.execution_metadata.model_call_count || 0} · Tools: {turn.assistant.execution_metadata.tool_call_count || 0} · Trace: {turn.assistant.trace_id}</small></details></article></div></React.Fragment>)}</div><form onSubmit={submit}><textarea value={question} onChange={(e) => setQuestion(e.target.value)} placeholder="e.g. How many doors are in the project?" rows={3} /><div className="submit-row"><button disabled={busy}>{busy ? `Checking evidence… ${requestStage}` : "Ask with audit trail"}</button>{busy && <button type="button" className="stop-button" onClick={stopRequest}>Stop request</button>}</div></form></section>

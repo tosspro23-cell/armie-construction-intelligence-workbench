@@ -12,6 +12,7 @@ No Ollama, no network, no downloaded model.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -19,9 +20,14 @@ from app.agent.graph import AgentService
 from app.config import Settings
 from app.schemas.models import DocumentQueryInput
 from app.schemas.vision import VisionEvidenceVerification, VisionFieldExtraction
-from app.services import ServiceContainer
+from app.services import ProjectResources, ServiceContainer
 from app.tools.document.analyzer import DocumentAnalyzer
 from fakes.fake_provider import FakeModelProvider
+
+
+def _demo(container: ServiceContainer) -> ProjectResources:
+    return asyncio.run(container.get_project("demo"))
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -81,7 +87,7 @@ def test_agent_service_answers_deterministically_with_zero_model_calls(tmp_path:
     container = ServiceContainer(settings, text_provider_factory=lambda s: fake, vision_provider_factory=lambda s: fake)
     service = AgentService(container)
 
-    response = service.invoke(thread_id=f"det-{board}-{field}", viewer_context=None, question=f"What is the {field.lower()} for {board}?")
+    response = service.invoke(project_resources=_demo(container), thread_id=f"det-{board}-{field}", viewer_context=None, question=f"What is the {field.lower()} for {board}?")
 
     assert response.disposition.value == "answered"
     assert GROUND_TRUTH[(board, field)] in response.answer_markdown
@@ -100,7 +106,7 @@ def test_panel_a_is_answered_deterministically_without_the_ambiguity_message_or_
     container = ServiceContainer(settings, text_provider_factory=lambda s: fake, vision_provider_factory=lambda s: fake)
     service = AgentService(container)
 
-    response = service.invoke(thread_id=f"panel-a-{field}", viewer_context=None, question=f"What is the {field.lower()} for Panel-A?")
+    response = service.invoke(project_resources=_demo(container), thread_id=f"panel-a-{field}", viewer_context=None, question=f"What is the {field.lower()} for Panel-A?")
 
     assert response.disposition.value == "answered"
     assert GROUND_TRUTH[("Panel-A", field)] in response.answer_markdown
@@ -179,7 +185,7 @@ def test_deterministic_miss_falls_back_to_vision_which_still_answers(tmp_path: P
     service = AgentService(container)
 
     response = service.invoke(
-        thread_id="vision-fallback-success", viewer_context=None,
+        project_resources=_demo(container), thread_id="vision-fallback-success", viewer_context=None,
         question="What is the after diversity load for Panel-A in this drawing?",
     )
 

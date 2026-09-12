@@ -46,6 +46,10 @@ dependencies = [
   # evidence_storage_account_url means this is never imported at runtime --
   # see app/evidence_storage.py's factory seam).
   "azure-storage-blob>=12.19,<13",
+  # SPEC-M9: multi-project workspace via Azure Data Lake Storage Gen2
+  # (opt-in, unset adls_account_url means this is never imported at
+  # runtime -- see app/adls.py's factory seam).
+  "azure-storage-file-datalake>=12.14,<13",
 ]
 
 [build-system]

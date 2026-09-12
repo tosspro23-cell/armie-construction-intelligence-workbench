@@ -1,0 +1,34 @@
+{
+  "demo": {
+    "display_name": "ARMIE Demo Project",
+    "files": {
+      "armie_demo.ifc": {
+        "content_sha256": "dd339d64ff6a954134c73b79a91c0e27d8852ae87b3d6f822caa809fe137b551"
+      },
+      "armie_demo_schedule.pdf": {
+        "content_sha256": "8103b0bcb5ce9805b892ce176248cd0ca01ae741c4b92f259fdd7d403ac1ba33"
+      }
+    },
+    "ifc_file": "armie_demo.ifc",
+    "pdf_files": [
+      "armie_demo_schedule.pdf"
+    ],
+    "source_set_id": "demo-v1"
+  },
+  "westgate": {
+    "display_name": "Westgate Distribution Center",
+    "files": {
+      "westgate.ifc": {
+        "content_sha256": "4dea56645cce13cfe1d9c4c2c11d8db49a9ab965a79ac14f15c247f054886232"
+      },
+      "westgate_schedule.pdf": {
+        "content_sha256": "77fd1d77c9e8a9f298be9bce139539e8fc934bd2d66111fcde141162ea00696a"
+      }
+    },
+    "ifc_file": "westgate.ifc",
+    "pdf_files": [
+      "westgate_schedule.pdf"
+    ],
+    "source_set_id": "westgate-v1"
+  }
+}

@@ -10,6 +10,7 @@ No Ollama, no network, no downloaded model.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import ifcopenshell
@@ -20,10 +21,15 @@ from app.agent.router import (
     cross_source_reconciliation_requested,
 )
 from app.config import Settings
-from app.services import ServiceContainer
+from app.services import ProjectResources, ServiceContainer
 from fakes.fake_provider import FakeModelProvider
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _demo(container: ServiceContainer) -> ProjectResources:
+    return asyncio.run(container.get_project("demo"))
+
 
 RECONCILIATION_QUESTION = "Please reconcile the door and window schedule between the IFC model and the PDF drawing."
 
@@ -109,7 +115,7 @@ def test_all_nine_ground_truth_items_reconcile_to_intended_status_at_zero_model_
     fake = FakeModelProvider()  # zero scripted responses: a model call would raise
     container, service = _service(settings, fake)
 
-    response = service.invoke(thread_id="reconcile-1", question=RECONCILIATION_QUESTION, viewer_context=None)
+    response = service.invoke(project_resources=_demo(container), thread_id="reconcile-1", question=RECONCILIATION_QUESTION, viewer_context=None)
 
     assert response.disposition.value == "answered"
     assert fake.calls == []
@@ -124,7 +130,7 @@ def test_dimension_mismatch_item_reports_both_sources_disagreeing_values(tmp_pat
     fake = FakeModelProvider()
     container, service = _service(settings, fake)
 
-    response = service.invoke(thread_id="reconcile-2", question=RECONCILIATION_QUESTION, viewer_context=None)
+    response = service.invoke(project_resources=_demo(container), thread_id="reconcile-2", question=RECONCILIATION_QUESTION, viewer_context=None)
 
     w02 = next(item for item in response.reconciliation_items if item.tag == "W02")
     assert w02.status.value == "dimension_mismatch"
@@ -139,7 +145,7 @@ def test_missing_in_pdf_and_missing_in_ifc_items_leave_the_absent_side_null(tmp_
     fake = FakeModelProvider()
     container, service = _service(settings, fake)
 
-    response = service.invoke(thread_id="reconcile-3", question=RECONCILIATION_QUESTION, viewer_context=None)
+    response = service.invoke(project_resources=_demo(container), thread_id="reconcile-3", question=RECONCILIATION_QUESTION, viewer_context=None)
     by_tag = {item.tag: item for item in response.reconciliation_items}
 
     d04 = by_tag["D04"]
@@ -158,7 +164,7 @@ def test_non_reconciliation_cross_source_question_still_refused_end_to_end(tmp_p
     fake = FakeModelProvider()
     container, service = _service(settings, fake)
 
-    response = service.invoke(thread_id="join-1", question="Please combine the connected load data with the IFC room area.", viewer_context=None)
+    response = service.invoke(project_resources=_demo(container), thread_id="join-1", question="Please combine the connected load data with the IFC room area.", viewer_context=None)
 
     assert response.disposition.value == "unsupported"
     assert response.execution_metadata.get("tool_call_count") == 0
@@ -183,7 +189,7 @@ def test_pdf_read_failure_is_reported_as_error_not_answered(tmp_path: Path, monk
 
     monkeypatch.setattr(container.document_analyzer, "_read_table", lambda page_number: None)
 
-    response = service.invoke(thread_id="reconcile-pdf-failure", question=RECONCILIATION_QUESTION, viewer_context=None)
+    response = service.invoke(project_resources=_demo(container), thread_id="reconcile-pdf-failure", question=RECONCILIATION_QUESTION, viewer_context=None)
 
     assert response.disposition.value != "answered"
     assert response.disposition.value == "error"
@@ -208,7 +214,7 @@ def test_reconciliation_response_language_is_always_english_regardless_of_questi
     fake = FakeModelProvider()
     container, service = _service(settings, fake)
 
-    response = service.invoke(thread_id="reconcile-zh", question="核对一下门窗数量和图纸是否一致。", viewer_context=None)
+    response = service.invoke(project_resources=_demo(container), thread_id="reconcile-zh", question="核对一下门窗数量和图纸是否一致。", viewer_context=None)
 
     assert response.disposition.value == "answered"
     assert response.execution_metadata.get("response_language") == "en"

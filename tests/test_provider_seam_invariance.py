@@ -9,6 +9,7 @@ committed snapshot.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -17,10 +18,14 @@ from app.config import Settings
 from app.providers.factory import get_text_provider, get_vision_provider
 from app.providers.ollama_provider import StructuredOutputError
 from app.schemas.models import MultiQueryPlan, QueryPlan
-from app.services import ServiceContainer
+from app.services import ProjectResources, ServiceContainer
 from fakes.fake_provider import FakeModelProvider
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _demo(container: ServiceContainer) -> ProjectResources:
+    return asyncio.run(container.get_project("demo"))
 
 
 def _settings(tmp_path: Path, llm_provider: str) -> Settings:
@@ -86,7 +91,7 @@ def test_audit_field_snapshot_for_one_scripted_end_to_end_run(tmp_path: Path) ->
     container = ServiceContainer(settings, text_provider_factory=lambda s: fake, vision_provider_factory=lambda s: fake)
     service = AgentService(container)
 
-    response = service.invoke(thread_id="snapshot", question="Please describe the situation with the doors in this project.", viewer_context=None)
+    response = service.invoke(project_resources=_demo(container), thread_id="snapshot", question="Please describe the situation with the doors in this project.", viewer_context=None)
     assert response.disposition.value == "answered"
 
     trace = container.audit_store.by_trace(response.trace_id)

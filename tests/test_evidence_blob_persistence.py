@@ -12,15 +12,20 @@ monkeypatched as a substitute. No live Azure, no network.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from app.agent.graph import AgentService
 from app.config import Settings, get_settings
-from app.services import ServiceContainer
+from app.services import ProjectResources, ServiceContainer
 from fakes.fake_provider import FakeModelProvider
 from fastapi.testclient import TestClient
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _demo(container: ServiceContainer) -> ProjectResources:
+    return asyncio.run(container.get_project("demo"))
 
 
 class _FakeBlobDownloader:
@@ -78,7 +83,7 @@ def test_crop_evidence_uploads_to_blob_storage_when_configured(tmp_path: Path) -
     )
     service = AgentService(container)
 
-    response = service.invoke(thread_id="t", viewer_context=None, question="What is the connected load for Panel-A?")
+    response = service.invoke(project_resources=_demo(container), thread_id="t", viewer_context=None, question="What is the connected load for Panel-A?")
 
     assert response.disposition.value == "answered"
     crop_name = response.citations[0].locator["evidence_crop"]
@@ -101,7 +106,7 @@ def test_crop_evidence_still_writes_locally_when_blob_storage_is_configured(tmp_
     )
     service = AgentService(container)
 
-    response = service.invoke(thread_id="t", viewer_context=None, question="What is the connected load for Panel-A?")
+    response = service.invoke(project_resources=_demo(container), thread_id="t", viewer_context=None, question="What is the connected load for Panel-A?")
 
     crop_name = response.citations[0].locator["evidence_crop"]
     assert (settings.evidence_dir / crop_name).exists()
@@ -120,7 +125,7 @@ def test_a_failed_blob_upload_does_not_fail_the_request(tmp_path: Path) -> None:
     )
     service = AgentService(container)
 
-    response = service.invoke(thread_id="t", viewer_context=None, question="What is the connected load for Panel-A?")
+    response = service.invoke(project_resources=_demo(container), thread_id="t", viewer_context=None, question="What is the connected load for Panel-A?")
 
     assert response.disposition.value == "answered"
     crop_name = response.citations[0].locator["evidence_crop"]

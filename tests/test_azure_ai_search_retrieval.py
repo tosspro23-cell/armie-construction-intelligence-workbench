@@ -18,15 +18,20 @@ spec's own Acceptance criteria, and is not a CI gate.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from app.agent.graph import AgentService
 from app.config import Settings
-from app.services import ServiceContainer
+from app.services import ProjectResources, ServiceContainer
 from fakes.fake_provider import FakeModelProvider
 
 ROOT = Path(__file__).resolve().parents[1]
 CORPUS = "corpus"
+
+
+def _demo(container: ServiceContainer) -> ProjectResources:
+    return asyncio.run(container.get_project("demo"))
 
 
 class FakeSearchClient:
@@ -64,14 +69,14 @@ def _settings(tmp_path: Path, pdf_files: list[str]) -> Settings:
     return settings
 
 
-def _service(settings: Settings, search_client, embedding_provider) -> AgentService:
+def _service(settings: Settings, search_client, embedding_provider) -> tuple[ServiceContainer, AgentService]:
     fake_model = FakeModelProvider()
     container = ServiceContainer(
         settings,
         text_provider_factory=lambda s: fake_model, vision_provider_factory=lambda s: fake_model,
         search_client_factory=lambda s: search_client, embedding_provider_factory=lambda s: embedding_provider,
     )
-    return AgentService(container)
+    return container, AgentService(container)
 
 
 # --- opt-in-when-unconfigured (mirrors database_url/api_shared_secret) -----------
@@ -79,9 +84,9 @@ def _service(settings: Settings, search_client, embedding_provider) -> AgentServ
 def test_retrieval_is_skipped_when_search_client_is_not_configured(tmp_path: Path) -> None:
     settings = _settings(tmp_path, [f"{CORPUS}/schedule_l2_east.pdf", f"{CORPUS}/schedule_l2_west.pdf"])
     embedding_provider = FakeEmbeddingProvider()
-    service = _service(settings, search_client=None, embedding_provider=embedding_provider)
+    container, service = _service(settings, search_client=None, embedding_provider=embedding_provider)
 
-    response = service.invoke(thread_id="no-search-client", viewer_context=None, question="What is the connected load for Panel-E?")
+    response = service.invoke(project_resources=_demo(container), thread_id="no-search-client", viewer_context=None, question="What is the connected load for Panel-E?")
 
     assert response.disposition.value == "clarification_required"
     assert response.answer_markdown == "I could not find this field with a confident match in any configured document."
@@ -91,9 +96,9 @@ def test_retrieval_is_skipped_when_search_client_is_not_configured(tmp_path: Pat
 def test_retrieval_is_skipped_when_embedding_provider_is_not_configured(tmp_path: Path) -> None:
     settings = _settings(tmp_path, [f"{CORPUS}/schedule_l2_east.pdf", f"{CORPUS}/schedule_l2_west.pdf"])
     search_client = FakeSearchClient(results=[{"filename": "schedule_l2_east.pdf", "@search.score": 0.9}])
-    service = _service(settings, search_client=search_client, embedding_provider=None)
+    container, service = _service(settings, search_client=search_client, embedding_provider=None)
 
-    response = service.invoke(thread_id="no-embedding-provider", viewer_context=None, question="What is the connected load for Panel-E?")
+    response = service.invoke(project_resources=_demo(container), thread_id="no-embedding-provider", viewer_context=None, question="What is the connected load for Panel-E?")
 
     assert response.disposition.value == "clarification_required"
     assert response.answer_markdown == "I could not find this field with a confident match in any configured document."
@@ -108,9 +113,9 @@ def test_a_recall_failure_becomes_a_directed_miss_when_retrieval_finds_a_candida
         {"filename": "schedule_l2_east.pdf", "@search.score": 0.9},  # above the real 0.025 threshold
     ])
     embedding_provider = FakeEmbeddingProvider()
-    service = _service(settings, search_client=search_client, embedding_provider=embedding_provider)
+    container, service = _service(settings, search_client=search_client, embedding_provider=embedding_provider)
 
-    response = service.invoke(thread_id="directed-miss", viewer_context=None, question="What is the connected load for Panel-E?")
+    response = service.invoke(project_resources=_demo(container), thread_id="directed-miss", viewer_context=None, question="What is the connected load for Panel-E?")
 
     assert response.disposition.value == "clarification_required"
     assert "schedule_l2_east.pdf" in response.answer_markdown
@@ -133,10 +138,10 @@ def test_a_directed_miss_emits_a_dedicated_retrieval_evaluated_audit_event(tmp_p
         {"filename": "schedule_l2_west.pdf", "@search.score": 0.001},
     ])
     embedding_provider = FakeEmbeddingProvider()
-    service = _service(settings, search_client=search_client, embedding_provider=embedding_provider)
+    container, service = _service(settings, search_client=search_client, embedding_provider=embedding_provider)
     container = service.container
 
-    response = service.invoke(thread_id="dedicated-event", viewer_context=None, question="What is the connected load for Panel-E?")
+    response = service.invoke(project_resources=_demo(container), thread_id="dedicated-event", viewer_context=None, question="What is the connected load for Panel-E?")
 
     events = [event for event in container.audit_store.by_trace(response.trace_id) if event.event_type == "retrieval_evaluated"]
     assert len(events) == 1
@@ -151,10 +156,10 @@ def test_a_directed_miss_emits_a_dedicated_retrieval_evaluated_audit_event(tmp_p
 
 def test_no_dedicated_retrieval_event_when_retrieval_is_not_configured(tmp_path: Path) -> None:
     settings = _settings(tmp_path, [f"{CORPUS}/schedule_l2_east.pdf", f"{CORPUS}/schedule_l2_west.pdf"])
-    service = _service(settings, search_client=None, embedding_provider=None)
+    container, service = _service(settings, search_client=None, embedding_provider=None)
     container = service.container
 
-    response = service.invoke(thread_id="no-event", viewer_context=None, question="What is the connected load for Panel-E?")
+    response = service.invoke(project_resources=_demo(container), thread_id="no-event", viewer_context=None, question="What is the connected load for Panel-E?")
 
     events = [event for event in container.audit_store.by_trace(response.trace_id) if event.event_type == "retrieval_evaluated"]
     assert events == []
@@ -166,9 +171,9 @@ def test_a_recall_failure_stays_a_blanket_miss_when_nothing_clears_the_threshold
         {"filename": "schedule_l2_east.pdf", "@search.score": 0.001},  # well below threshold
     ])
     embedding_provider = FakeEmbeddingProvider()
-    service = _service(settings, search_client=search_client, embedding_provider=embedding_provider)
+    container, service = _service(settings, search_client=search_client, embedding_provider=embedding_provider)
 
-    response = service.invoke(thread_id="blanket-miss", viewer_context=None, question="What is the connected load for Panel-E?")
+    response = service.invoke(project_resources=_demo(container), thread_id="blanket-miss", viewer_context=None, question="What is the connected load for Panel-E?")
 
     assert response.disposition.value == "clarification_required"
     assert response.answer_markdown == "I could not find this field with a confident match in any configured document."
@@ -188,9 +193,9 @@ def test_a_failed_search_call_degrades_to_the_blanket_miss_not_an_unhandled_erro
     settings = _settings(tmp_path, [f"{CORPUS}/schedule_l2_east.pdf", f"{CORPUS}/schedule_l2_west.pdf"])
     search_client = FakeSearchClient(raise_error=RuntimeError("service unavailable"))
     embedding_provider = FakeEmbeddingProvider()
-    service = _service(settings, search_client=search_client, embedding_provider=embedding_provider)
+    container, service = _service(settings, search_client=search_client, embedding_provider=embedding_provider)
 
-    response = service.invoke(thread_id="search-failure", viewer_context=None, question="What is the connected load for Panel-E?")
+    response = service.invoke(project_resources=_demo(container), thread_id="search-failure", viewer_context=None, question="What is the connected load for Panel-E?")
 
     assert response.disposition.value == "clarification_required"
     assert response.answer_markdown == "I could not find this field with a confident match in any configured document."
@@ -209,9 +214,9 @@ def test_retrieval_is_never_invoked_when_native_lookup_already_found_multiple_hi
     settings = _settings(tmp_path, [f"{CORPUS}/schedule_l2_east.pdf", f"{CORPUS}/schedule_l2_west.pdf"])
     search_client = FakeSearchClient(results=[{"filename": "schedule_l2_east.pdf", "@search.score": 0.9}])
     embedding_provider = FakeEmbeddingProvider()
-    service = _service(settings, search_client=search_client, embedding_provider=embedding_provider)
+    container, service = _service(settings, search_client=search_client, embedding_provider=embedding_provider)
 
-    response = service.invoke(thread_id="collision-unaffected", viewer_context=None, question="What is the connected load for Panel-A?")
+    response = service.invoke(project_resources=_demo(container), thread_id="collision-unaffected", viewer_context=None, question="What is the connected load for Panel-A?")
 
     assert response.disposition.value == "clarification_required"
     assert "schedule_l2_east.pdf" in response.answer_markdown and "schedule_l2_west.pdf" in response.answer_markdown
@@ -224,9 +229,9 @@ def test_retrieval_is_never_invoked_when_native_lookup_already_answered(tmp_path
     settings = _settings(tmp_path, [f"{CORPUS}/schedule_l2_east.pdf", f"{CORPUS}/schedule_l2_west.pdf"])
     search_client = FakeSearchClient(results=[{"filename": "schedule_l2_east.pdf", "@search.score": 0.9}])
     embedding_provider = FakeEmbeddingProvider()
-    service = _service(settings, search_client=search_client, embedding_provider=embedding_provider)
+    container, service = _service(settings, search_client=search_client, embedding_provider=embedding_provider)
 
-    response = service.invoke(thread_id="unique-match-unaffected", viewer_context=None, question="What is the connected load for Panel-C?")
+    response = service.invoke(project_resources=_demo(container), thread_id="unique-match-unaffected", viewer_context=None, question="What is the connected load for Panel-C?")
 
     assert response.disposition.value == "answered"
     assert search_client.calls == []
