@@ -37,6 +37,10 @@ on:
         description: "Independent-review fix: leaving database_url blank on a redeploy of an API that currently has persistence enabled used to silently revert it to in-memory/JSONL mode, with no warning. This workflow now refuses that outright unless you set this to 'yes', confirming the downgrade is deliberate. Irrelevant (ignored) on a first deploy, or any deploy where database_url is set."
         required: false
         default: "no"
+      allow_disabling_optional_features:
+        description: "D-023 addendum: the same guard as allow_disabling_persistence above, generalized to this workflow's other opt-in-but-stateful settings (evidence_storage_account_url, azure_search_service_name, pdf_files, adls_account_url). Independent-review finding, confirmed live 2026-09-13: a maintainer redeploying a routine fix while only filling in database_url/model params (forgetting to repeat these) would silently disable evidence persistence, retrieval, the full document corpus, or multi-project ADLS mode -- the base deployment still succeeds, and the corresponding smoke test below just skips itself (gated on the same blank input), so nothing fails loudly. Set to 'yes' to confirm such a downgrade is actually intentional. Irrelevant (ignored) for any setting whose input is non-blank on this run."
+        required: false
+        default: "no"
       evidence_storage_account_url:
         description: "SPEC-M8, D-020: blob endpoint (infra/bicep/evidence.bicep output blobEndpoint, e.g. https://<storageAccountName>.blob.core.windows.net) for the already-provisioned evidence Storage Account. Blank (the default) keeps evidence crops local-filesystem-only -- they will not survive a revision replacement, exactly like every deployment before this milestone. This workflow does NOT provision infra/bicep/evidence.bicep itself, the same deliberate-separate-step pattern as data.bicep."
         required: false
@@ -94,6 +98,7 @@ jobs:
       IMAGE_TAG: ${{ inputs.image_tag || github.sha }}
       DATABASE_URL: ${{ inputs.database_url }}
       ALLOW_DISABLING_PERSISTENCE: ${{ inputs.allow_disabling_persistence }}
+      ALLOW_DISABLING_OPTIONAL_FEATURES: ${{ inputs.allow_disabling_optional_features }}
       # D-021: sourced from a repository secret, not a workflow_dispatch
       # input, after an independent review found the previous input-based
       # version leaked the secret in cleartext in this run's own log --
@@ -233,6 +238,42 @@ jobs:
             echo "::error::The currently deployed ${NAME_PREFIX}-api has DATABASE_URL set (persistence enabled), but this run's database_url input is blank. Refusing to silently revert conversations/audit to in-memory/JSONL mode. Pass the existing (or a new) database_url to keep persistence enabled, or set allow_disabling_persistence=yes if this downgrade is actually intentional."
             exit 1
           fi
+
+      # D-023 addendum: independent-review finding, confirmed live
+      # 2026-09-13 -- the guard above only ever covered DATABASE_URL. A
+      # maintainer redeploying a routine fix while only filling in
+      # database_url/model params (forgetting to repeat these) would
+      # silently disable evidence persistence, retrieval, the full
+      # document corpus, or multi-project ADLS mode: the base deployment
+      # still succeeds, and the corresponding smoke test below just skips
+      # itself (gated on the same blank input), so nothing fails loudly.
+      - name: Refuse to silently disable already-enabled evidence/search/corpus/ADLS features
+        run: |
+          set -euo pipefail
+          # A plain list of "env_name|this_run_value|input_name|consequence"
+          # entries, not an associative array: GitHub's ubuntu-latest
+          # runner's bash supports declare -A fine, but this needed no
+          # version-dependent feature to begin with, and stayed easier to
+          # verify locally (macOS's default /bin/bash is 3.2, which has no
+          # associative arrays at all -- confirmed while writing this).
+          checks=(
+            "EVIDENCE_STORAGE_ACCOUNT_URL|$EVIDENCE_STORAGE_ACCOUNT_URL|evidence_storage_account_url|evidence crop persistence would revert to local-filesystem-only"
+            "AZURE_SEARCH_ENDPOINT|$AZURE_SEARCH_SERVICE_NAME|azure_search_service_name|Azure AI Search retrieval would silently disable"
+            "PDF_FILES|$PDF_FILES_INPUT|pdf_files|the multi-document corpus would revert to config.py's single-document default"
+            "ADLS_ACCOUNT_URL|$ADLS_ACCOUNT_URL|adls_account_url|multi-project ADLS mode would silently disable"
+          )
+          for entry in "${checks[@]}"; do
+            IFS='|' read -r env_name this_run_value input_name consequence <<< "$entry"
+            current=$(az containerapp show \
+              --name "${NAME_PREFIX}-api" \
+              --resource-group "$RESOURCE_GROUP" \
+              --query "properties.template.containers[0].env[?name=='$env_name'].value | [0]" \
+              -o tsv 2>/dev/null || true)
+            if [ -n "$current" ] && [ "$current" != "None" ] && [ -z "$this_run_value" ] && [ "$ALLOW_DISABLING_OPTIONAL_FEATURES" != "yes" ]; then
+              echo "::error::The currently deployed ${NAME_PREFIX}-api has $env_name set, but this run's $input_name input is blank -- $consequence. Pass the existing (or a new) $input_name to keep it enabled, or set allow_disabling_optional_features=yes if this downgrade is actually intentional."
+              exit 1
+            fi
+          done
 
       - name: Deploy Container Apps
         id: apps
