@@ -16,7 +16,9 @@ h1, h2, p { margin-top: 0; }
 h1 { margin-bottom: 0; font-size: 1.75rem; }
 .eyebrow { color: #86a5d9; margin-bottom: 6px; text-transform: uppercase; font-size: .72rem; letter-spacing: .12em; }
 .status { color: #b8f3cf; border: 1px solid #2a6547; border-radius: 999px; padding: 8px 12px; font-size: .85rem; }
-.workspace { display: grid; grid-template-columns: minmax(280px, 1.15fr) minmax(360px, 1.35fr) minmax(250px, .8fr); gap: 16px; flex: 1; min-height: 0; overflow: hidden; }
+/* Inspector (Decision Trace) gets >= 1/3 of the row -- it's the point of
+   the demo, not a sidebar: 1.1fr of 3.2fr total = 34.4%. */
+.workspace { display: grid; grid-template-columns: minmax(260px, 1fr) minmax(340px, 1.1fr) minmax(340px, 1.1fr); gap: 16px; flex: 1; min-height: 0; overflow: hidden; }
 .viewer, .chat, .inspector, .audit, .citations { background: #121a30; border: 1px solid #263457; border-radius: 14px; padding: 16px; }
 .viewer { display: flex; flex-direction: column; gap: 16px; min-height: 0; overflow: auto; }
 .tabs { display: flex; gap: 6px; flex-wrap: wrap; }
@@ -64,16 +66,23 @@ form { margin-top: 16px; display: grid; gap: 10px; position: sticky; bottom: 0; 
 .submit-row { display: flex; gap: 8px; align-items: center; }
 .stop-button { background: #ff9696; color: #240d14; }
 .retrieval-evidence { display: grid; gap: 6px; padding: 10px; margin: 8px 0; background: #14213d; border: 1px solid #3a5bb8; border-left: 4px solid #7eafff; border-radius: 8px; }
-.retrieval-evidence table { border-collapse: collapse; width: 100%; font-size: .82rem; }
+.retrieval-summary { margin: 0; font-size: .82rem; color: #c4d1ea; }
+.retrieval-detail summary { cursor: pointer; color: #9fbfff; font-size: .78rem; margin-top: 2px; }
+.retrieval-evidence table { border-collapse: collapse; width: 100%; font-size: .82rem; margin-top: 6px; }
 .retrieval-evidence th, .retrieval-evidence td { text-align: left; padding: 4px 8px; border-bottom: 1px solid #26335c; overflow-wrap: anywhere; }
 .retrieval-evidence th { color: #9fbfff; font-weight: 600; }
 .retrieval-evidence tr.above-threshold td { color: #d5e0f5; font-weight: 700; }
 .retrieval-evidence tr:not(.above-threshold) td { color: #7c8bad; }
+.retrieval-absent { margin: 8px 0 0; font-size: .8rem; color: #8ab0e6; font-style: italic; }
 .raw-trace summary { cursor: pointer; color: #9fbfff; }
-.raw-trace ol, .audit-stage ol { padding-left: 20px; display: grid; gap: 12px; }
-.raw-trace li, .audit-stage li { display: grid; gap: 4px; color: #b9c7e3; font-size: .9rem; min-width: 0; overflow-wrap: anywhere; }
+.raw-trace ol, .audit-stage ol, .step-trace ol { padding-left: 20px; display: grid; gap: 12px; }
+.step-trace { margin-top: 8px; }
+.step-trace summary { cursor: pointer; color: #7c93bd; font-size: .75rem; }
+.step-trace pre { font-size: .72rem; }
+.raw-trace li, .audit-stage li, .step-trace li { display: grid; gap: 4px; color: #b9c7e3; font-size: .85rem; min-width: 0; overflow-wrap: anywhere; }
 .raw-trace li span, .raw-trace li strong, .raw-trace li small,
-.audit-stage li span, .audit-stage li strong, .audit-stage li small { overflow-wrap: anywhere; }
+.audit-stage li span, .audit-stage li strong, .audit-stage li small,
+.step-trace li span, .step-trace li strong, .step-trace li small { overflow-wrap: anywhere; }
 button { border: 0; border-radius: 8px; padding: 12px; font-weight: 700; color: #061126; background: #7eafff; cursor: pointer; }
 button:disabled { opacity: .6; cursor: wait; }
 .inspector { display: grid; align-content: start; gap: 16px; min-height: 0; min-width: 0; overflow: auto; overscroll-behavior: contain; }
