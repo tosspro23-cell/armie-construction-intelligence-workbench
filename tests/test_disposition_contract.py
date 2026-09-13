@@ -194,7 +194,10 @@ def test_refused_is_only_the_defensive_aggregation_fallback_not_a_live_path(tmp_
     )])
     malformed_subresult = {"subtask_id": "task_1", "plan": multi_plan.subplans[0].model_dump(), "answer": "malformed", "citations": []}  # no "disposition" key
 
-    result = service._synthesize_multi_response({"question": "irrelevant", "trace_id": "t", "thread_id": "th"}, multi_plan, [malformed_subresult], model_calls=0)
+    result = service._synthesize_multi_response(
+        {"question": "irrelevant", "trace_id": "t", "thread_id": "th", "project_resources": _demo(container)},
+        multi_plan, [malformed_subresult], model_calls=0,
+    )
 
     assert result["disposition"] == "refused"
 

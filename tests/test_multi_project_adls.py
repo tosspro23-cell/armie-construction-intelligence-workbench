@@ -499,3 +499,39 @@ def test_a_slow_project_load_times_out_within_the_declared_request_deadline(monk
         # loading rather than only the agent-execution phase after it.
         assert elapsed < 0.5
     get_settings.cache_clear()
+
+
+# --- citations/audit/execution_metadata carry project/source provenance (SS F) -----
+# (independent-review finding, confirmed live 2026-09-13: SPEC-M9's own
+# "minimal frozen source-provenance manifest" was tracked internally
+# (ServiceContainer.get_project's cache key) but never surfaced on
+# anything a caller or auditor could actually see -- see D-023 addendum
+# in docs/decisions/README.md for the full account.)
+
+def test_citations_audit_trace_and_response_all_carry_the_active_project_and_source_set(monkeypatch, tmp_path: Path) -> None:
+    import app.main as main_module
+    from app.config import get_settings
+
+    _configure_env(monkeypatch, tmp_path, ADLS_ACCOUNT_URL="https://fake.dfs.core.windows.net")
+    fake_client = FakeDataLakeClient(_westgate_files())
+    with TestClient(main_module.app) as client:
+        main_module.app.state.container.datalake_client_factory = lambda s: fake_client
+
+        response = client.post("/api/v1/chat", json={"project_id": "westgate", "question": "What is the connected load for Panel-A?"})
+        assert response.status_code == 200
+        body = response.json()
+
+        assert body["execution_metadata"]["project_id"] == "westgate"
+        assert body["execution_metadata"]["source_set_id"] == "westgate-v1"
+
+        assert body["citations"], "expected at least one citation"
+        for citation in body["citations"]:
+            assert citation["project_id"] == "westgate"
+            assert citation["source_set_id"] == "westgate-v1"
+
+        trace = client.get(f"/api/v1/traces/{response.json()['trace_id']}").json()
+        assert trace, "expected at least one audit event for this trace"
+        for event in trace:
+            assert event["project_id"] == "westgate"
+            assert event["source_set_id"] == "westgate-v1"
+    get_settings.cache_clear()

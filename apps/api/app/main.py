@@ -338,7 +338,7 @@ async def chat(request: ChatRequest, x_session_id: str | None = Header(default=N
         raise HTTPException(status_code=404, detail=f"Unknown project '{bound_project_id}'.") from None
     except asyncio.TimeoutError:
         record.update(status="timeout", stage="project_load_timeout")
-        audit_error = await _safe_audit_append(app.state.container.audit_store, AuditEvent(trace_id=request_id, thread_id=request.thread_id or request_id, step="request", event_type="timeout", summary="Loading the project's source files exceeded the bounded request deadline.", payload={"request_id": request_id, "project_id": bound_project_id, "timeout_seconds": settings.request_timeout_seconds}))
+        audit_error = await _safe_audit_append(app.state.container.audit_store, AuditEvent(trace_id=request_id, thread_id=request.thread_id or request_id, step="request", event_type="timeout", summary="Loading the project's source files exceeded the bounded request deadline.", payload={"request_id": request_id, "project_id": bound_project_id, "timeout_seconds": settings.request_timeout_seconds}, project_id=bound_project_id))
         extra = {"audit_persist_error": audit_error} if audit_error else {}
         return _terminal_response(request, request_id, Disposition.TIMEOUT, "The request exceeded its time limit while loading the project's source files. Please retry shortly.", **extra)
     except Exception as error:
@@ -385,12 +385,12 @@ async def chat(request: ChatRequest, x_session_id: str | None = Header(default=N
         ), timeout=remaining_budget)
     except asyncio.CancelledError:
         record.update(status="cancelled", stage="cancelled")
-        audit_error = await _safe_audit_append(app.state.container.audit_store, AuditEvent(trace_id=request_id, thread_id=request.thread_id or request_id, step="request", event_type="cancelled", summary="Request was cancelled before a terminal response.", payload={"request_id": request_id}))
+        audit_error = await _safe_audit_append(app.state.container.audit_store, AuditEvent(trace_id=request_id, thread_id=request.thread_id or request_id, step="request", event_type="cancelled", summary="Request was cancelled before a terminal response.", payload={"request_id": request_id}, project_id=project_resources.manifest.project_id, source_set_id=project_resources.manifest.source_set_id))
         extra = {"audit_persist_error": audit_error} if audit_error else {}
         return _terminal_response(request, request_id, Disposition.CANCELLED, "Request cancelled. No result was committed to the conversation context.", **extra)
     except asyncio.TimeoutError:
         record.update(status="timeout", stage="timeout")
-        audit_error = await _safe_audit_append(app.state.container.audit_store, AuditEvent(trace_id=request_id, thread_id=request.thread_id or request_id, step="request", event_type="timeout", summary="Request exceeded the bounded request deadline.", payload={"request_id": request_id, "timeout_seconds": settings.request_timeout_seconds}))
+        audit_error = await _safe_audit_append(app.state.container.audit_store, AuditEvent(trace_id=request_id, thread_id=request.thread_id or request_id, step="request", event_type="timeout", summary="Request exceeded the bounded request deadline.", payload={"request_id": request_id, "timeout_seconds": settings.request_timeout_seconds}, project_id=project_resources.manifest.project_id, source_set_id=project_resources.manifest.source_set_id))
         extra = {"audit_persist_error": audit_error} if audit_error else {}
         return _terminal_response(request, request_id, Disposition.TIMEOUT, "The request exceeded its time limit. Partial audit events were preserved; please retry with a narrower question.", **extra)
     except Exception as error:
@@ -402,6 +402,11 @@ async def chat(request: ChatRequest, x_session_id: str | None = Header(default=N
             **response.execution_metadata,
             "request_id": request_id,
             "latency_ms": round((time.perf_counter() - started) * 1000, 1),
+            # SPEC-M9 SS F, D-023 addendum: independent-review finding,
+            # confirmed live (2026-09-13) -- see Citation/AuditEvent's own
+            # project_id/source_set_id fields for the full rationale.
+            "project_id": project_resources.manifest.project_id,
+            "source_set_id": project_resources.manifest.source_set_id,
         }
     })
     context_persist_error: str | None = None
