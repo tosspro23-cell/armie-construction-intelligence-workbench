@@ -63,29 +63,62 @@ input, textarea { width: 100%; background: #0b1020; color: #f6f8ff; border: 1px 
 form { margin-top: 16px; display: grid; gap: 10px; position: sticky; bottom: 0; padding-top: 10px; background: #121a30; z-index: 2; }
 .submit-row { display: flex; gap: 8px; align-items: center; }
 .stop-button { background: #ff9696; color: #240d14; }
-.decision-summary, .stage-timeline { display: grid; gap: 5px; padding: 10px; margin: 8px 0; background: #0c1326; border-radius: 8px; }
 .retrieval-evidence { display: grid; gap: 6px; padding: 10px; margin: 8px 0; background: #14213d; border: 1px solid #3a5bb8; border-left: 4px solid #7eafff; border-radius: 8px; }
 .retrieval-evidence table { border-collapse: collapse; width: 100%; font-size: .82rem; }
 .retrieval-evidence th, .retrieval-evidence td { text-align: left; padding: 4px 8px; border-bottom: 1px solid #26335c; overflow-wrap: anywhere; }
 .retrieval-evidence th { color: #9fbfff; font-weight: 600; }
 .retrieval-evidence tr.above-threshold td { color: #d5e0f5; font-weight: 700; }
 .retrieval-evidence tr:not(.above-threshold) td { color: #7c8bad; }
-.stage-timeline span { color: #aebfdf; font-size: .78rem; }
 .raw-trace summary { cursor: pointer; color: #9fbfff; }
+.raw-trace ol, .audit-stage ol { padding-left: 20px; display: grid; gap: 12px; }
+.raw-trace li, .audit-stage li { display: grid; gap: 4px; color: #b9c7e3; font-size: .9rem; min-width: 0; overflow-wrap: anywhere; }
+.raw-trace li span, .raw-trace li strong, .raw-trace li small,
+.audit-stage li span, .audit-stage li strong, .audit-stage li small { overflow-wrap: anywhere; }
 button { border: 0; border-radius: 8px; padding: 12px; font-weight: 700; color: #061126; background: #7eafff; cursor: pointer; }
 button:disabled { opacity: .6; cursor: wait; }
 .inspector { display: grid; align-content: start; gap: 16px; min-height: 0; min-width: 0; overflow: auto; overscroll-behavior: contain; }
-.citations, .audit { padding: 0; border: 0; border-radius: 0; }
-.citations details { margin: 8px 0; background: #0c1326; border-radius: 8px; padding: 8px; min-width: 0; overflow: hidden; }
-.citations summary { cursor: pointer; overflow-wrap: anywhere; }
 .citation-facts { display: grid; gap: 5px; margin: 10px 0 0; color: #aebfdf; font-size: .76rem; }
 .citation-facts div { display: grid; grid-template-columns: minmax(90px, 35%) minmax(0, 1fr); gap: 8px; }
 .citation-facts dt { color: #7891bf; text-transform: capitalize; }
 .citation-facts dd { margin: 0; overflow-wrap: anywhere; color: #d5e0f5; }
-.audit ol { padding-left: 20px; display: grid; gap: 12px; }
-.audit li { display: grid; gap: 4px; color: #b9c7e3; font-size: .9rem; min-width: 0; overflow-wrap: anywhere; }
-.audit li span, .audit li strong, .audit li small { overflow-wrap: anywhere; }
 .empty { color: #9baccc; }
+
+/* Decision Story -- the interview/demo-facing evidence+audit redesign
+   (2026-09-13): one linear top-to-bottom narrative instead of two
+   disconnected, mostly-collapsed sections, with cloud provenance
+   (project/source version) made visible instead of computed-but-hidden. */
+.decision-story { display: grid; gap: 12px; min-width: 0; }
+.decision-story.empty-story { padding: 4px 0; }
+.cloud-provenance { display: flex; align-items: center; gap: 8px; padding: 9px 12px; background: #102a1e; border: 1px solid #2a6547; border-radius: 8px; font-size: .78rem; color: #b8f3cf; }
+.cloud-provenance strong { color: #eafff1; }
+.cloud-provenance-icon { font-size: 1rem; }
+.story-steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.story-step { position: relative; padding: 10px 0 16px 34px; border-left: 2px solid #263457; }
+.story-step:last-of-type { border-left-color: transparent; padding-bottom: 0; }
+.story-step-header { display: flex; align-items: baseline; gap: 8px; margin-left: -34px; }
+.story-step-number { position: relative; left: 0; width: 22px; height: 22px; flex: 0 0 22px; display: grid; place-items: center; background: #233861; color: #dce9ff; border-radius: 999px; font-size: .72rem; font-weight: 700; }
+.story-step-icon { font-size: 1rem; }
+.story-step-header strong { color: #eef3ff; font-size: .92rem; }
+.story-step-subtitle { display: block; color: #8ab0e6; font-size: .74rem; margin-top: 1px; }
+.story-step-body { margin: 8px 0 0; color: #c4d1ea; font-size: .84rem; }
+.plan-list { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 6px; }
+.plan-list li { display: grid; gap: 2px; padding: 8px 10px; background: #0c1326; border-radius: 8px; }
+.plan-op { color: #d5e0f5; font-size: .82rem; font-weight: 600; }
+.plan-rationale { color: #8ab0e6; font-size: .76rem; font-style: italic; }
+.evidence-cards { display: grid; gap: 10px; margin-top: 8px; }
+.evidence-card { display: grid; gap: 6px; padding: 10px; background: #0c1326; border: 1px solid #263457; border-radius: 10px; cursor: pointer; transition: border-color .12s ease; }
+.evidence-card:hover { border-color: #5994ef; }
+.evidence-card header { display: flex; align-items: center; gap: 8px; }
+.evidence-badge { padding: 3px 8px; border-radius: 999px; font-size: .68rem; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; background: #233861; color: #dce9ff; }
+.evidence-badge.ifc { background: #1f3a2e; color: #8ff0b1; }
+.evidence-badge.pdf { background: #3a3320; color: #ffcf7a; }
+.evidence-badge.viewer_snapshot { background: #2a2650; color: #c6b6ff; }
+.evidence-label { color: #d5e0f5; font-size: .82rem; overflow-wrap: anywhere; }
+.evidence-jump { color: #7eafff; font-size: .74rem; }
+.verification-reason { padding: 8px 10px; border-radius: 8px; background: #0c1326; border-left: 3px solid #8190ad; }
+.verification-reason.passed { border-left-color: #8ff0b1; }
+.verification-reason.failed { border-left-color: #ff9696; }
+.verification-reason.not_applicable { border-left-color: #d6c17a; }
 pre { max-width: 100%; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: .75rem; }
 @media (max-width: 1100px) { .workspace { grid-template-columns: 1fr; } .ifc-viewer, .viewer-host { min-height: 300px; } }
 

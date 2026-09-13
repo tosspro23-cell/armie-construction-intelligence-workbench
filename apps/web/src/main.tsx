@@ -1,12 +1,13 @@
 import React, { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { api, ApiAuthError, AuthedImage, ensureSessionId, setStoredApiKey } from "./apiClient";
+import { DecisionStory } from "./DecisionStory";
 import { IfcViewer, ViewerStatus } from "./IfcViewer";
 import "./styles.css";
 
 type SourcePreference = "auto" | "ifc" | "pdf" | "viewer_snapshot";
 type WorkspaceTab = "bim" | "drawing" | "snapshot";
-type Citation = { evidence_id: string; source_type: string; label: string; locator: Record<string, any> };
+type Citation = { evidence_id: string; source_type: string; label: string; locator: Record<string, any>; project_id?: string; source_set_id?: string };
 type TraceEvent = { id: string; step: string; event_type: string; summary: string; payload: Record<string, any>; actual_provider?: string; actual_model?: string; planning_mode?: string; model_call_count?: number; tool_call_count?: number };
 type Response = {
   thread_id: string; trace_id: string; disposition: "answered" | "partially_answered" | "clarification_required" | "refused" | "error" | "timeout" | "cancelled";
@@ -23,36 +24,6 @@ function stableCitationKey(citation: Citation) {
     : citation.source_type === "pdf"
       ? `${citation.source_type}:${locator.page}:${JSON.stringify(locator.bbox)}:${locator.field}`
       : `${citation.source_type}:${locator.snapshot_id}`;
-}
-
-function citationFacts(citation: Citation): Array<[string, string]> {
-  return Object.entries(citation.locator || {})
-    .filter(([key, value]) => key !== "evidence_crop" && value !== null && value !== undefined && value !== "")
-    .map(([key, value]) => [key.replace(/_/g, " "), Array.isArray(value) ? value.join(", ") : String(value)]);
-}
-
-function stageLabel(event: TraceEvent): string {
-  const step = event.step.toLowerCase();
-  if (step.includes("resolve") || event.event_type === "context_resolved") return "Understand";
-  if (step.includes("route") || step.includes("plan") || event.event_type.includes("coverage")) return "Plan";
-  if (step.includes("capability") || event.event_type.includes("capability")) return "Capability Check";
-  if (step.includes("execute") || event.event_type.includes("tool")) return "Execute";
-  if (step.includes("verif") || event.event_type.includes("verification")) return "Verify";
-  return "Respond";
-}
-
-const AUDIT_STAGES = ["Intent Understanding", "Normalization", "Planning", "Execution", "Verification", "Final Response"] as const;
-type AuditStage = typeof AUDIT_STAGES[number];
-
-function auditStage(event: TraceEvent): AuditStage {
-  const step = event.step.toLowerCase();
-  const type = event.event_type.toLowerCase();
-  if (step.includes("resolve") || type.includes("context") || type.includes("selection")) return "Intent Understanding";
-  if (type.includes("coverage") || type.includes("canonical") || type.includes("normalize") || type.includes("delta") || type.includes("precedence")) return "Normalization";
-  if (step.includes("route") || step.includes("plan") || type.includes("semantic") || type.includes("repair")) return "Planning";
-  if (step.includes("execute") || type.includes("tool") || type.includes("subplan")) return "Execution";
-  if (step.includes("verif") || type.includes("verif") || type.includes("evidence")) return "Verification";
-  return "Final Response";
 }
 
 type ProjectOption = { project_id: string; display_name: string };
@@ -138,7 +109,6 @@ function App() {
     return viewerStatus.phase === "ready" ? "Viewer ready" : viewerStatus.message;
   }, [apiState, metadata, viewerStatus]);
   const latest = turns.length ? turns[turns.length - 1].assistant : undefined;
-  const citations = useMemo<Citation[]>(() => Array.from(new Map<string, Citation>((latest?.citations || []).map((item: Citation) => [stableCitationKey(item), item])).values()), [latest]);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -262,7 +232,7 @@ function App() {
         {tab === "snapshot" && <section className="snapshot"><h2>Viewer Snapshot</h2>{snapshot ? <img src={snapshot} alt="Captured IFC viewer context" /> : <p className="empty">Capture a BIM view to enable image-grounded inspection.</p>}<p>Selected: {selected?.globalId || "none"}</p></section>}
       </aside>
       <section className="chat"><h2>Conversation</h2><div className="messages" ref={timelineRef}>{turns.length === 0 ? <p className="empty">Ask a BIM, drawing, or current-view question. Auto chooses the source; overrides remain in technical details.</p> : turns.map((turn) => <React.Fragment key={turn.id}><div className="message-row user"><article className="message user-message"><div className="message-meta"><span>User</span><time>{turn.timestamp}</time></div><p>{turn.user}</p></article></div><div className="message-row assistant"><article className={`message assistant-message ${turn.assistant.disposition}`}><div className="message-meta"><span>Assistant</span><span>{turn.assistant.disposition.replace(/_/g, " ")}</span><span className={turn.assistant.verification.status}>{turn.assistant.verification.status}</span><time>{turn.timestamp}</time></div><p>{turn.assistant.answer_markdown}</p>{turn.assistant.citations.length > 0 && <div className="turn-citations">{turn.assistant.citations.slice(0, 3).map((citation) => <button type="button" key={stableCitationKey(citation)} onClick={() => openCitation(citation)}>View {citation.source_type} evidence</button>)}</div>}<details className="technical-details"><summary>Technical details</summary><small>Source: {turn.assistant.execution_metadata.source || "—"} · Planner: {turn.assistant.execution_metadata.planning_mode || "—"} · Models: {turn.assistant.execution_metadata.model_call_count || 0} · Tools: {turn.assistant.execution_metadata.tool_call_count || 0} · Trace: {turn.assistant.trace_id}</small></details></article></div></React.Fragment>)}</div><form onSubmit={submit}><textarea value={question} onChange={(e) => setQuestion(e.target.value)} placeholder="e.g. How many doors are in the project?" rows={3} /><div className="submit-row"><button disabled={busy}>{busy ? `Checking evidence… ${requestStage}` : "Ask with audit trail"}</button>{busy && <button type="button" className="stop-button" onClick={stopRequest}>Stop request</button>}</div></form></section>
-      <aside className="inspector"><section className="citations"><h2>Evidence Inspector</h2>{citations.length === 0 ? <p className="empty">Evidence appears after a question.</p> : <><p className="empty">{latest?.citations.length} evidence items · {Math.min(citations.length, 3)} representative citations shown</p>{citations.slice(0, 3).map((citation) => <details key={stableCitationKey(citation)}><summary onClick={() => openCitation(citation)}>{citation.source_type}: {citation.label}</summary><dl className="citation-facts">{citationFacts(citation).map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{value}</dd></div>)}</dl>{citation.locator.evidence_crop && <AuthedImage className="evidence-crop" src={`/api/v1/evidence/${citation.locator.evidence_crop}`} alt="Cited PDF evidence crop" />}</details>)}</>}</section><section className="audit"><h2>Audit Trail</h2>{trace.length === 0 ? <p className="empty">Trace events appear after a question.</p> : <><div className="decision-summary"><strong>Decision Summary</strong><span>Intent: {latest?.execution_metadata.normalized_request || "—"}</span><span>Source: {latest?.execution_metadata.source || "—"}</span><span>Capability / Plan: {latest?.execution_metadata.subplans?.map((p: any) => `${p.operation || "—"}${p.entity_type ? ` · ${p.entity_type}` : ""}`).join(", ") || "—"}</span><span>Execution: {latest?.execution_metadata.tool_call_count || 0} tool · {latest?.execution_metadata.model_call_count || 0} model call(s)</span><span>Verification: {latest?.verification.status || "—"}</span><span>Evidence: {latest?.citations.length || 0} citation(s)</span><span>Result: {latest?.disposition.replace(/_/g, " ") || "—"}</span><span>Latency: {latest?.execution_metadata.latency_ms ? `${latest.execution_metadata.latency_ms} ms` : "—"}</span></div>{(() => { const retrievalEvent = trace.find((event) => event.event_type === "retrieval_evaluated"); if (!retrievalEvent) return null; const documents: Array<{ filename: string; score: number }> = retrievalEvent.payload.documents_evaluated || []; const directed: string[] = retrievalEvent.payload.directed_candidates || []; const threshold = retrievalEvent.payload.relevance_threshold; return <div className="retrieval-evidence"><strong>AI Search Retrieval</strong><span className="empty">Relevance threshold: {threshold} · candidate named in answer only if score ≥ threshold</span><table><thead><tr><th>Document</th><th>Relevance score</th><th>Named in answer?</th></tr></thead><tbody>{documents.map((doc) => <tr key={doc.filename} className={directed.includes(doc.filename) ? "above-threshold" : undefined}><td>{doc.filename}</td><td>{doc.score.toFixed(4)}</td><td>{directed.includes(doc.filename) ? "Yes" : "No"}</td></tr>)}</tbody></table></div>; })()}{AUDIT_STAGES.map((stage) => { const events = trace.filter((event) => auditStage(event) === stage); return <details className="audit-stage" key={stage} open={stage === "Intent Understanding"}><summary>{stage} ({events.length})</summary>{events.length === 0 ? <p className="empty">No events.</p> : <ol>{events.map((event) => <li key={event.id}><strong>{event.summary}</strong>{event.actual_model && <small>Model: {event.actual_provider}/{event.actual_model}</small>}<details><summary>Details</summary><pre>{JSON.stringify(event.payload, null, 2)}</pre></details></li>)}</ol>}</details> })}<details className="raw-trace"><summary>Raw Trace ({trace.length} events)</summary><ol>{trace.map((event) => <li key={event.id}><strong>{event.step} · {event.event_type}</strong><span>{event.summary}</span>{event.actual_model && <small>Actual model: {event.actual_provider}/{event.actual_model}</small>}<details><summary>Payload</summary><pre>{JSON.stringify(event.payload, null, 2)}</pre></details></li>)}</ol></details></>}</section></aside>
+      <aside className="inspector"><DecisionStory latest={latest} trace={trace} projectId={projectId} onOpenCitation={openCitation} /></aside>
     </section>
   </main>;
 }
