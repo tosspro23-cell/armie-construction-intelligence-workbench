@@ -112,7 +112,7 @@ jobs:
       ADLS_ACCOUNT_URL: ${{ inputs.adls_account_url }}
       RATE_LIMIT_REQUESTS_PER_MINUTE: ${{ inputs.rate_limit_requests_per_minute }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # A repository secret (unlike a required workflow_dispatch input)
       # cannot be enforced as "required" by GitHub itself -- an unset repo
