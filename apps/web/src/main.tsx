@@ -7,7 +7,7 @@ import "./styles.css";
 
 type SourcePreference = "auto" | "ifc" | "pdf" | "viewer_snapshot";
 type WorkspaceTab = "bim" | "drawing" | "snapshot";
-type Citation = { evidence_id: string; source_type: string; label: string; locator: Record<string, any>; project_id?: string; source_set_id?: string };
+type Citation = { evidence_id: string; source_type: string; label: string; locator: Record<string, any>; project_id?: string; source_set_id?: string; source_file?: string };
 type TraceEvent = { id: string; step: string; event_type: string; summary: string; payload: Record<string, any>; actual_provider?: string; actual_model?: string; planning_mode?: string; model_call_count?: number; tool_call_count?: number };
 type Response = {
   thread_id: string; trace_id: string; disposition: "answered" | "partially_answered" | "clarification_required" | "refused" | "error" | "timeout" | "cancelled";
@@ -16,6 +16,20 @@ type Response = {
 };
 type Selected = { globalId?: string; expressId?: number; type?: string; name?: string };
 type ConversationTurn = { id: string; user: string; assistant: Response; timestamp: string; trace: TraceEvent[] };
+
+// `_natural_answer` (apps/api/app/agent/graph.py) intentionally wraps
+// numbers/entities in literal `**bold**` markdown so the emphasis survives
+// as plain text if nothing renders it -- but nothing here ever did, so the
+// literal asterisks showed up in the chat bubble instead of bold text
+// (found live, 2026-09-13). This is deliberately not a full markdown
+// renderer: the backend only ever emits this one non-nested construct.
+function renderAnswerMarkdown(text: string): React.ReactNode {
+  return text.split(/(\*\*[^*]+\*\*)/g).map((part, index) =>
+    part.startsWith("**") && part.endsWith("**") && part.length > 4
+      ? <strong key={index}>{part.slice(2, -2)}</strong>
+      : <React.Fragment key={index}>{part}</React.Fragment>
+  );
+}
 
 function stableCitationKey(citation: Citation) {
   const locator = citation.locator || {};
@@ -54,7 +68,7 @@ function App() {
   const [sourcePreference, setSourcePreference] = useState<SourcePreference>("auto");
   const [tab, setTab] = useState<WorkspaceTab>("bim");
   const [drawingZoom, setDrawingZoom] = useState(1);
-  const [drawingEvidence, setDrawingEvidence] = useState<{ bbox?: number[]; board?: string; field?: string; page?: number } | null>(null);
+  const [drawingEvidence, setDrawingEvidence] = useState<{ bbox?: number[]; board?: string; field?: string; page?: number; document?: string; localized?: boolean } | null>(null);
   const drawingEvidenceRef = useRef<HTMLDivElement>(null);
   const [busy, setBusy] = useState(false);
   const [apiState, setApiState] = useState<"loading" | "ready" | "unavailable">("loading");
@@ -201,15 +215,37 @@ function App() {
     if (event.ctrlKey) { event.preventDefault(); adjustDrawingZoom(drawingZoom * (event.deltaY < 0 ? 1.1 : .9)); return; }
     event.stopPropagation();
   }
+  // SPEC-M6 deliberately scoped the drawing viewer to the first-configured
+  // document only; the answer pipeline (_execute_pdf_multi_document) has
+  // been multi-document-aware since that milestone, but nothing let a user
+  // actually look at the other configured documents. Found live,
+  // 2026-09-13: "there are multiple documents but I can only ever see page
+  // 1 of the first one." `drawingDocument` defaults to the citation's own
+  // source_file when evidence is focused, else the project's first
+  // configured document, so switching documents/pages doesn't require a
+  // citation to already be open.
+  const drawingDocument = drawingEvidence?.document || metadata?.pdf_files?.[0];
+  const drawingDocInfo = (metadata?.pdf_documents || []).find((doc: { filename: string; page_count: number }) => doc.filename === drawingDocument);
+  const drawingPageCount = drawingDocInfo?.page_count || 1;
+
+  function changeDrawingDocument(document: string) {
+    setDrawingEvidence({ document, page: 1 });
+    setDrawingZoom(1);
+  }
+  function changeDrawingPage(page: number) {
+    setDrawingEvidence((current) => ({ ...(current || {}), document: current?.document || drawingDocument, page: Math.max(1, Math.min(drawingPageCount, page)), bbox: undefined }));
+  }
+
   function openCitation(citation: Citation) {
     if (citation.source_type === "ifc") { setTab("bim"); setSelected({ globalId: citation.locator.global_id, expressId: citation.locator.express_id, type: citation.locator.entity_type, name: citation.label }); }
     if (citation.source_type === "pdf") {
       setTab("drawing");
-      setDrawingEvidence({ bbox: citation.locator.bbox, board: citation.locator.board, field: citation.locator.field, page: citation.locator.page });
+      setDrawingEvidence({ bbox: citation.locator.bbox, board: citation.locator.board, field: citation.locator.field, page: citation.locator.page, document: citation.source_file, localized: citation.locator.localized });
       const bbox = citation.locator.bbox;
       const width = bbox && bbox.length >= 4 ? Math.max(1, bbox[2] - bbox[0]) : 700;
       const height = bbox && bbox.length >= 4 ? Math.max(1, bbox[3] - bbox[1]) : 500;
-      const focusZoom = Math.max(1.35, Math.min(2.6, Math.min(1191 / (width * 1.25), 842 / (height * 1.25))));
+      const pageSize = (metadata?.pdf_documents || []).find((doc: { filename: string }) => doc.filename === citation.source_file)?.page_sizes?.[(citation.locator.page || 1) - 1] || [1191, 842];
+      const focusZoom = Math.max(1.35, Math.min(2.6, Math.min(pageSize[0] / (width * 1.25), pageSize[1] / (height * 1.25))));
       setDrawingZoom(focusZoom);
       window.setTimeout(() => drawingEvidenceRef.current?.scrollIntoView({ behavior: "smooth", block: "center", inline: "center" }), 50);
     }
@@ -238,10 +274,18 @@ function App() {
     <section className="workspace">
       <aside className="viewer"><div className="tabs"><button className={tab === "bim" ? "active" : ""} onClick={() => setTab("bim")}>BIM Model</button><button className={tab === "drawing" ? "active" : ""} onClick={() => setTab("drawing")}>Drawing</button><button className={tab === "snapshot" ? "active" : ""} onClick={() => setTab("snapshot")}>Viewer Snapshot</button></div>
         {tab === "bim" && <><h2>IFC Viewer</h2><IfcViewer projectId={projectId} onSelection={handleSelection} onSnapshot={(value) => { setSnapshot(value); setSnapshotCleared(false); }} onStatus={setViewerStatus} focusGlobalId={selected?.globalId} /><dl className="selection-details"><div><dt>Element</dt><dd>{selected ? `${selected.type}: ${selected.name}` : "No IFC element selected"}</dd></div><div><dt>IFC type</dt><dd>{selected?.type || "—"}</dd></div><div><dt>ExpressID</dt><dd>{selected?.expressId ?? "—"}</dd></div><div><dt>GlobalId</dt><dd>{selected?.globalId || "—"}</dd></div></dl></>}
-        {tab === "drawing" && <section className="drawing"><h2>Engineering Drawing</h2><p>{metadata?.pdf_file || "synthetic schedule"} · page {drawingEvidence?.page ?? 1}</p><div className="drawing-toolbar"><button type="button" onClick={() => adjustDrawingZoom(drawingZoom - .25)}>−</button><span>{Math.round(drawingZoom * 100)}%</span><button type="button" onClick={() => adjustDrawingZoom(drawingZoom + .25)}>+</button><button type="button" onClick={() => setDrawingZoom(1)}>Fit page</button><button type="button" onClick={() => setDrawingZoom(1.15)}>Fit width</button><button type="button" onClick={() => setDrawingZoom(1)}>100%</button>{drawingEvidence && <button type="button" onClick={() => { setDrawingEvidence(null); setDrawingZoom(1); }}>Clear evidence focus</button>}</div><div className="drawing-stage" aria-label="Zoomable engineering drawing. Pinch to zoom; two-finger scroll pans." onWheel={onDrawingWheel}><div className="drawing-page" style={{ transform: `scale(${drawingZoom})` }}><AuthedImage src={`/api/v1/project/pdf/pages/${drawingEvidence?.page ?? 1}.png${projectId ? `?project_id=${encodeURIComponent(projectId)}` : ""}`} alt={`Engineering load schedule page ${drawingEvidence?.page ?? 1}`} />{drawingEvidence?.bbox && <div ref={drawingEvidenceRef} className="drawing-evidence-box" style={{ left: `${(drawingEvidence.bbox[0] / 1191) * 100}%`, top: `${(drawingEvidence.bbox[1] / 842) * 100}%`, width: `${((drawingEvidence.bbox[2] - drawingEvidence.bbox[0]) / 1191) * 100}%`, height: `${((drawingEvidence.bbox[3] - drawingEvidence.bbox[1]) / 842) * 100}%` }} title={`${drawingEvidence.board || "PDF evidence"}${drawingEvidence.field ? ` · ${drawingEvidence.field}` : ""}`} />}</div></div><p className="empty">{drawingEvidence ? `Focused evidence: ${drawingEvidence.board || "drawing region"}${drawingEvidence.field ? ` · ${drawingEvidence.field}` : ""}.` : "Pinch to zoom and use two-finger scrolling to pan; citations focus a cited drawing region."}</p></section>}
+        {tab === "drawing" && <section className="drawing"><h2>Engineering Drawing</h2>
+          <div className="drawing-toolbar">
+            {(metadata?.pdf_files?.length || 0) > 1 && <label>Document <select value={drawingDocument || ""} onChange={(e) => changeDrawingDocument(e.target.value)}>{metadata!.pdf_files.map((name: string) => <option key={name} value={name}>{name}</option>)}</select></label>}
+            <button type="button" onClick={() => changeDrawingPage((drawingEvidence?.page ?? 1) - 1)} disabled={(drawingEvidence?.page ?? 1) <= 1}>‹ Prev page</button>
+            <span>Page {drawingEvidence?.page ?? 1} of {drawingPageCount}</span>
+            <button type="button" onClick={() => changeDrawingPage((drawingEvidence?.page ?? 1) + 1)} disabled={(drawingEvidence?.page ?? 1) >= drawingPageCount}>Next page ›</button>
+            <button type="button" onClick={() => adjustDrawingZoom(drawingZoom - .25)}>−</button><span>{Math.round(drawingZoom * 100)}%</span><button type="button" onClick={() => adjustDrawingZoom(drawingZoom + .25)}>+</button><button type="button" onClick={() => setDrawingZoom(1)}>Fit page</button><button type="button" onClick={() => setDrawingZoom(1.15)}>Fit width</button>{drawingEvidence && <button type="button" onClick={() => { setDrawingEvidence(null); setDrawingZoom(1); }}>Clear evidence focus</button>}
+          </div>
+          <div className="drawing-stage" aria-label="Zoomable engineering drawing. Pinch to zoom; two-finger scroll pans." onWheel={onDrawingWheel}><div className="drawing-page" style={{ transform: `scale(${drawingZoom})` }}><AuthedImage src={`/api/v1/project/pdf/pages/${drawingEvidence?.page ?? 1}.png?${new URLSearchParams({ ...(projectId ? { project_id: projectId } : {}), ...(drawingDocument ? { document: drawingDocument } : {}) }).toString()}`} alt={`${drawingDocument || "Engineering load schedule"} page ${drawingEvidence?.page ?? 1}`} />{drawingEvidence?.bbox && <div ref={drawingEvidenceRef} className="drawing-evidence-box" style={{ left: `${(drawingEvidence.bbox[0] / (drawingDocInfo?.page_sizes?.[(drawingEvidence.page || 1) - 1]?.[0] || 1191)) * 100}%`, top: `${(drawingEvidence.bbox[1] / (drawingDocInfo?.page_sizes?.[(drawingEvidence.page || 1) - 1]?.[1] || 842)) * 100}%`, width: `${((drawingEvidence.bbox[2] - drawingEvidence.bbox[0]) / (drawingDocInfo?.page_sizes?.[(drawingEvidence.page || 1) - 1]?.[0] || 1191)) * 100}%`, height: `${((drawingEvidence.bbox[3] - drawingEvidence.bbox[1]) / (drawingDocInfo?.page_sizes?.[(drawingEvidence.page || 1) - 1]?.[1] || 842)) * 100}%` }} title={`${drawingEvidence.board || "PDF evidence"}${drawingEvidence.field ? ` · ${drawingEvidence.field}` : ""}`} />}</div></div><p className="empty">{drawingEvidence?.localized === false ? "This evidence's location could not be precisely determined; showing the full page for manual review." : drawingEvidence?.bbox ? `Focused evidence: ${drawingEvidence.board || "drawing region"}${drawingEvidence.field ? ` · ${drawingEvidence.field}` : ""}.` : "Pinch to zoom and use two-finger scrolling to pan; citations focus a cited drawing region."}</p></section>}
         {tab === "snapshot" && <section className="snapshot"><h2>Viewer Snapshot</h2>{snapshot ? <img src={snapshot} alt="Captured IFC viewer context" /> : <p className="empty">Capture a BIM view to enable image-grounded inspection.</p>}<p>Selected: {selected?.globalId || "none"}</p></section>}
       </aside>
-      <section className="chat"><h2>Conversation</h2><div className="messages" ref={timelineRef}>{turns.length === 0 ? <p className="empty">Ask a BIM, drawing, or current-view question. Auto chooses the source; overrides remain in technical details.</p> : turns.map((turn) => <React.Fragment key={turn.id}><div className="message-row user"><article className="message user-message"><div className="message-meta"><span>User</span><time>{turn.timestamp}</time></div><p>{turn.user}</p></article></div><div className="message-row assistant"><article className={`message assistant-message ${turn.assistant.disposition}`}><div className="message-meta"><span>Assistant</span><span>{turn.assistant.disposition.replace(/_/g, " ")}</span><span className={turn.assistant.verification.status}>{turn.assistant.verification.status}</span><time>{turn.timestamp}</time></div><p>{turn.assistant.answer_markdown}</p>{turn.assistant.citations.length > 0 && <div className="turn-citations">{turn.assistant.citations.slice(0, 3).map((citation) => <button type="button" key={stableCitationKey(citation)} onClick={() => openCitation(citation)}>View {citation.source_type} evidence</button>)}</div>}<details className="technical-details"><summary>Technical details</summary><small>Source: {turn.assistant.execution_metadata.source || "—"} · Planner: {turn.assistant.execution_metadata.planning_mode || "—"} · Models: {turn.assistant.execution_metadata.model_call_count || 0} · Tools: {turn.assistant.execution_metadata.tool_call_count || 0} · Trace: {turn.assistant.trace_id}</small></details></article></div></React.Fragment>)}</div><form onSubmit={submit}><textarea value={question} onChange={(e) => setQuestion(e.target.value)} placeholder="e.g. How many doors are in the project?" rows={3} /><div className="submit-row"><button disabled={busy}>{busy ? `Checking evidence… ${requestStage}` : "Ask with audit trail"}</button>{busy && <button type="button" className="stop-button" onClick={stopRequest}>Stop request</button>}</div></form></section>
+      <section className="chat"><h2>Conversation</h2><div className="messages" ref={timelineRef}>{turns.length === 0 ? <p className="empty">Ask a BIM, drawing, or current-view question. Auto chooses the source; overrides remain in technical details.</p> : turns.map((turn) => <React.Fragment key={turn.id}><div className="message-row user"><article className="message user-message"><div className="message-meta"><span>User</span><time>{turn.timestamp}</time></div><p>{turn.user}</p></article></div><div className="message-row assistant"><article className={`message assistant-message ${turn.assistant.disposition}`}><div className="message-meta"><span>Assistant</span><span>{turn.assistant.disposition.replace(/_/g, " ")}</span><span className={turn.assistant.verification.status}>{turn.assistant.verification.status}</span><time>{turn.timestamp}</time></div><p>{renderAnswerMarkdown(turn.assistant.answer_markdown)}</p>{turn.assistant.citations.length > 0 && <div className="turn-citations">{turn.assistant.citations.slice(0, 3).map((citation) => <button type="button" key={stableCitationKey(citation)} onClick={() => openCitation(citation)}>View {citation.source_type} evidence</button>)}</div>}<details className="technical-details"><summary>Technical details</summary><small>Source: {turn.assistant.execution_metadata.source || "—"} · Planner: {turn.assistant.execution_metadata.planning_mode || "—"} · Models: {turn.assistant.execution_metadata.model_call_count || 0} · Tools: {turn.assistant.execution_metadata.tool_call_count || 0} · Trace: {turn.assistant.trace_id}</small></details></article></div></React.Fragment>)}</div><form onSubmit={submit}><textarea value={question} onChange={(e) => setQuestion(e.target.value)} placeholder="e.g. How many doors are in the project?" rows={3} /><div className="submit-row"><button disabled={busy}>{busy ? `Checking evidence… ${requestStage}` : "Ask with audit trail"}</button>{busy && <button type="button" className="stop-button" onClick={stopRequest}>Stop request</button>}</div></form></section>
       <aside className="inspector"><DecisionStory latest={latest} trace={trace} projectId={projectId} onOpenCitation={openCitation} /></aside>
     </section>
   </main>;

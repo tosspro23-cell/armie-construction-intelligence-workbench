@@ -1078,7 +1078,26 @@ Return only a corrected MultiQueryPlan JSON object."""
             return []
         try:
             from azure.search.documents.models import VectorizedQuery
+            # Found live, 2026-09-13: this is the only model-call site in
+            # this file that incremented model_call_count without emitting
+            # a matching model_called/model_completed audit event -- every
+            # other call (IFC/PDF vision, semantic planning) pairs the two.
+            # A user going looking in the trace for "the model call the
+            # response claims happened" for a question that hit this path
+            # would correctly find nothing, since nothing was ever recorded.
+            self._audit(
+                state, "execute_pdf", "model_called",
+                "Azure AI Search query embedding requested.",
+                {"purpose": "azure_search_query_embedding", "question": question},
+                actual_provider=embedding_provider.name, actual_model=embedding_provider.model,
+            )
             vector = asyncio.run(embedding_provider.embed(question))
+            self._audit(
+                state, "execute_pdf", "model_completed",
+                "Azure AI Search query embedding completed.",
+                {"purpose": "azure_search_query_embedding", "vector_dimensions": len(vector)},
+                actual_provider=embedding_provider.name, actual_model=embedding_provider.model,
+            )
             results = search_client.search(
                 search_text=question,
                 vector_queries=[VectorizedQuery(vector=vector, k_nearest_neighbors=5, fields="content_vector")],
@@ -1610,6 +1629,7 @@ Return only a corrected MultiQueryPlan JSON object."""
             "locator": item.locator,
             "project_id": manifest.project_id,
             "source_set_id": manifest.source_set_id,
+            "source_file": item.source_file,
         } for item in evidence]
 
     @staticmethod

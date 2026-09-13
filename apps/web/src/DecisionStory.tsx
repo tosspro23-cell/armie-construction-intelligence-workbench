@@ -15,7 +15,7 @@ import { AuthedImage } from "./apiClient";
 // right underneath it, not lumped into one undifferentiated pile at the
 // bottom.
 
-type Citation = { evidence_id: string; source_type: string; label: string; locator: Record<string, any>; project_id?: string; source_set_id?: string };
+type Citation = { evidence_id: string; source_type: string; label: string; locator: Record<string, any>; project_id?: string; source_set_id?: string; source_file?: string };
 type TraceEvent = { id: string; step: string; event_type: string; summary: string; payload: Record<string, any>; actual_provider?: string; actual_model?: string; planning_mode?: string; model_call_count?: number; tool_call_count?: number };
 type Response = {
   disposition: string; answer_markdown: string; citations: Citation[]; verification: { status: string; reason?: string };
@@ -37,7 +37,7 @@ function auditStage(event: TraceEvent): Stage {
 
 function citationFacts(citation: Citation): Array<[string, string]> {
   return Object.entries(citation.locator || {})
-    .filter(([key, value]) => key !== "evidence_crop" && value !== null && value !== undefined && value !== "")
+    .filter(([key, value]) => key !== "evidence_crop" && key !== "localized" && value !== null && value !== undefined && value !== "")
     .map(([key, value]) => [key.replace(/_/g, " "), Array.isArray(value) ? value.join(", ") : String(value)]);
 }
 
@@ -121,7 +121,16 @@ export function DecisionStory({ latest, trace, projectId, onOpenCitation }: {
       </li>
 
       <li className="story-step">
-        <StepHeader number={2} icon="🧭" title="Plan" subtitle={`${meta.planning_mode || "—"} planning · ${meta.model_call_count || 0} model call(s)`} />
+        {/* model_call_count is a whole-request total (it also counts calls
+            made during Execution, e.g. AI Search retrieval, or a later
+            answer-polish pass) -- showing it here implied those calls
+            happened during planning even when planning_mode was
+            "heuristic" (zero model calls). Found live, 2026-09-13: a user
+            went looking for "the model call the Plan step claims" inside
+            this step's own trace and, correctly, couldn't find one. The
+            total now lives on the Result step below, which is the one
+            step that actually summarizes the whole request. */}
+        <StepHeader number={2} icon="🧭" title="Plan" subtitle={`${meta.planning_mode || "—"} planning`} />
         {subplans.length === 0 ? <p className="story-step-body empty">No plan recorded.</p> : <ul className="plan-list">
           {subplans.map((plan, index) => <li key={plan.subtask_id || index}>
             <span className="plan-op">{plan.operation || plan.intent || "—"}{plan.entity_type ? ` · ${plan.entity_type}` : ""}</span>
@@ -160,7 +169,8 @@ export function DecisionStory({ latest, trace, projectId, onOpenCitation }: {
         {citations.length === 0 ? <p className="story-step-body empty">No citations for this answer.</p> : <div className="evidence-cards">
           {citations.map((citation) => <article key={stableCitationKey(citation)} className="evidence-card" onClick={() => onOpenCitation(citation)}>
             <header><span className={`evidence-badge ${citation.source_type}`}>{citation.source_type}</span><span className="evidence-label">{citation.label}</span></header>
-            {citation.locator?.evidence_crop && <AuthedImage className="evidence-crop" src={`/api/v1/evidence/${citation.locator.evidence_crop}`} alt="Cited PDF evidence crop" />}
+            {citation.locator?.evidence_crop && <AuthedImage className={`evidence-crop ${citation.locator.localized === false ? "unlocalized" : ""}`} src={`/api/v1/evidence/${citation.locator.evidence_crop}`} alt="Cited PDF evidence crop" />}
+            {citation.locator?.localized === false && <p className="evidence-unlocalized-note">Exact location on the page could not be confidently determined — showing the full page for manual review.</p>}
             <dl className="citation-facts">{citationFacts(citation).slice(0, 4).map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{value}</dd></div>)}</dl>
             <span className="evidence-jump">Jump to this evidence →</span>
           </article>)}
@@ -174,7 +184,7 @@ export function DecisionStory({ latest, trace, projectId, onOpenCitation }: {
       </li>
 
       <li className="story-step">
-        <StepHeader number={6} icon="🏁" title="Result" subtitle={meta.latency_ms ? `${meta.latency_ms} ms` : undefined} />
+        <StepHeader number={6} icon="🏁" title="Result" subtitle={[meta.latency_ms ? `${meta.latency_ms} ms` : null, `${meta.model_call_count || 0} model call(s) total`].filter(Boolean).join(" · ")} />
         <p className="story-step-body">Disposition: <strong>{latest.disposition.replace(/_/g, " ")}</strong></p>
         <StepTrace events={byStage("Final Response")} />
       </li>

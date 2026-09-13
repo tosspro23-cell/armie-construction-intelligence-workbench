@@ -192,3 +192,69 @@ def test_deterministic_miss_falls_back_to_vision_which_still_answers(tmp_path: P
     assert response.disposition.value == "answered"
     assert response.answer_markdown == "0.70"
     assert [call.purpose for call in fake.calls] == ["pdf_extract", "pdf_verify"]
+    assert response.citations[0].locator["localized"] is True
+    assert response.citations[0].locator["bbox"] == [503.0, 287.17, 524.4, 302.29]
+    # D-024 #5: every citation now carries which document it came from --
+    # previously dropped entirely by _citations(), leaving no way to know.
+    assert response.citations[0].source_file == "armie_demo_schedule.pdf"
+
+
+# --- D-024 #3/#4: an unreliable vision bbox is never silently treated as precise ------
+
+def test_vision_extraction_with_no_bbox_is_marked_unlocalized_not_silently_full_page(tmp_path: Path) -> None:
+    """Before this fix, `bbox = extraction.bbox or self.page_bbox(...)` made a
+    missing/degenerate model-reported bbox indistinguishable from a genuinely
+    precise one: the locator's `bbox` silently became the whole page, and the
+    frontend drew a location marker (and a "crop") implying real precision it
+    never had. Found live, 2026-09-13, from a real citation whose location
+    marker didn't track the cited value.
+    """
+    settings = _settings(tmp_path)
+    fake = FakeModelProvider()
+    fake.script("pdf_extract", VisionFieldExtraction(
+        value="51.20", unit=None, page=1, bbox=None, confidence=0.9,
+        rationale="Value visible but exact coordinates not confidently determined.", ambiguity=None,
+    ))
+    fake.script("pdf_verify", VisionEvidenceVerification(supported=True, confidence=0.9, rationale="Visibly matches the drawing."))
+    container = ServiceContainer(settings, text_provider_factory=lambda s: fake, vision_provider_factory=lambda s: fake)
+    service = AgentService(container)
+
+    response = service.invoke(
+        project_resources=_demo(container), thread_id="vision-no-bbox", viewer_context=None,
+        question="What is the after diversity load for Panel-A in this drawing?",
+    )
+
+    assert response.disposition.value == "answered"
+    citation = response.citations[0]
+    assert citation.locator["localized"] is False
+    assert citation.locator["bbox"] is None
+    # A crop image is still provided (the full page, for manual review) --
+    # this is about not claiming false precision, not about hiding evidence.
+    assert citation.locator["evidence_crop"] is not None
+
+
+def test_vision_extraction_with_a_near_full_page_bbox_is_also_marked_unlocalized(tmp_path: Path) -> None:
+    """A degenerate-but-non-empty bbox (e.g. the model echoing the page
+    bounds) previously passed straight through -- Python's `or` only checks
+    truthiness, not plausibility, so a non-empty list bypassed the fallback
+    entirely regardless of what it actually contained.
+    """
+    settings = _settings(tmp_path)
+    analyzer = _analyzer(tmp_path)
+    page_rect = analyzer.page_bbox(1)
+    fake = FakeModelProvider()
+    fake.script("pdf_extract", VisionFieldExtraction(
+        value="51.20", unit=None, page=1, bbox=page_rect, confidence=0.9,
+        rationale="Visible on the page.", ambiguity=None,
+    ))
+    fake.script("pdf_verify", VisionEvidenceVerification(supported=True, confidence=0.9, rationale="Visibly matches the drawing."))
+    container = ServiceContainer(settings, text_provider_factory=lambda s: fake, vision_provider_factory=lambda s: fake)
+    service = AgentService(container)
+
+    response = service.invoke(
+        project_resources=_demo(container), thread_id="vision-full-page-bbox", viewer_context=None,
+        question="What is the after diversity load for Panel-A in this drawing?",
+    )
+
+    assert response.citations[0].locator["localized"] is False
+    assert response.citations[0].locator["bbox"] is None

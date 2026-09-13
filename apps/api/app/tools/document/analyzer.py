@@ -130,6 +130,30 @@ class DocumentAnalyzer:
                 logger.warning("Evidence crop blob upload failed for %s: %s", output.name, error)
         return output
 
+    @staticmethod
+    def _is_plausible_bbox(bbox: list[float] | None, page_rect: list[float]) -> bool:
+        """Whether a model-reported bbox is trustworthy enough to cite as a
+        precise location, rather than just accepted as-is.
+
+        Rejects a degenerate rectangle (near-zero width/height, which
+        crops/highlights to an unhelpful point wherever floating-point
+        coordinates happen to land) and one covering most of the page
+        (usually means the model echoed the page bounds rather than
+        actually localizing anything). Found live, 2026-09-13: an
+        unreliable vision-reported bbox was silently treated as precise,
+        producing an evidence marker that didn't track the cited value and,
+        separately, a "crop" that was actually the entire page rendered at
+        crop-grade zoom -- both traced back to this same unvalidated
+        `extraction.bbox or self.page_bbox(...)` fallback.
+        """
+        if not bbox or len(bbox) != 4:
+            return False
+        width, height = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        if width < 4 or height < 4:
+            return False
+        page_area = (page_rect[2] - page_rect[0]) * (page_rect[3] - page_rect[1])
+        return page_area <= 0 or (width * height) / page_area <= 0.5
+
     def page_bbox(self, page_number: int) -> list[float]:
         import fitz
         document = fitz.open(self.pdf_path)
@@ -453,8 +477,10 @@ class DocumentAnalyzer:
                 "State ambiguity instead of guessing."
             ),
         )
-        bbox = extraction.bbox or self.page_bbox(extraction.page)
-        crop = self.crop_evidence(extraction.page, bbox)
+        page_rect = self.page_bbox(extraction.page)
+        localized = self._is_plausible_bbox(extraction.bbox, page_rect)
+        bbox = extraction.bbox if localized else None
+        crop = self.crop_evidence(extraction.page, extraction.bbox if localized else page_rect)
         evidence = [Evidence(
             source_type=SourceType.PDF,
             source_file=self.pdf_path.name,
@@ -466,6 +492,11 @@ class DocumentAnalyzer:
                 "extraction_method": "vision",
                 "rendered_image": page_image.name,
                 "evidence_crop": crop.name if crop else None,
+                # False whenever the model's own reported bbox wasn't
+                # trustworthy enough to cite (see _is_plausible_bbox) -- the
+                # UI shows the full page for manual review in that case
+                # instead of drawing a location marker it can't back up.
+                "localized": localized,
             },
             extracted_value=extraction.value,
             confidence=extraction.confidence,

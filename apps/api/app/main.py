@@ -176,7 +176,26 @@ async def project_metadata(project_id: str = "demo") -> dict:
     if metadata["ifc_available"]:
         metadata["ifc"] = await asyncio.to_thread(resources.ifc_repository.metadata)
     if metadata["pdf_available"]:
-        metadata["pdf"] = await asyncio.to_thread(resources.document_analyzer.inspect)
+        # One inspect() call per configured document, not one-plus-a-
+        # redundant-extra: `document_analyzer` (singular) is always the
+        # first entry of `document_analyzers`, so `metadata["pdf"]` is
+        # read from this same gather's first result rather than issuing a
+        # second, duplicate inspect() call for that document. Per-document
+        # page counts/sizes for every configured document (not just the
+        # default one) feed the drawing viewer's document switcher and
+        # page stepper -- found missing live, 2026-09-13: a multi-document
+        # project could previously only ever show page 1 of the first
+        # document -- and let a citation's evidence marker use that
+        # document's real page size instead of an assumed one.
+        inspected_documents = await asyncio.gather(
+            *(asyncio.to_thread(analyzer.inspect) for analyzer in resources.document_analyzers.values())
+        )
+        metadata["pdf"] = inspected_documents[0]
+        metadata["pdf_documents"] = [
+            {"filename": name, "page_count": inspected["page_count"], "page_sizes": inspected["page_sizes"]}
+            for name, inspected in zip(resources.document_analyzers.keys(), inspected_documents)
+            if inspected["available"]
+        ]
     return metadata
 
 
@@ -203,9 +222,20 @@ async def project_pdf(project_id: str = "demo"):
 
 
 @app.get("/api/v1/project/pdf/pages/{page_number}.png")
-async def project_pdf_page(page_number: int, project_id: str = "demo"):
+async def project_pdf_page(page_number: int, project_id: str = "demo", document: str | None = None):
     _, resources = await _resolve_project(project_id)
-    analyzer = resources.document_analyzer
+    # `document` lets the drawing viewer page through any configured
+    # document, not only the default one `resources.document_analyzer`
+    # picks -- SPEC-M6's own answer pipeline (_execute_pdf_multi_document)
+    # has been multi-document-aware since that milestone, but this viewer
+    # endpoint wasn't (a deliberate MVP scope note at the time), and the
+    # gap was never closed when the corpus grew past one document. Found
+    # live, 2026-09-13. Optional and defaulted for backward compatibility:
+    # every existing caller that never passed `document` keeps behaving
+    # exactly as before.
+    analyzer = resources.document_analyzers.get(document) if document else resources.document_analyzer
+    if analyzer is None:
+        raise HTTPException(status_code=404, detail=f"Document '{document}' is not part of the configured corpus.")
     if page_number < 1 or not analyzer.available:
         raise HTTPException(status_code=404, detail="Requested PDF page was not found.")
     # asyncio.to_thread: see project_metadata's own comment above for why

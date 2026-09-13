@@ -1096,3 +1096,95 @@ workflow's own smoke test: the project selector now renders both projects, switc
 live chat question against each project answers correctly with its own cited evidence. Full
 account, including the ADLS directory-ACL three-part verification's exact commands, in
 `docs/reports/2026-09-12-m9-multi-project-adls-baseline.md`.
+
+## D-024 — Demo-rehearsal UX/traceability defects found live, 2026-09-13 (six fixes)
+
+Owner ran the deployed app for interview-demo rehearsal and reported six distinct problems in
+one pass. Per `[[feedback-spec-first-scope]]`, treated as fix work against already-shipped
+milestones (M2P1/M6/M9/the Decision Trace redesign), not a new `SPEC-<milestone>` — each is a
+defect against an existing, already-accepted behavior, not new product capability.
+
+**1. Literal `**` asterisks shown in the chat answer instead of bold text.**
+`AgentService._natural_answer` (M2P1) intentionally wraps numbers/entities in `**bold**`
+markdown so the emphasis degrades gracefully to plain text if nothing renders it — but nothing
+in `apps/web/src/main.tsx` ever did; the chat bubble rendered `answer_markdown` as a literal
+string. Fixed with a small, deliberately non-general `renderAnswerMarkdown` splitter (the
+backend only ever emits this one non-nested `**...**` construct — a full markdown library would
+be solving a problem that doesn't exist here).
+
+**2. The Decision Trace Plan step implied a model was called during planning that couldn't be
+found in its own trace.** Two independent, compounding defects, not one: (a)
+`DecisionStory.tsx`'s Plan step subtitle showed the whole-request `model_call_count` next to
+"Plan," implying those calls happened during planning even when `planning_mode` was
+`"heuristic"` (zero planning model calls) — the count also includes calls made during Execution
+(e.g. AI Search retrieval) or a later polish pass (D-025). Moved to the Result step, the one
+step that actually summarizes the whole request. (b) `_retrieve_relevant_documents`'s Azure AI
+Search query-embedding call (`graph.py:1046`, SPEC-M7) was the only model-call site in the
+entire file that incremented `model_call_count` without ever emitting a matching
+`model_called`/`model_completed` audit event — every other call (IFC/PDF vision, semantic
+planning) pairs the two. A user going looking in the trace for "the model call the response
+claims happened" for a question that hit this path correctly found nothing, because nothing was
+ever recorded. Fixed by adding the missing paired audit events, carrying `actual_provider`/
+`actual_model` like every other call site.
+
+**3. PDF evidence location marker not under the cited number; crop image dominating the
+evidence card at low apparent resolution.** `DocumentAnalyzer.vision_lookup`'s `bbox =
+extraction.bbox or self.page_bbox(extraction.page)` (M3) accepted the vision model's reported
+bbox with no sanity check, and silently substituted the *entire page* as the "location" whenever
+the model returned nothing — a crop that is actually the whole page, stretched to the evidence
+card's width via `width:100%; height:auto`, makes the cited number occupy a handful of source
+pixels once scaled down (looks low-resolution because effectively it is, relative to what
+matters), and a location marker drawn from a degenerate near-zero-area bbox renders as an
+unhelpful dot wherever floating-point coordinates land, not under anything in particular. Fixed
+with `DocumentAnalyzer._is_plausible_bbox` (rejects a near-zero-area rectangle and one covering
+more than half the page) and a new `locator.localized: bool` flag: when false, `locator.bbox` is
+`None` (no marker is drawn — honest silence, not a misleading one) and the frontend shows an
+explicit "location could not be determined; showing the full page for manual review" note
+instead of pretending otherwise. `.evidence-crop` also gained a fixed `max-height` +
+`object-fit: contain` instead of unconstrained `width:100%`, so a full-page fallback image no
+longer visually dominates the card regardless of source aspect ratio.
+
+**4. The drawing viewer's location-marker overlay hardcoded page dimensions (1191×842pt, A3
+landscape) for every PDF.** Any document at a different page size, or the whole-page-bbox
+fallback above, would misplace the overlay. Fixed by threading real per-document,
+per-page `page_sizes` (already computed by `DocumentAnalyzer.inspect`, just never surfaced past
+the default document) through `/api/v1/project/metadata`'s new `pdf_documents` field, and using
+the actual page size for the cited page instead of the hardcoded constant.
+
+**5. A multi-document project's drawing viewer could only ever show page 1 of the first
+configured document.** `/api/v1/project/pdf/pages/{page}.png` (SPEC-M6) always read
+`ServiceContainer.document_analyzer` (singular, "pick the first configured document" —
+SPEC-M6's own deliberate default for callers that don't care which document) instead of the
+`document_analyzers` registry SPEC-M6's own answer pipeline (`_execute_pdf_multi_document`) has
+used since that milestone — the viewer endpoint was simply never made multi-document-aware when
+the corpus grew past one file. Separately, `Citation` (the response type) dropped
+`Evidence.source_file` entirely when `_citations()` built it, so even with a multi-document-
+aware endpoint the frontend had no way to know which document a given citation pointed at.
+Fixed additively and backward-compatibly: `Citation.source_file` (required field, alongside the
+existing `project_id`/`source_set_id`), the page-render endpoint accepts an optional `document`
+query param (omitted callers get exactly the pre-existing default-document behavior), and the
+drawing tab gained a document selector + page stepper, defaulting to a focused citation's own
+`source_file` when one is open.
+
+**6. Clicking a door or window in the IFC viewer almost always selects the enclosing wall
+instead, regardless of view angle.** Root cause is data, not the picking code:
+`IfcRepository.viewer_elements`'s lightweight-geometry fallback path (used by this project's
+demo fixture) represents each wall as a full, un-punctured proxy box — the door/window's own box
+sits entirely embedded inside it, with no boolean-subtracted opening, so a ray aimed at a
+visible door/window hits the wall's own nearer face first from nearly every angle. The properly
+correct fix is a new fixture whose wall geometry has real openings (deferred — OD-43, SPEC-M10)
+as a separate, larger content-generation milestone. Shipped now: a front-end picking-priority
+mitigation in `IfcViewer.tsx` — among all ray intersections within a wall-thickness-sized margin
+(0.5 units) of the closest hit, prefer the nearest non-`IfcWall` one. This resolves the common
+near-perpendicular click case (the ray passes through the wall's outer face, the embedded
+door/window's two faces, then the wall's inner face, all within that margin) without touching
+fixture data or changing behavior when no door/window is actually nearby.
+
+**Verification.** `PYTHONPATH=apps/api python3 -m pytest -q` and `(cd apps/web && npm run
+build)` both pass; new/updated focused tests for #3's bbox-plausibility guard and #5's
+multi-document endpoint fallback. Live-verified against the redeployed app: the "51.20" example
+that originally surfaced #3 re-tested with the marker correctly absent and the honest
+"could not be determined" note shown (that particular extraction's bbox was in fact
+implausible); the drawing viewer's document selector switches between the demo corpus's
+configured PDFs and pages independently of which one a citation focuses; and the IFC viewer's
+door/window click-priority fix was exercised against the live demo model.

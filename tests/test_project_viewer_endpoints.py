@@ -69,6 +69,61 @@ def test_project_pdf_page_renders_a_real_png(monkeypatch, tmp_path):
     assert response.content[:8] == b"\x89PNG\r\n\x1a\n"
 
 
+def _configure_multi_document_env(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("DATA_DIR", str(ROOT / "demo_data"))
+    monkeypatch.setenv("IFC_FILE", "armie_demo.ifc")
+    monkeypatch.setenv("PDF_FILES", '["armie_demo_schedule.pdf", "corpus/schedule_l2_east.pdf"]')
+    monkeypatch.setenv("AUDIT_STORE_PATH", str(tmp_path / "audit.jsonl"))
+    monkeypatch.setenv("EVIDENCE_DIR", str(tmp_path / "evidence"))
+    get_settings.cache_clear()
+
+
+# D-024 #5: this viewer endpoint could previously only ever render the
+# first-configured document (ServiceContainer.document_analyzer, singular),
+# even though SPEC-M6's own answer pipeline has been multi-document-aware
+# since that milestone -- confirmed live, 2026-09-13, on a real multi-
+# document demo project.
+def test_project_metadata_lists_page_info_for_every_configured_document(monkeypatch, tmp_path):
+    _configure_multi_document_env(monkeypatch, tmp_path)
+    import app.main as main_module
+
+    with TestClient(main_module.app) as client:
+        response = client.get("/api/v1/project/metadata")
+
+    assert response.status_code == 200
+    documents = response.json()["pdf_documents"]
+    assert {doc["filename"] for doc in documents} == {"armie_demo_schedule.pdf", "schedule_l2_east.pdf"}
+    for doc in documents:
+        assert doc["page_count"] >= 1
+        assert len(doc["page_sizes"]) == doc["page_count"]
+
+
+def test_project_pdf_page_renders_the_requested_non_default_document(monkeypatch, tmp_path):
+    _configure_multi_document_env(monkeypatch, tmp_path)
+    import app.main as main_module
+
+    with TestClient(main_module.app) as client:
+        default_page = client.get("/api/v1/project/pdf/pages/1.png")
+        other_page = client.get("/api/v1/project/pdf/pages/1.png", params={"document": "schedule_l2_east.pdf"})
+
+    assert default_page.status_code == 200
+    assert other_page.status_code == 200
+    # Genuinely different documents' page 1 rasterizations, not the same
+    # file served twice regardless of the `document` param -- the actual
+    # claim, not just "both requests returned 200."
+    assert default_page.content != other_page.content
+
+
+def test_project_pdf_page_rejects_a_document_outside_the_configured_corpus(monkeypatch, tmp_path):
+    _configure_multi_document_env(monkeypatch, tmp_path)
+    import app.main as main_module
+
+    with TestClient(main_module.app) as client:
+        response = client.get("/api/v1/project/pdf/pages/1.png", params={"document": "not_configured.pdf"})
+
+    assert response.status_code == 404
+
+
 def test_project_viewer_elements_returns_real_geometry(monkeypatch, tmp_path):
     _configure_env(monkeypatch, tmp_path)
     import app.main as main_module

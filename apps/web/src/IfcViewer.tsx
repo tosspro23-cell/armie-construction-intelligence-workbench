@@ -127,14 +127,33 @@ export function IfcViewer({ onSelection, onSnapshot, onStatus, focusGlobalId, pr
       pointer.x = ((event.clientX - bounds.left) / bounds.width) * 2 - 1;
       pointer.y = -((event.clientY - bounds.top) / bounds.height) * 2 + 1;
       raycaster.setFromCamera(pointer, camera);
-      const hit = raycaster.intersectObjects(pickables, false)[0];
+      const hits = raycaster.intersectObjects(pickables, false);
       if (selectedMesh) (selectedMesh.material as THREE.MeshStandardMaterial).emissive.set(0x000000);
-      if (!hit) {
+      if (hits.length === 0) {
         selectedMesh = null;
         onSelection(null);
         return;
       }
-      selectedMesh = hit.object as THREE.Mesh;
+      // The demo IFC's walls are lightweight proxy boxes (repository.py's
+      // viewer_elements fallback path) that don't actually have an opening
+      // cut where a door/window sits -- the door/window's own box is fully
+      // embedded inside the wall's, so a ray aimed at a visible door/window
+      // almost always hits the wall's own nearer face first. Found live,
+      // 2026-09-13: rotating the view didn't help, because it isn't a
+      // viewing-angle problem, it's that the two boxes genuinely overlap in
+      // the same space. Fixing this properly means the fixture's wall
+      // geometry needs a real boolean-subtracted opening (out of scope for
+      // a picking-logic fix); this instead prefers the nearest non-wall hit
+      // whenever one exists within a wall-thickness-sized margin of the
+      // closest hit overall, which is exactly the situation a wall
+      // fully containing a door/window box produces.
+      const WALL_OCCLUSION_MARGIN = 0.5;
+      const nearestDistance = hits[0].distance;
+      const preferredHit = hits.find((candidate) => {
+        const entityType = (candidate.object.userData as ViewerElement).entity_type;
+        return entityType !== "IfcWall" && candidate.distance <= nearestDistance + WALL_OCCLUSION_MARGIN;
+      }) || hits[0];
+      selectedMesh = preferredHit.object as THREE.Mesh;
       (selectedMesh.material as THREE.MeshStandardMaterial).emissive.set(0x4f9df5);
       const element = selectedMesh.userData as ViewerElement;
       onSelection({ globalId: element.global_id, expressId: element.express_id, type: element.entity_type, name: element.name });

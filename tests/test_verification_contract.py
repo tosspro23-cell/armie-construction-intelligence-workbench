@@ -39,7 +39,7 @@ def _evidence(**overrides) -> Evidence:
 def _citation(evidence: Evidence) -> Citation:
     return Citation(
         evidence_id=evidence.id, source_type=evidence.source_type, label=evidence.summary, locator=evidence.locator,
-        project_id="demo", source_set_id="demo-v1",
+        project_id="demo", source_set_id="demo-v1", source_file=evidence.source_file,
     )
 
 

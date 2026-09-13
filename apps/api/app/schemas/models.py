@@ -260,6 +260,13 @@ class Citation(BaseModel):
     # *which* project's document this citation actually came from.
     project_id: str
     source_set_id: str
+    # Found live, 2026-09-13: a multi-document project's citations carried
+    # no filename at all -- `Evidence.source_file` was set correctly by
+    # every extraction path but silently dropped when `_citations()` built
+    # this response type, leaving the frontend with no way to know which
+    # of the several configured documents a given citation actually came
+    # from (so the drawing viewer could only ever show the default one).
+    source_file: str
 
 
 class VerifierResult(BaseModel):
