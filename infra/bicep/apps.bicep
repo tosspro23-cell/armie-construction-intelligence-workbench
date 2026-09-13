@@ -64,6 +64,9 @@ param adlsAccountUrl string = ''
 @description('D-019: per-caller requests-per-minute cap on POST /api/v1/chat and its resume endpoint (app/security.py require_rate_limit), bounding Azure OpenAI/Search quota spend. 0 (the default) keeps RATE_LIMIT_REQUESTS_PER_MINUTE unset -- a no-op, exactly like every deployment before this D-023 addendum fix. Found live (independent review, 2026-09-13): D-019 merged this code in but never added it here or to azure-deploy.yml, the same "wired but inert" pattern D-022 found for Azure AI Search -- rate limiting has never actually been enabled on a real deployment despite the milestone being marked resolved.')
 param rateLimitRequestsPerMinute int = 0
 
+@description('D-023 addendum: identity-independent, deployment-wide requests-per-minute cap (app/security.py require_rate_limit), checked in addition to rateLimitRequestsPerMinute above. 0 (the default) keeps RATE_LIMIT_GLOBAL_REQUESTS_PER_MINUTE unset -- a no-op. Independent-review finding, confirmed live 2026-09-13: the per-caller cap alone is bypassable for free by any caller who just mints a fresh X-Session-Id per request, since nothing validates it was actually issued by POST /api/v1/session -- see config.py\'s own field docstring for the full rationale.')
+param rateLimitGlobalRequestsPerMinute int = 0
+
 var containerAppsEnvName = '${namePrefix}-env'
 var apiAppName = '${namePrefix}-api'
 var webAppName = '${namePrefix}-web'
@@ -116,6 +119,11 @@ var adlsEnv = empty(adlsAccountUrl) ? [] : [
 // empty string only because this parameter is typed `int`, not `string`.
 var rateLimitEnv = rateLimitRequestsPerMinute == 0 ? [] : [
   { name: 'RATE_LIMIT_REQUESTS_PER_MINUTE', value: string(rateLimitRequestsPerMinute) }
+]
+
+// Same conditional-append reasoning as rateLimitEnv above.
+var rateLimitGlobalEnv = rateLimitGlobalRequestsPerMinute == 0 ? [] : [
+  { name: 'RATE_LIMIT_GLOBAL_REQUESTS_PER_MINUTE', value: string(rateLimitGlobalRequestsPerMinute) }
 ]
 
 resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2022-10-01' existing = {
@@ -224,7 +232,7 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
             // secretRef, not value (SPEC-M5 §C): pulls from the Container
             // Apps secret declared above, never inlined as plain text here.
             { name: 'API_SHARED_SECRET', secretRef: 'api-shared-secret' }
-          ], databaseEnv, evidenceEnv, searchEnv, pdfFilesEnv, adlsEnv, rateLimitEnv)
+          ], databaseEnv, evidenceEnv, searchEnv, pdfFilesEnv, adlsEnv, rateLimitEnv, rateLimitGlobalEnv)
         }
       ]
     }
