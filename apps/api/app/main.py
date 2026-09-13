@@ -9,6 +9,7 @@ from uuid import uuid4
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
+from opentelemetry import trace as otel_trace
 
 from app.agent.graph import AgentService
 from app.config import get_settings
@@ -362,6 +363,18 @@ async def chat(request: ChatRequest, x_session_id: str | None = Header(default=N
     # keeps the record unrestricted, matching pre-D-016 behaviour.
     record = {"status": "running", "stage": "queued", "task": asyncio.current_task(), "trace_id": request_id, "session_id": x_session_id}
     app.state.requests[request_id] = record
+    # D-028: tags this request's own OpenTelemetry span with the app's own
+    # trace_id (AuditStore/citations/`/api/v1/traces/{trace_id}` all key on
+    # this value already) so the two independently-generated trace-id
+    # schemes -- this app's own UUID, and whatever OpenTelemetry's FastAPI
+    # auto-instrumentation assigns the underlying HTTP span -- become
+    # joinable in Application Insights via a `customDimensions` filter.
+    # Safe to call unconditionally: when telemetry.configure_telemetry
+    # never ran (otel_exporter_connection_string unset, every deployment
+    # before this fix and every test), get_current_span() returns
+    # OpenTelemetry's own no-op span and set_attribute is a documented
+    # harmless no-op on it.
+    otel_trace.get_current_span().set_attribute("app.trace_id", request_id)
     try:
         bound_project_id = await asyncio.to_thread(conversations.bind_project, thread_id, requested_project_id)
     except Exception as error:

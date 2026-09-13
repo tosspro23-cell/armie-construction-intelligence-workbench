@@ -118,8 +118,11 @@ button:disabled { opacity: .6; cursor: wait; }
 .decision-story { display: grid; gap: 12px; min-width: 0; }
 .decision-story.empty-story { padding: 4px 0; }
 .cloud-provenance { display: flex; align-items: center; gap: 8px; padding: 9px 12px; background: #102a1e; border: 1px solid #2a6547; border-radius: 8px; font-size: .78rem; color: #b8f3cf; }
+a.cloud-provenance { text-decoration: none; cursor: pointer; transition: border-color .12s ease, background .12s ease; }
+a.cloud-provenance:hover { border-color: #48b47c; background: #123626; }
 .cloud-provenance strong { color: #eafff1; }
 .cloud-provenance-icon { font-size: 1rem; }
+.cloud-provenance-link-hint { margin-left: auto; color: #7fe3ab; white-space: nowrap; font-weight: 600; }
 .story-steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
 .story-step { position: relative; padding: 10px 0 16px 34px; border-left: 2px solid #263457; }
 .story-step:last-of-type { border-left-color: transparent; padding-bottom: 0; }

@@ -108,10 +108,22 @@ export function DecisionStory({ latest, trace, projectId, onOpenCitation }: {
   return <section className="decision-story">
     <h2>Decision Trace</h2>
 
-    {(meta.project_id || projectId) && <div className="cloud-provenance">
-      <span className="cloud-provenance-icon" aria-hidden="true">☁️</span>
-      <span>Cloud provenance — Project <strong>{meta.project_id || projectId}</strong> · Frozen source version <strong>{meta.source_set_id || "—"}</strong></span>
-    </div>}
+    {/* D-028, owner-requested: one click from here into this specific
+        request's own Application Insights telemetry in the Azure Portal --
+        `meta.cloud_trace_url` is only present when the deployment has
+        azure_tenant_id/app_insights_resource_id configured (opt-in, same
+        pattern as every other optional Azure setting); otherwise this
+        stays plain text exactly as before this fix, never a broken link. */}
+    {(meta.project_id || projectId) && (meta.cloud_trace_url
+      ? <a className="cloud-provenance" href={meta.cloud_trace_url} target="_blank" rel="noreferrer">
+          <span className="cloud-provenance-icon" aria-hidden="true">☁️</span>
+          <span>Cloud provenance — Project <strong>{meta.project_id || projectId}</strong> · Frozen source version <strong>{meta.source_set_id || "—"}</strong></span>
+          <span className="cloud-provenance-link-hint">View in Application Insights →</span>
+        </a>
+      : <div className="cloud-provenance">
+          <span className="cloud-provenance-icon" aria-hidden="true">☁️</span>
+          <span>Cloud provenance — Project <strong>{meta.project_id || projectId}</strong> · Frozen source version <strong>{meta.source_set_id || "—"}</strong></span>
+        </div>)}
 
     <ol className="story-steps">
       <li className="story-step">

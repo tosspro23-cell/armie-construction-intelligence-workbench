@@ -78,6 +78,17 @@ class Settings(BaseSettings):
     # Empty by default: OpenTelemetry exports nowhere unless explicitly set,
     # the same opt-in pattern as ollama_escalation_model below.
     otel_exporter_connection_string: str | None = None
+    # D-028: the two pieces needed to build a working Azure Portal deep
+    # link into this deployment's own Application Insights telemetry for
+    # one specific request -- the AAD tenant ID and the Application
+    # Insights component's full ARM resource ID (not its instrumentation
+    # key/connection string, which identifies where telemetry is sent but
+    # not the portal resource to browse it from). Both opt-in-when-unset,
+    # same pattern as otel_exporter_connection_string above: unset means
+    # AgentService._cloud_trace_url returns None and the frontend's Cloud
+    # Provenance banner stays plain text, exactly as before this fix.
+    azure_tenant_id: str | None = None
+    app_insights_resource_id: str | None = None
     # ``localhost`` makes the native macOS development path work. Docker users
     # override this with host.docker.internal in their local .env.
     ollama_base_url: str = "http://127.0.0.1:11434"

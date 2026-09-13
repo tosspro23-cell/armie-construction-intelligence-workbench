@@ -1614,6 +1614,40 @@ Return only a corrected MultiQueryPlan JSON object."""
         )
         return rewritten
 
+    def _cloud_trace_url(self, trace_id: str) -> str | None:
+        """D-028: a one-click Azure Portal link into this deployment's own
+        Application Insights telemetry for this specific request, requested
+        directly by the owner ("click the cloud provenance banner and land
+        on the cloud-side trace for this answer").
+
+        This app's own `trace_id` (used by AuditStore/citations/
+        `/api/v1/traces/{trace_id}`) and OpenTelemetry's own auto-generated
+        span/operation ID for the underlying HTTP request are two
+        independently-generated identifiers with no built-in relationship --
+        `main.py`'s `chat()` tags the current OpenTelemetry span with this
+        value (`app.trace_id`) specifically so the two become joinable here,
+        via a `customDimensions` filter Application Insights already
+        supports for exactly this purpose.
+
+        Returns None (a plain-text banner, not a broken link) unless both
+        `azure_tenant_id` and `app_insights_resource_id` are configured --
+        opt-in-when-unset, the same pattern as `otel_exporter_connection_
+        string` itself.
+        """
+        if not (self.settings.azure_tenant_id and self.settings.app_insights_resource_id):
+            return None
+        from urllib.parse import quote
+        query = (
+            "union requests, dependencies, traces, exceptions\n"
+            f'| where tostring(customDimensions["app.trace_id"]) == "{trace_id}"\n'
+            "| order by timestamp desc"
+        )
+        return (
+            f"https://portal.azure.com/#@{self.settings.azure_tenant_id}"
+            f"/resource{self.settings.app_insights_resource_id}/logs"
+            f"?query={quote(query)}"
+        )
+
     def _finalize(self, state: GraphState) -> dict:
         if state.get("clarification"):
             response = AgentResponse(
@@ -1666,6 +1700,7 @@ Return only a corrected MultiQueryPlan JSON object."""
                     "tool_call_count": state.get("tool_call_count", 0),
                     "answer_polished": answer_polished,
                     "pre_polish_answer": result["answer"] if answer_polished else None,
+                    "cloud_trace_url": self._cloud_trace_url(state["trace_id"]),
                     "response_language": result.get("response_language"),
                     "normalized_request": state.get("multi_plan", {}).get("normalized_request") or state.get("question"),
                     "corrections": state.get("multi_plan", {}).get("corrections", []),

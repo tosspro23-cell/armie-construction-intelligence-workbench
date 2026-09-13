@@ -1286,3 +1286,45 @@ stylesheet against that same broken page (no reload, same overflowing conversati
 confirmed the identical rows rendered cleanly with proper separation -- isolating the fix to
 exactly this property pair before committing it to source. `npm run build` clean (CSS-only
 change; no backend/test surface).
+
+## D-028 — Cloud Provenance banner links directly into Application Insights for that request
+
+Owner-requested, 2026-09-13: clicking the ☁️ Cloud Provenance banner should jump straight to the
+cloud-side telemetry for that specific answer, not a generic dashboard.
+
+**The two trace-id schemes were never joined.** This app's own `trace_id` (used by `AuditStore`,
+citations, and `/api/v1/traces/{trace_id}`) and OpenTelemetry's own auto-generated span/operation
+ID for the underlying HTTP request (from `FastAPIInstrumentor.instrument_app`, `apps/api/app/
+telemetry.py`) are two independently-generated identifiers with no built-in relationship --
+confirmed by reading the instrumentation setup, not assumed. Fixed at the source: `main.py`'s
+`chat()` now tags the current OpenTelemetry span with `app.trace_id = request_id` right where
+the request ID is finalized, so Application Insights' `customDimensions` field can filter across
+`requests`/`dependencies`/`traces`/`exceptions` by this app's own trace ID.
+
+**The link itself, and why it degrades safely.** `AgentService._cloud_trace_url` builds a
+`https://portal.azure.com/#@<tenantId>/resource<appInsightsResourceId>/logs?query=<KQL>` URL (a
+long-standing, documented Azure Portal "shareable Logs query link" format, not a fragile
+compressed-blob classic-blade encoding) with a KQL query scoped to this exact `trace_id`. Both
+`azure_tenant_id` and `app_insights_resource_id` are opt-in-when-unset (`Settings`, same pattern
+as `otel_exporter_connection_string`); when either is missing, the method returns `None` and the
+frontend's Cloud Provenance banner renders as plain text exactly as before this fix -- never a
+broken link. The workflow reuses the existing `AZURE_TENANT_ID` repository secret (already used
+for OIDC login) rather than asking for the tenant ID a second time as a new input.
+
+**Honestly scoped: not independently verified against a real, authenticated Azure Portal
+session.** This session has no browser logged into Azure Portal, so the exact rendered
+Logs-blade experience (does the KQL pre-fill and run automatically, or just populate the query
+box) could not be confirmed end-to-end the way this project's other Azure-integration claims
+normally are (a live deployment-baseline report). What *is* verified: the URL format matches
+Microsoft's documented deep-link pattern, the span tagging is proven via a real `TestClient`
+request against a recording span double, and `_cloud_trace_url`'s own construction (tenant ID,
+resource ID, and this exact `trace_id` all present in the URL) is asserted directly. The owner
+should click the live link once after deployment and confirm it lands where expected; this entry
+does not claim that confirmation on its own.
+
+**Verification.** New tests (`tests/test_cloud_trace_link.py`): `_cloud_trace_url` returns `None`
+when unconfigured and a correctly-shaped URL (tenant, resource ID, and the response's own
+`trace_id`) when configured; a `TestClient`-driven request against a recording-span double proves
+`chat()` actually tags the live span with `app.trace_id`, not just that the helper function
+would produce a URL if it were tagged. 294 tests pass (291 + 3 new); `ruff` clean; `npm run
+build` clean.

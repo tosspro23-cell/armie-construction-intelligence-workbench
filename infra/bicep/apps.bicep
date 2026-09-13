@@ -70,6 +70,12 @@ param rateLimitGlobalRequestsPerMinute int = 0
 @description('SPEC-M10/D-025: optional final rewording pass over an already-computed, already-verified deterministic answer (AgentService._polish_answer), never a source of any fact -- see that method\'s own number-preservation guard. false (the default) keeps ENABLE_ANSWER_POLISH unset, matching config.py\'s own default: no existing deployment\'s behavior changes until this is explicitly turned on. Costs one additional real model call per answered/partially_answered response when true.')
 param enableAnswerPolish bool = false
 
+@description('D-028: the AAD tenant ID this subscription lives under, needed alongside appInsightsResourceId below to build a working Azure Portal deep link from a chat response\'s own Cloud Provenance banner into its Application Insights telemetry (AgentService._cloud_trace_url). Empty (the default) keeps AZURE_TENANT_ID unset -- the banner stays plain text, exactly as before this fix.')
+param azureTenantId string = ''
+
+@description('D-028: the Application Insights component\'s full ARM resource ID (not its instrumentation key/connection string, which routes telemetry but isn\'t a portal-browsable identifier) -- e.g. output of `az monitor app-insights component show --app <name> --resource-group <rg> --query id`. Empty (the default) keeps APP_INSIGHTS_RESOURCE_ID unset, same opt-in-when-unset reasoning as azureTenantId above.')
+param appInsightsResourceId string = ''
+
 var containerAppsEnvName = '${namePrefix}-env'
 var apiAppName = '${namePrefix}-api'
 var webAppName = '${namePrefix}-web'
@@ -133,6 +139,15 @@ var rateLimitGlobalEnv = rateLimitGlobalRequestsPerMinute == 0 ? [] : [
 var answerPolishEnv = !enableAnswerPolish ? [] : [
   { name: 'ENABLE_ANSWER_POLISH', value: 'true' }
 ]
+
+// Same conditional-append reasoning as databaseEnv/evidenceEnv/searchEnv
+// above -- both must be set together for AgentService._cloud_trace_url to
+// build a link at all, but each is appended independently so a template
+// consumer setting only one doesn't get a confusing partial env var.
+var cloudTraceLinkEnv = concat(
+  empty(azureTenantId) ? [] : [{ name: 'AZURE_TENANT_ID', value: azureTenantId }],
+  empty(appInsightsResourceId) ? [] : [{ name: 'APP_INSIGHTS_RESOURCE_ID', value: appInsightsResourceId }]
+)
 
 resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2022-10-01' existing = {
   name: logAnalyticsName
@@ -240,7 +255,7 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
             // secretRef, not value (SPEC-M5 §C): pulls from the Container
             // Apps secret declared above, never inlined as plain text here.
             { name: 'API_SHARED_SECRET', secretRef: 'api-shared-secret' }
-          ], databaseEnv, evidenceEnv, searchEnv, pdfFilesEnv, adlsEnv, rateLimitEnv, rateLimitGlobalEnv, answerPolishEnv)
+          ], databaseEnv, evidenceEnv, searchEnv, pdfFilesEnv, adlsEnv, rateLimitEnv, rateLimitGlobalEnv, answerPolishEnv, cloudTraceLinkEnv)
         }
       ]
     }
