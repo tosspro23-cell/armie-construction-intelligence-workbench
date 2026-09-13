@@ -193,7 +193,16 @@ async def project_pdf_page(page_number: int, project_id: str = "demo"):
 def evidence_file(filename: str):
     # Basename containment prevents this local-review endpoint from exposing
     # arbitrary paths while allowing PDF crops and rendered pages in the UI.
-    if Path(filename).name != filename:
+    # `filename in {".", ".."}` is explicit, not redundant with the check
+    # below: `Path("..").name` returns ".." unchanged (a pathlib quirk --
+    # only a path *containing* "/" changes under `.name`), so a bare ".."
+    # segment previously passed this check and reached FileResponse with
+    # evidence_dir's own parent directory, an unhandled RuntimeError (500)
+    # rather than the clean 400 this endpoint intends for any invalid
+    # input. Found in self-review, 2026-09-13; see
+    # tests/test_evidence_blob_persistence.py's regression test for the
+    # real (percent-encoded, client-normalization-bypassing) reproduction.
+    if filename in {".", ".."} or Path(filename).name != filename:
         raise HTTPException(status_code=400, detail="Invalid evidence file name.")
     # SPEC-M8: blob storage first when configured -- it is the durable
     # source of truth once enabled (a Container App revision replacement
