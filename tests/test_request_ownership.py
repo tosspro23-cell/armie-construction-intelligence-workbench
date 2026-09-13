@@ -116,3 +116,54 @@ def test_a_real_http_caller_cannot_query_or_cancel_another_sessions_request(monk
         assert unowned_status.status_code == 200
 
     get_settings.cache_clear()
+
+
+def test_chat_rejects_a_reused_request_id_instead_of_overwriting_ownership(monkeypatch, tmp_path):
+    """Independent-review finding, confirmed live (2026-09-13): request_id
+    is client-supplied (ChatRequest.request_id) with no prior uniqueness
+    check -- a second caller reusing an in-flight or already-completed
+    request_id silently overwrote the first caller's app.state.requests
+    entry, including its session_id, so the *original* caller's own later
+    GET against that id 404ed (check_request_ownership comparing against
+    the new record) even though their request genuinely ran to completion
+    under their own session.
+    """
+    monkeypatch.setenv("DATA_DIR", str(ROOT / "demo_data"))
+    monkeypatch.setenv("IFC_FILE", "armie_demo.ifc")
+    monkeypatch.setenv("PDF_FILES", '["armie_demo_schedule.pdf"]')
+    monkeypatch.setenv("AUDIT_STORE_PATH", str(tmp_path / "audit.jsonl"))
+    monkeypatch.setenv("EVIDENCE_DIR", str(tmp_path / "evidence"))
+    get_settings.cache_clear()
+
+    import app.main as main_module
+
+    with TestClient(main_module.app) as client:
+        session_a = client.post("/api/v1/session").json()["session_id"]
+        session_b = client.post("/api/v1/session").json()["session_id"]
+
+        first = client.post(
+            "/api/v1/chat",
+            json={"request_id": "shared-id", "question": "How many doors are in this project?"},
+            headers={"X-Session-Id": session_a},
+        )
+        assert first.status_code == 200
+
+        # A second, unrelated caller reuses the same request_id.
+        second = client.post(
+            "/api/v1/chat",
+            json={"request_id": "shared-id", "question": "How many windows are in this project?"},
+            headers={"X-Session-Id": session_b},
+        )
+        assert second.status_code == 409
+
+        # The original caller's own record is untouched: still queryable
+        # under their own session, still reporting the real outcome.
+        owner_status = client.get("/api/v1/requests/shared-id", headers={"X-Session-Id": session_a})
+        assert owner_status.status_code == 200
+        assert owner_status.json()["status"] == "completed"
+
+        # The second caller never got any record at all under this id.
+        other_status = client.get("/api/v1/requests/shared-id", headers={"X-Session-Id": session_b})
+        assert other_status.status_code == 404
+
+    get_settings.cache_clear()

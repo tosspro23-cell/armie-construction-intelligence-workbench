@@ -48,6 +48,32 @@ class FakeDataLakeClient:
         return self.files[path]
 
 
+class RaisingDataLakeClient:
+    """Always raises on read -- simulates a real ADLS-side failure (network
+    error, an unreachable account, a permissions problem) that has nothing
+    to do with content integrity (that's CorruptingDataLakeClient's job).
+    """
+
+    def read_file(self, path: str) -> bytes:
+        raise ConnectionError("simulated Data Lake read failure")
+
+
+class SlowDataLakeClient:
+    """Sleeps past a caller-supplied deadline before returning real bytes
+    -- for proving the request-level timeout actually bounds project
+    loading, not just the agent-execution phase after it.
+    """
+
+    def __init__(self, files: dict[str, bytes], delay_seconds: float) -> None:
+        self.files = files
+        self.delay_seconds = delay_seconds
+
+    def read_file(self, path: str) -> bytes:
+        import time as time_module
+        time_module.sleep(self.delay_seconds)
+        return self.files[path]
+
+
 class CorruptingDataLakeClient:
     """Returns a byte-flipped copy of whatever the real file's bytes would
     be, for the download-integrity-verification tests below.
@@ -417,3 +443,59 @@ def test_resume_stays_on_the_bound_project_not_demo(monkeypatch, tmp_path: Path)
     get_settings.cache_clear()
 
     assert "51.20" in resumed.json()["answer_markdown"]  # westgate's own value, not demo's 44.50
+
+
+# --- project-load failure/timeout produce an honest terminal disposition -----------
+# (independent-review finding, confirmed live 2026-09-13: chat()'s
+# container.get_project(...) call previously had no except-Exception
+# branch and no timeout of its own -- see D-023 addendum in
+# docs/decisions/README.md for the full account.)
+
+def test_a_project_load_failure_produces_an_honest_error_not_an_unhandled_500(monkeypatch, tmp_path: Path) -> None:
+    import app.main as main_module
+    from app.config import get_settings
+
+    _configure_env(monkeypatch, tmp_path, ADLS_ACCOUNT_URL="https://fake.dfs.core.windows.net")
+    with TestClient(main_module.app, raise_server_exceptions=False) as client:
+        main_module.app.state.container.datalake_client_factory = lambda s: RaisingDataLakeClient()
+
+        response = client.post("/api/v1/chat", json={"project_id": "westgate", "question": "test"})
+        assert response.status_code == 200
+        body = response.json()
+        assert body["disposition"] == "error"
+        request_id = body["execution_metadata"]["request_id"]
+
+        # The record must reach a terminal status -- not stuck at
+        # "running" forever, which is what happened before this fix since
+        # the exception escaped before any record.update(status=...) call.
+        status = client.get(f"/api/v1/requests/{request_id}")
+        assert status.status_code == 200
+        assert status.json()["status"] == "error"
+    get_settings.cache_clear()
+
+
+def test_a_slow_project_load_times_out_within_the_declared_request_deadline(monkeypatch, tmp_path: Path) -> None:
+    import time as time_module
+
+    import app.main as main_module
+    from app.config import get_settings
+
+    _configure_env(
+        monkeypatch, tmp_path,
+        ADLS_ACCOUNT_URL="https://fake.dfs.core.windows.net", REQUEST_TIMEOUT_SECONDS="0.05",
+    )
+    slow_client = SlowDataLakeClient(_westgate_files(), delay_seconds=1.0)
+    with TestClient(main_module.app) as client:
+        main_module.app.state.container.datalake_client_factory = lambda s: slow_client
+
+        before = time_module.perf_counter()
+        response = client.post("/api/v1/chat", json={"project_id": "westgate", "question": "test"})
+        elapsed = time_module.perf_counter() - before
+
+        assert response.status_code == 200
+        assert response.json()["disposition"] == "timeout"
+        # Bounded by the declared deadline, not by the fake client's full
+        # 1-second delay -- proves the timeout actually wraps project
+        # loading rather than only the agent-execution phase after it.
+        assert elapsed < 0.5
+    get_settings.cache_clear()
