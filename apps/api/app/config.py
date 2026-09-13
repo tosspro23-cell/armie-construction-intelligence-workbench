@@ -145,6 +145,17 @@ class Settings(BaseSettings):
     route_confidence_threshold: float = 0.70
     pdf_confidence_threshold: float = 0.75
     max_verification_retries: int = 1
+    # SPEC-M10: an optional final rewording pass over an already-computed,
+    # already-verified deterministic answer -- never a source of any fact.
+    # Off by default (existing deployments/tests are unaffected until this
+    # is explicitly turned on): it costs one additional real model call per
+    # answered/partially_answered response, and every answer's numbers are
+    # still generated exactly as before regardless of this setting --
+    # AgentGraphService._polish_answer's own number-preservation guard
+    # discards the rewrite and falls back to the original deterministic
+    # text whenever the two disagree, so leaving this on cannot make an
+    # answer less accurate, only its wording.
+    enable_answer_polish: bool = False
     # Vision models may spend longer on a cold load than text planning. Keep
     # the request bounded, but do not turn a legitimate first browser call
     # into a false PDF failure at the provider's 30-second boundary.

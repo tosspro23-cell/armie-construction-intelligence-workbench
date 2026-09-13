@@ -1188,3 +1188,36 @@ that originally surfaced #3 re-tested with the marker correctly absent and the h
 implausible); the drawing viewer's document selector switches between the demo corpus's
 configured PDFs and pages independently of which one a citation focuses; and the IFC viewer's
 door/window click-priority fix was exercised against the live demo model.
+
+## D-025 — Optional answer-wording polish pass (SPEC-M10)
+
+Owner-requested (2026-09-13, citing a prior project's "polish the deterministic answer with one
+more model call" pattern): `_natural_answer`'s output is correct but reads like template-filled
+computation, not a sentence a person would say. Full design, rationale, and scope in
+`docs/specs/SPEC-M10-answer-polish-v1.md`; this entry records the one decision that actually
+matters for trusting this feature.
+
+**The number-preservation guard is the real contract, not the prompt.** The polish prompt
+instructs the model not to add, remove, or change any number — but a prompt is an instruction,
+not a guarantee, and this project's own `D-010` honesty discipline does not get to rest on model
+compliance alone. `AgentService._polish_preserves_facts` extracts every numeric token
+(`\d+(?:\.\d+)?`) from the original deterministic answer and the candidate rewrite and requires
+the two sets to match *exactly* — not a subset check (which would let a rewrite silently drop a
+number), and not numeric-value equality (which would let `12` become `12.0` unnoticed; this
+milestone treats that as a rejection, deliberately conservative). A rewrite failing this check is
+discarded in code, not flagged for review — the original deterministic text is what ships,
+audited as `model_rejected`.
+
+Scoped to `answered`/`partially_answered` dispositions only: `clarification_required`/
+`unsupported`/`refused`/`error` messages are deliberately precise (naming candidate documents,
+stating exactly why something failed) and are never passed through this pass. Off by default
+(`Settings.enable_answer_polish`); the live demo environment turns it on explicitly as a deploy-
+config change, tracked in `azure-deploy.yml`'s history, not by this default changing.
+
+**Verification.** The guard's full truth table (identical/dropped/added/reformatted-number
+cases) covered by a focused unit test; `_finalize` wiring tested with a fake provider via the
+existing D-007 seam, asserting the call log (not just final output) to prove the polish path is
+never invoked at all for `enable_answer_polish=False` or for a `clarification_required`
+disposition, and that a fact-dropping fake rewrite is rejected end-to-end rather than merely
+never returned. `PYTHONPATH=apps/api python3 -m pytest -q` and `(cd apps/web && npm run build)`
+pass.

@@ -186,6 +186,11 @@ export function DecisionStory({ latest, trace, projectId, onOpenCitation }: {
       <li className="story-step">
         <StepHeader number={6} icon="🏁" title="Result" subtitle={[meta.latency_ms ? `${meta.latency_ms} ms` : null, `${meta.model_call_count || 0} model call(s) total`].filter(Boolean).join(" · ")} />
         <p className="story-step-body">Disposition: <strong>{latest.disposition.replace(/_/g, " ")}</strong></p>
+        {meta.answer_polished && <details className="step-trace">
+          <summary>Answer was reworded by a model for tone — numbers unchanged</summary>
+          <p className="story-step-body empty">Deterministic answer before rewording:</p>
+          <pre>{meta.pre_polish_answer}</pre>
+        </details>}
         <StepTrace events={byStage("Final Response")} />
       </li>
     </ol>

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Any, Optional, TypedDict
 from uuid import uuid4
 
@@ -30,6 +31,7 @@ from app.agent.router import (
 from app.config import Settings
 from app.schemas.models import (
     AgentResponse,
+    AnswerSynthesis,
     AuditEvent,
     Citation,
     ConversationDelta,
@@ -1534,6 +1536,84 @@ Return only a corrected MultiQueryPlan JSON object."""
             "context_update": {},
         }}
 
+    _NUMBER_PATTERN = re.compile(r"\d+(?:\.\d+)?")
+
+    @classmethod
+    def _polish_preserves_facts(cls, original: str, rewritten: str) -> bool:
+        """The only guard that matters for SPEC-M10: every number in the
+        deterministic answer must appear, unchanged, in the polished
+        rewrite, and the rewrite must not introduce any number that wasn't
+        already there. Wording/tone/word order are entirely unconstrained;
+        numbers are the one thing this feature is never allowed to touch,
+        by design (see _polish_answer).
+        """
+        if not rewritten.strip():
+            return False
+        return set(cls._NUMBER_PATTERN.findall(original)) == set(cls._NUMBER_PATTERN.findall(rewritten))
+
+    def _polish_answer(self, state: GraphState, answer: str) -> str:
+        """SPEC-M10: an optional final rewording pass over an answer whose
+        every fact was already fixed by deterministic computation or
+        independently-verified extraction before this ever runs.
+
+        This call is only ever allowed to change wording/tone, never a
+        value -- `_polish_preserves_facts` is what actually enforces that,
+        not the prompt alone (a prompt is an instruction, not a guarantee).
+        Any failure -- a transport error, or the guard rejecting the
+        rewrite -- falls back to the original deterministic text untouched
+        and is itself audited, so a demo running with this on never
+        silently loses an answer to a flaky polish call, and a rejected
+        rewrite is as visible in the trace as an accepted one.
+        """
+        if not answer.strip():
+            return answer
+        provider = self.container.text_provider_factory(self.settings)
+        self._audit(
+            state, "polish_answer", "model_called",
+            "Answer polish pass requested.",
+            {"purpose": "answer_polish", "original_answer": answer},
+            actual_provider=provider.name, actual_model=provider.model,
+        )
+        try:
+            polished = asyncio.run(provider.structured(
+                purpose="answer_polish",
+                response_model=AnswerSynthesis,
+                prompt=(
+                    "Rewrite the following answer so it reads naturally and conversationally, "
+                    "as if a knowledgeable colleague said it out loud. "
+                    "You must not add, remove, or change any number, date, unit, name, or identifier -- "
+                    "every one of them must appear in your rewrite exactly as given, and you must not "
+                    "introduce any number that is not already present. Do not add hedging, caveats, or "
+                    "claims that are not already present. Reply with the rewritten answer only, in the "
+                    "same language as the original.\n\n"
+                    f"Answer to rewrite:\n{answer}"
+                ),
+            ))
+        except Exception as error:
+            self._audit(
+                state, "polish_answer", "model_failed",
+                "Answer polish pass failed; the original deterministic answer was kept unchanged.",
+                {"error": str(error)},
+                actual_provider=provider.name, actual_model=provider.model,
+            )
+            return answer
+        rewritten = polished.answer_markdown.strip()
+        if not self._polish_preserves_facts(answer, rewritten):
+            self._audit(
+                state, "polish_answer", "model_rejected",
+                "Answer polish output did not preserve every number from the original answer; the original deterministic answer was kept unchanged.",
+                {"original_answer": answer, "rejected_rewrite": rewritten},
+                actual_provider=provider.name, actual_model=provider.model,
+            )
+            return answer
+        self._audit(
+            state, "polish_answer", "model_completed",
+            "Answer polish pass completed.",
+            {"original_answer": answer, "polished_answer": rewritten},
+            actual_provider=provider.name, actual_model=provider.model,
+        )
+        return rewritten
+
     def _finalize(self, state: GraphState) -> dict:
         if state.get("clarification"):
             response = AgentResponse(
@@ -1545,19 +1625,37 @@ Return only a corrected MultiQueryPlan JSON object."""
             )
         else:
             result = state["tool_result"]
+            disposition_value = result.get("disposition", "answered")
+            answer_markdown = result["answer"]
+            model_call_count = state.get("model_call_count", 0)
+            answer_polished = False
+            # SPEC-M10: scoped to the two dispositions that carry a
+            # synthesized, prose answer worth rewording. clarification_
+            # required/unsupported/refused/error messages are deliberately
+            # precise (candidate documents, why something failed) and are
+            # never passed through this -- polishing risks paraphrasing
+            # away exactly the specificity those messages exist for.
+            if self.settings.enable_answer_polish and disposition_value in {"answered", "partially_answered"}:
+                polished = self._polish_answer(state, answer_markdown)
+                if polished != answer_markdown:
+                    answer_polished = True
+                    model_call_count += 1
+                answer_markdown = polished
             response = AgentResponse(
                 thread_id=state["thread_id"],
                 trace_id=state["trace_id"],
-                disposition=Disposition(result.get("disposition", "answered")),
-                answer_markdown=result["answer"],
+                disposition=Disposition(disposition_value),
+                answer_markdown=answer_markdown,
                 citations=[Citation.model_validate(item) for item in result.get("citations", [])],
                 verification=VerificationStatus.model_validate(result["verification"]),
                 execution_metadata={
                     "source": state.get("plan", {}).get("source") if len(state.get("multi_plan", {}).get("subplans", [])) <= 1 else "multi_source",
                     "planning_mode": "heuristic" if all(item.get("planning_mode") == "heuristic" for item in state.get("multi_plan", {}).get("subplans", [])) else "llm",
                     "configured_provider": self.settings.llm_provider,
-                    "model_call_count": state.get("model_call_count", 0),
+                    "model_call_count": model_call_count,
                     "tool_call_count": state.get("tool_call_count", 0),
+                    "answer_polished": answer_polished,
+                    "pre_polish_answer": result["answer"] if answer_polished else None,
                     "response_language": result.get("response_language"),
                     "normalized_request": state.get("multi_plan", {}).get("normalized_request") or state.get("question"),
                     "corrections": state.get("multi_plan", {}).get("corrections", []),

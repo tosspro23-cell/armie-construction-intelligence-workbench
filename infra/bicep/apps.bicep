@@ -67,6 +67,9 @@ param rateLimitRequestsPerMinute int = 0
 @description('D-023 addendum: identity-independent, deployment-wide requests-per-minute cap (app/security.py require_rate_limit), checked in addition to rateLimitRequestsPerMinute above. 0 (the default) keeps RATE_LIMIT_GLOBAL_REQUESTS_PER_MINUTE unset -- a no-op. Independent-review finding, confirmed live 2026-09-13: the per-caller cap alone is bypassable for free by any caller who just mints a fresh X-Session-Id per request, since nothing validates it was actually issued by POST /api/v1/session -- see config.py\'s own field docstring for the full rationale.')
 param rateLimitGlobalRequestsPerMinute int = 0
 
+@description('SPEC-M10/D-025: optional final rewording pass over an already-computed, already-verified deterministic answer (AgentService._polish_answer), never a source of any fact -- see that method\'s own number-preservation guard. false (the default) keeps ENABLE_ANSWER_POLISH unset, matching config.py\'s own default: no existing deployment\'s behavior changes until this is explicitly turned on. Costs one additional real model call per answered/partially_answered response when true.')
+param enableAnswerPolish bool = false
+
 var containerAppsEnvName = '${namePrefix}-env'
 var apiAppName = '${namePrefix}-api'
 var webAppName = '${namePrefix}-web'
@@ -124,6 +127,11 @@ var rateLimitEnv = rateLimitRequestsPerMinute == 0 ? [] : [
 // Same conditional-append reasoning as rateLimitEnv above.
 var rateLimitGlobalEnv = rateLimitGlobalRequestsPerMinute == 0 ? [] : [
   { name: 'RATE_LIMIT_GLOBAL_REQUESTS_PER_MINUTE', value: string(rateLimitGlobalRequestsPerMinute) }
+]
+
+// false is config.py's own default -- only append when explicitly turned on.
+var answerPolishEnv = !enableAnswerPolish ? [] : [
+  { name: 'ENABLE_ANSWER_POLISH', value: 'true' }
 ]
 
 resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2022-10-01' existing = {
@@ -232,7 +240,7 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
             // secretRef, not value (SPEC-M5 §C): pulls from the Container
             // Apps secret declared above, never inlined as plain text here.
             { name: 'API_SHARED_SECRET', secretRef: 'api-shared-secret' }
-          ], databaseEnv, evidenceEnv, searchEnv, pdfFilesEnv, adlsEnv, rateLimitEnv, rateLimitGlobalEnv)
+          ], databaseEnv, evidenceEnv, searchEnv, pdfFilesEnv, adlsEnv, rateLimitEnv, rateLimitGlobalEnv, answerPolishEnv)
         }
       ]
     }

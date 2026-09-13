@@ -65,6 +65,11 @@ on:
         description: "D-023 addendum: identity-independent, deployment-wide cap, checked in addition to rate_limit_requests_per_minute above. 0 (the default) keeps RATE_LIMIT_GLOBAL_REQUESTS_PER_MINUTE unset. Independent-review finding, confirmed live 2026-09-13: the per-caller cap alone is bypassable for free by minting a fresh X-Session-Id per request, since nothing validates it was actually issued by this server."
         required: false
         default: "0"
+      enable_answer_polish:
+        description: "SPEC-M10/D-025: optional final rewording pass over an already-computed, already-verified deterministic answer -- see AgentService._polish_answer's own number-preservation guard for why this cannot change what an answer says, only how it reads. false (the default) keeps ENABLE_ANSWER_POLISH unset, matching config.py's own default. Costs one additional real model call per answered/partially_answered response when true."
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   id-token: write
@@ -121,6 +126,7 @@ jobs:
       ADLS_ACCOUNT_URL: ${{ inputs.adls_account_url }}
       RATE_LIMIT_REQUESTS_PER_MINUTE: ${{ inputs.rate_limit_requests_per_minute }}
       RATE_LIMIT_GLOBAL_REQUESTS_PER_MINUTE: ${{ inputs.rate_limit_global_requests_per_minute }}
+      ENABLE_ANSWER_POLISH: ${{ inputs.enable_answer_polish }}
     steps:
       - uses: actions/checkout@v4
 
@@ -301,6 +307,7 @@ jobs:
                          adlsAccountUrl="$ADLS_ACCOUNT_URL" \
                          rateLimitRequestsPerMinute="$RATE_LIMIT_REQUESTS_PER_MINUTE" \
                          rateLimitGlobalRequestsPerMinute="$RATE_LIMIT_GLOBAL_REQUESTS_PER_MINUTE" \
+                         enableAnswerPolish="$ENABLE_ANSWER_POLISH" \
             --query properties.outputs -o json > apps-outputs.json
           cat apps-outputs.json
           echo "web_app_fqdn=$(jq -r .webAppFqdn.value apps-outputs.json)" >> "$GITHUB_OUTPUT"
