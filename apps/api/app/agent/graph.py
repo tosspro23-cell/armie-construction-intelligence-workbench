@@ -544,7 +544,7 @@ Return only a corrected MultiQueryPlan JSON object."""
                 # matches _execute_ifc's own failure handling (this
                 # method's `except Exception as error: self._audit(...)`
                 # sibling above) rather than inventing a second mechanism.
-                self._audit(state, "reconciliation", "error", "Door/window reconciliation could not execute.", {"error": str(error)})
+                self._audit(state, "execute_reconciliation", "error", "Door/window reconciliation could not execute.", {"error": str(error)})
                 response = {
                     "answer": f"I could not complete the door/window reconciliation: {error}",
                     "disposition": "error",
@@ -839,7 +839,7 @@ Return only a corrected MultiQueryPlan JSON object."""
         )
         citations = self._citations(evidence, state)
         verification = VerificationStatus(status="passed", reason="Every item's status was independently derived from the source IFC quantities and the PDF's own table structure; no value was asserted without a matching or explicitly absent counterpart.")
-        self._audit(state, "reconciliation", "synthesized", "Door/window IFC<->drawing reconciliation joined on Tag.", counts)
+        self._audit(state, "execute_reconciliation", "synthesized", "Door/window IFC<->drawing reconciliation joined on Tag.", counts)
         return {
             "answer": answer, "disposition": "answered", "citations": citations,
             "verification": verification.model_dump(), "reconciliation_items": reconciliation_items,
@@ -1649,7 +1649,17 @@ Return only a corrected MultiQueryPlan JSON object."""
                 citations=[Citation.model_validate(item) for item in result.get("citations", [])],
                 verification=VerificationStatus.model_validate(result["verification"]),
                 execution_metadata={
-                    "source": state.get("plan", {}).get("source") if len(state.get("multi_plan", {}).get("subplans", [])) <= 1 else "multi_source",
+                    # "multi_source" alone told a user nothing about which
+                    # sources -- found live, 2026-09-13, on exactly the
+                    # reconciliation query this names explicitly (the only
+                    # multi-subplan intent today): the Execution step's
+                    # subtitle read "source: multi_source" with no
+                    # indication it was joining IFC and the PDF schedule.
+                    "source": (
+                        "ifc+pdf (reconciliation)" if state.get("multi_plan", {}).get("intent") == "reconciliation"
+                        else state.get("plan", {}).get("source") if len(state.get("multi_plan", {}).get("subplans", [])) <= 1
+                        else "multi_source"
+                    ),
                     "planning_mode": "heuristic" if all(item.get("planning_mode") == "heuristic" for item in state.get("multi_plan", {}).get("subplans", [])) else "llm",
                     "configured_provider": self.settings.llm_provider,
                     "model_call_count": model_call_count,

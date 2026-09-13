@@ -1221,3 +1221,33 @@ never invoked at all for `enable_answer_polish=False` or for a `clarification_re
 disposition, and that a fact-dropping fake rewrite is rejected end-to-end rather than merely
 never returned. `PYTHONPATH=apps/api python3 -m pytest -q` and `(cd apps/web && npm run build)`
 pass.
+
+## D-026 — Reconciliation queries had no visible Execution trace and an uninformative source label
+
+Found live, 2026-09-13, testing a door/window reconciliation question end-to-end in production.
+Two compounding defects in `AgentService`, both in `apps/api/app/agent/graph.py`:
+
+1. **The Decision Trace's Execution step had nothing to expand.** `DecisionStory.tsx`'s
+   `auditStage()` classifier buckets audit events into UI steps by matching substrings against
+   `step`/`event_type` (`"execute"`/`"tool"`/`"subplan"` -> Execution). `_execute_multi`'s
+   reconciliation path emitted its two audit events under `step="reconciliation"` -- unlike
+   every other real execution path (`execute_pdf`, `execute_ifc`, `execute_viewer`), which all
+   name their step starting with `execute_`. `"reconciliation"` matches none of the classifier's
+   patterns and fell through to the default `"Final Response"` bucket, so the Execution step's
+   own `StepTrace` toggle -- which only renders when at least one event classifies into it --
+   was silently absent, even though the subtitle above it correctly showed `2 tool call(s)` from
+   a separate, unaffected counter. Fixed by renaming both call sites to
+   `step="execute_reconciliation"`, matching the existing convention rather than special-casing
+   the frontend classifier for one more string.
+2. **`execution_metadata.source` said `"multi_source"` with no indication *which* sources.**
+   That fallback fires whenever a request's `multi_plan` has more than one subplan; reconciliation
+   is the only intent today that always has exactly two (one IFC, one PDF), by design, so it
+   always hit this generic branch. Fixed with a reconciliation-specific case ahead of the
+   fallback: `"ifc+pdf (reconciliation)"`.
+
+**Verification.** A new test (`tests/test_reconciliation.py`) asserts both directly against a
+real `AgentService.invoke()` call: `execution_metadata["source"] == "ifc+pdf (reconciliation)"`,
+and the real audit trace contains an `execute_reconciliation` event -- not just that the frontend
+*would* classify it correctly, but that the backend now emits the exact step name the existing
+classifier already knows how to bucket. 291 tests pass (290 + 1 new); `ruff` clean; `npm run
+build` clean.

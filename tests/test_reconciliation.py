@@ -125,6 +125,26 @@ def test_all_nine_ground_truth_items_reconcile_to_intended_status_at_zero_model_
     assert actual == EXPECTED_STATUSES
 
 
+def test_reconciliation_reports_a_descriptive_source_and_an_execute_prefixed_audit_step(tmp_path: Path) -> None:
+    """Found live, 2026-09-13: the Decision Trace's Execution step showed
+    "source: multi_source" with no indication this was an IFC<->PDF join,
+    and its own trace toggle was entirely absent -- the frontend's
+    auditStage() classifier buckets by step name substring
+    ("execute"/"tool"/"subplan" -> Execution), and this code path's audit
+    events were emitted under step="reconciliation", which matches none of
+    those and fell through to the default "Final Response" bucket instead.
+    """
+    settings = _settings(tmp_path)
+    fake = FakeModelProvider()
+    container, service = _service(settings, fake)
+
+    response = service.invoke(project_resources=_demo(container), thread_id="reconcile-source-label", question=RECONCILIATION_QUESTION, viewer_context=None)
+
+    assert response.execution_metadata.get("source") == "ifc+pdf (reconciliation)"
+    trace = container.audit_store.by_trace(response.trace_id)
+    assert any(event.step == "execute_reconciliation" for event in trace)
+
+
 def test_dimension_mismatch_item_reports_both_sources_disagreeing_values(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     fake = FakeModelProvider()
