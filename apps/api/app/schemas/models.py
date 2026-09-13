@@ -250,6 +250,16 @@ class Citation(BaseModel):
     source_type: SourceType
     label: str
     locator: dict[str, Any]
+    # SPEC-M9 SS F, D-023 addendum: which project and which frozen
+    # source_set_id actually produced this citation -- independent-review
+    # finding, confirmed live (2026-09-13), that this manifest data was
+    # tracked internally (ServiceContainer.get_project's cache key) but
+    # never surfaced on a response a caller/auditor could see. Two
+    # projects sharing an identical document name is a real, deliberate
+    # fixture case in this repo -- evidence_id/locator alone cannot prove
+    # *which* project's document this citation actually came from.
+    project_id: str
+    source_set_id: str
 
 
 class VerifierResult(BaseModel):
@@ -365,3 +375,12 @@ class AuditEvent(BaseModel):
     tool_call_count: int = 0
     retry_count: int = 0
     provider_fallback_reason: str | None = None
+    # SPEC-M9 SS F, D-023 addendum: same finding/rationale as Citation's own
+    # project_id/source_set_id above -- optional (not required, unlike
+    # Citation) because a few request-lifecycle events in app/main.py
+    # (cancelled/timeout) are constructed directly, outside AgentService.
+    # _audit()'s single centralized helper, and one of them (a project-
+    # load timeout) can fire before a project ever finished resolving, so
+    # no manifest may exist yet to report a source_set_id from.
+    project_id: str | None = None
+    source_set_id: str | None = None

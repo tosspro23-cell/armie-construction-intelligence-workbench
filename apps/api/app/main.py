@@ -52,6 +52,13 @@ async def lifespan(app: FastAPI):
     app.state.rate_limiter = InMemorySlidingWindowRateLimiter(
         limit=settings.rate_limit_requests_per_minute or 1, window_seconds=60.0,
     )
+    # D-023 addendum: a second, caller-identity-independent limiter -- see
+    # config.py's rate_limit_global_requests_per_minute docstring for why
+    # the per-caller one above can never be the actual cost-protection
+    # boundary on its own.
+    app.state.global_rate_limiter = InMemorySlidingWindowRateLimiter(
+        limit=settings.rate_limit_global_requests_per_minute or 1, window_seconds=60.0,
+    )
     yield
     # Independent-review addition: PostgresConversationStore/PostgresAuditStore
     # (SPEC-M4) hold open psycopg connection pools; InMemoryConversationStore/
@@ -280,6 +287,21 @@ async def chat(request: ChatRequest, x_session_id: str | None = Header(default=N
     # check below can reject a request before any tool/model call.
     thread_id = request.thread_id or str(uuid4())
     requested_project_id = request.project_id or "demo"
+    # Independent-review finding, confirmed live (2026-09-13): request_id
+    # is client-supplied (ChatRequest.request_id, defaulting to a fresh
+    # uuid4 only when omitted) with no prior uniqueness check -- a second
+    # caller supplying an in-flight request_id silently overwrote the
+    # first caller's app.state.requests entry, including its session_id,
+    # so the original caller's later GET/cancel against that id 404ed
+    # (check_request_ownership comparing against the *new* record) even
+    # though their own request was still genuinely running. No `await`
+    # between this check and the dict write below, so this is race-safe
+    # on this process's single event loop without needing a lock. No
+    # idempotency/retry contract is defined for a reused request_id (the
+    # omitted-request_id path already covers "start a fresh request"), so
+    # this rejects outright rather than inventing one.
+    if request_id in app.state.requests:
+        raise HTTPException(status_code=409, detail=f"Request id '{request_id}' is already in use.")
     # session_id (D-016): whoever's X-Session-Id created this record is
     # its only owner for /api/v1/requests/* below; None (no header sent)
     # keeps the record unrestricted, matching pre-D-016 behaviour.
@@ -297,11 +319,39 @@ async def chat(request: ChatRequest, x_session_id: str | None = Header(default=N
             detail=f"This thread is bound to project '{bound_project_id}', not '{requested_project_id}'. "
                    "Start a new conversation to switch projects.",
         )
+    # started here, not just before agent.invoke below: this is the actual
+    # start of this request's bounded deadline (request_timeout_seconds),
+    # not only the model/tool-execution portion of it. Independent-review
+    # finding, confirmed live (2026-09-13): get_project's own download-
+    # and-verify path (ADLS mode) previously ran with no timeout of its
+    # own at all -- a slow or hanging Data Lake read could block this
+    # request indefinitely with no honest terminal disposition, and
+    # whatever time it did take was never counted against the deadline
+    # the client was told this request was bounded by.
+    record["stage"] = "resolving_project"
+    started = time.perf_counter()
+    settings = app.state.container.settings
     try:
-        project_resources = await container.get_project(bound_project_id)
+        project_resources = await asyncio.wait_for(container.get_project(bound_project_id), timeout=settings.request_timeout_seconds)
     except ProjectNotFoundError:
         record.update(status="error", stage="project_not_found")
         raise HTTPException(status_code=404, detail=f"Unknown project '{bound_project_id}'.") from None
+    except asyncio.TimeoutError:
+        record.update(status="timeout", stage="project_load_timeout")
+        audit_error = await _safe_audit_append(app.state.container.audit_store, AuditEvent(trace_id=request_id, thread_id=request.thread_id or request_id, step="request", event_type="timeout", summary="Loading the project's source files exceeded the bounded request deadline.", payload={"request_id": request_id, "project_id": bound_project_id, "timeout_seconds": settings.request_timeout_seconds}, project_id=bound_project_id))
+        extra = {"audit_persist_error": audit_error} if audit_error else {}
+        return _terminal_response(request, request_id, Disposition.TIMEOUT, "The request exceeded its time limit while loading the project's source files. Please retry shortly.", **extra)
+    except Exception as error:
+        # Independent-review finding, confirmed live (2026-09-13): this
+        # previously had no except-Exception branch at all, so an ADLS
+        # download failure (network error, a corrupted-content hash
+        # mismatch, an unreachable Data Lake account) propagated as an
+        # unhandled exception -- a bare 500 with no honest disposition,
+        # and app.state.requests[request_id] was never updated to a
+        # terminal status, so GET /api/v1/requests/{request_id} reported
+        # "running" forever for a request that had already failed.
+        record.update(status="error", stage="project_load_error", error=str(error))
+        return _terminal_response(request, request_id, Disposition.ERROR, f"The request failed safely: could not load the project's source files: {error}")
     try:
         # await asyncio.to_thread, not a direct call: with SPEC-M4's
         # Postgres-backed ConversationStore configured, this is a real
@@ -318,7 +368,11 @@ async def chat(request: ChatRequest, x_session_id: str | None = Header(default=N
         record.update(status="error", stage="context_read_error", error=str(error))
         return _terminal_response(request, request_id, Disposition.ERROR, f"The request failed safely: could not read conversation context: {error}")
     record["stage"] = "agent_execution"
-    started = time.perf_counter()
+    # The remaining budget, not a fresh full-length window: the deadline
+    # this endpoint promises the client is for the whole request
+    # (project resolution included, per the fix above), never restarted
+    # partway through.
+    remaining_budget = max(0.0, settings.request_timeout_seconds - (time.perf_counter() - started))
     try:
         response = await asyncio.wait_for(asyncio.to_thread(
             agent.invoke,
@@ -328,15 +382,15 @@ async def chat(request: ChatRequest, x_session_id: str | None = Header(default=N
             viewer_context=request.viewer_context.model_dump() if request.viewer_context else None,
             conversation_context=context,
             source_preference=request.source_preference,
-        ), timeout=app.state.container.settings.request_timeout_seconds)
+        ), timeout=remaining_budget)
     except asyncio.CancelledError:
         record.update(status="cancelled", stage="cancelled")
-        audit_error = await _safe_audit_append(app.state.container.audit_store, AuditEvent(trace_id=request_id, thread_id=request.thread_id or request_id, step="request", event_type="cancelled", summary="Request was cancelled before a terminal response.", payload={"request_id": request_id}))
+        audit_error = await _safe_audit_append(app.state.container.audit_store, AuditEvent(trace_id=request_id, thread_id=request.thread_id or request_id, step="request", event_type="cancelled", summary="Request was cancelled before a terminal response.", payload={"request_id": request_id}, project_id=project_resources.manifest.project_id, source_set_id=project_resources.manifest.source_set_id))
         extra = {"audit_persist_error": audit_error} if audit_error else {}
         return _terminal_response(request, request_id, Disposition.CANCELLED, "Request cancelled. No result was committed to the conversation context.", **extra)
     except asyncio.TimeoutError:
         record.update(status="timeout", stage="timeout")
-        audit_error = await _safe_audit_append(app.state.container.audit_store, AuditEvent(trace_id=request_id, thread_id=request.thread_id or request_id, step="request", event_type="timeout", summary="Request exceeded the bounded request deadline.", payload={"request_id": request_id, "timeout_seconds": app.state.container.settings.request_timeout_seconds}))
+        audit_error = await _safe_audit_append(app.state.container.audit_store, AuditEvent(trace_id=request_id, thread_id=request.thread_id or request_id, step="request", event_type="timeout", summary="Request exceeded the bounded request deadline.", payload={"request_id": request_id, "timeout_seconds": settings.request_timeout_seconds}, project_id=project_resources.manifest.project_id, source_set_id=project_resources.manifest.source_set_id))
         extra = {"audit_persist_error": audit_error} if audit_error else {}
         return _terminal_response(request, request_id, Disposition.TIMEOUT, "The request exceeded its time limit. Partial audit events were preserved; please retry with a narrower question.", **extra)
     except Exception as error:
@@ -348,6 +402,11 @@ async def chat(request: ChatRequest, x_session_id: str | None = Header(default=N
             **response.execution_metadata,
             "request_id": request_id,
             "latency_ms": round((time.perf_counter() - started) * 1000, 1),
+            # SPEC-M9 SS F, D-023 addendum: independent-review finding,
+            # confirmed live (2026-09-13) -- see Citation/AuditEvent's own
+            # project_id/source_set_id fields for the full rationale.
+            "project_id": project_resources.manifest.project_id,
+            "source_set_id": project_resources.manifest.source_set_id,
         }
     })
     context_persist_error: str | None = None

@@ -61,6 +61,9 @@ param pdfFiles string = ''
 @description('SPEC-M9, D-023: adls.bicep output dfsEndpoint (https://<account>.dfs.core.windows.net), for the already-provisioned multi-project ADLS Gen2 account. Empty (the default) keeps ADLS_ACCOUNT_URL unset, so app/services.py\'s ServiceContainer.get_project only ever resolves "demo" from the local filesystem, exactly like every deployment before this milestone. This template does NOT provision infra/bicep/adls.bicep itself, the same deliberate-separate-step pattern as data.bicep/evidence.bicep.')
 param adlsAccountUrl string = ''
 
+@description('D-019: per-caller requests-per-minute cap on POST /api/v1/chat and its resume endpoint (app/security.py require_rate_limit), bounding Azure OpenAI/Search quota spend. 0 (the default) keeps RATE_LIMIT_REQUESTS_PER_MINUTE unset -- a no-op, exactly like every deployment before this D-023 addendum fix. Found live (independent review, 2026-09-13): D-019 merged this code in but never added it here or to azure-deploy.yml, the same "wired but inert" pattern D-022 found for Azure AI Search -- rate limiting has never actually been enabled on a real deployment despite the milestone being marked resolved.')
+param rateLimitRequestsPerMinute int = 0
+
 var containerAppsEnvName = '${namePrefix}-env'
 var apiAppName = '${namePrefix}-api'
 var webAppName = '${namePrefix}-web'
@@ -105,6 +108,14 @@ var pdfFilesEnv = empty(pdfFiles) ? [] : [
 // pdfFilesEnv above.
 var adlsEnv = empty(adlsAccountUrl) ? [] : [
   { name: 'ADLS_ACCOUNT_URL', value: adlsAccountUrl }
+]
+
+// 0 means "unset" here, not "0 requests/minute" (which would lock the API
+// entirely) -- same conditional-append reasoning as databaseEnv/
+// evidenceEnv/searchEnv/pdfFilesEnv/adlsEnv above, using 0 instead of an
+// empty string only because this parameter is typed `int`, not `string`.
+var rateLimitEnv = rateLimitRequestsPerMinute == 0 ? [] : [
+  { name: 'RATE_LIMIT_REQUESTS_PER_MINUTE', value: string(rateLimitRequestsPerMinute) }
 ]
 
 resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2022-10-01' existing = {
@@ -213,7 +224,7 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
             // secretRef, not value (SPEC-M5 §C): pulls from the Container
             // Apps secret declared above, never inlined as plain text here.
             { name: 'API_SHARED_SECRET', secretRef: 'api-shared-secret' }
-          ], databaseEnv, evidenceEnv, searchEnv, pdfFilesEnv, adlsEnv)
+          ], databaseEnv, evidenceEnv, searchEnv, pdfFilesEnv, adlsEnv, rateLimitEnv)
         }
       ]
     }

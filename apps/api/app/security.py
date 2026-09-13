@@ -79,8 +79,25 @@ def require_rate_limit(
     back to the raw ``Authorization`` header value otherwise (every direct
     API caller with no session shares one bucket -- proportional to
     D-016's own compatibility choice for the same case, not a new gap).
+
+    D-023 addendum: independent-review finding, confirmed live
+    (2026-09-13) -- a per-caller-identity cap alone is bypassable for
+    free, since nothing here (or at ``POST /api/v1/session``) validates
+    that ``X-Session-Id`` was actually issued by this server; a caller
+    can simply mint a fresh value per request and always land in an
+    empty bucket. Checked first, independent of caller identity: a
+    second, global limiter (``rate_limit_global_requests_per_minute``)
+    bounds total spend across every caller combined, which no amount of
+    self-declared-identity rotation can evade.
     """
     settings = get_settings()
+    if settings.rate_limit_global_requests_per_minute:
+        allowed, retry_after = request.app.state.global_rate_limiter.allow("__global__")
+        if not allowed:
+            raise HTTPException(
+                status_code=429, detail="This deployment's overall request budget is exhausted. Please try again shortly.",
+                headers={"Retry-After": str(max(int(retry_after) + 1, 1))},
+            )
     if not settings.rate_limit_requests_per_minute:
         return
     limiter = request.app.state.rate_limiter

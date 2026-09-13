@@ -103,6 +103,12 @@ def test_audit_field_snapshot_for_one_scripted_end_to_end_run(tmp_path: Path) ->
         "payload", "duration_ms", "configured_provider", "actual_provider", "actual_model",
         "planning_mode", "model_call_count", "tool_call_count", "retry_count",
         "provider_fallback_reason",
+        # SPEC-M9 SS F, D-023 addendum: independent-review finding, confirmed
+        # live (2026-09-13) -- every event from AgentService._audit() now
+        # carries which project/frozen source_set_id was active, closing
+        # the gap where this was tracked internally but never surfaced on
+        # anything a caller or auditor could see.
+        "project_id", "source_set_id",
     }
     for event in trace:
         assert set(event.model_dump().keys()) == expected_keys

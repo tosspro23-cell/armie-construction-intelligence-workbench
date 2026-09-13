@@ -103,6 +103,13 @@ class AgentService:
         retry_count: int = 0,
         fallback_reason: str | None = None,
     ) -> None:
+        # SPEC-M9 SS F, D-023 addendum: independent-review finding, confirmed
+        # live (2026-09-13) -- every event from this single centralized
+        # helper now carries which project/frozen source_set_id was active,
+        # closing the gap where the manifest was tracked internally
+        # (ServiceContainer.get_project's cache key) but never actually
+        # surfaced on anything a caller or auditor could see.
+        manifest = state["project_resources"].manifest
         self.container.audit_store.append(AuditEvent(
             trace_id=state["trace_id"],
             thread_id=state["thread_id"],
@@ -118,6 +125,8 @@ class AgentService:
             tool_call_count=state.get("tool_call_count", 0),
             retry_count=retry_count,
             provider_fallback_reason=fallback_reason,
+            project_id=manifest.project_id,
+            source_set_id=manifest.source_set_id,
         ))
 
     def _build_graph(self):
@@ -624,7 +633,7 @@ Return only a corrected MultiQueryPlan JSON object."""
         # weakens deterministic assurance.
         if result.value != value:
             return {"tool_result": self._error_result("Batch count disagreed with independent IFC verification."), "tool_call_count": state.get("tool_call_count", 0) + 1}
-        citations = self._citations(result.evidence)
+        citations = self._citations(result.evidence, state)
         answer = self._format_ifc_answer(plan, value)
         consistency_issues = verify_execution_consistency(plan, tool_query=query.model_dump(), result_value=value, answer=answer)
         self._audit(state, "execution_consistency", "execution_consistency", "Scalar batch execution consistency checked.", {"status": "passed" if not consistency_issues else "failed", "issues": [issue.__dict__ for issue in consistency_issues], "result_shape": "scalar_count"})
@@ -826,7 +835,7 @@ Return only a corrected MultiQueryPlan JSON object."""
             f"**{counts['matched']} matched**, **{counts['dimension_mismatch']} dimension mismatch**, "
             f"**{counts['missing_in_pdf']} missing from the PDF**, **{counts['missing_in_ifc']} missing from the IFC model**."
         )
-        citations = self._citations(evidence)
+        citations = self._citations(evidence, state)
         verification = VerificationStatus(status="passed", reason="Every item's status was independently derived from the source IFC quantities and the PDF's own table structure; no value was asserted without a matching or explicitly absent counterpart.")
         self._audit(state, "reconciliation", "synthesized", "Door/window IFC<->drawing reconciliation joined on Tag.", counts)
         return {
@@ -945,7 +954,7 @@ Return only a corrected MultiQueryPlan JSON object."""
         try:
             tool_call_count = state.get("tool_call_count", 0) + 1
             result = state["project_resources"].ifc_repository.execute(query)
-            citations = self._citations(result.evidence)
+            citations = self._citations(result.evidence, state)
             next_filters = dict(plan.filters)
             if plan.operation == "group_by" and plan.group_by == "storey" and isinstance(result.value, dict) and result.value:
                 # A subsequent "break that down by room" should inherit the winning
@@ -1122,7 +1131,7 @@ Return only a corrected MultiQueryPlan JSON object."""
             # add it there too so a multi-document answer's citation actually
             # says which document it came from, not just the audit trail.
             evidence = [item.model_copy(update={"locator": {**item.locator, "document": filename}}) for item in result.evidence]
-            citations = self._citations(evidence)
+            citations = self._citations(evidence, state)
             evidence_result = EvidenceVerifier().verify(evidence, self.settings.pdf_confidence_threshold)
             status = verification_status([
                 evidence_result,
@@ -1311,7 +1320,7 @@ Return only a corrected MultiQueryPlan JSON object."""
                         locator={"page": query.page_hint or 1, "bbox": location.bbox, "field": field, "board": board, "extraction_method": "board_localized_vision", "evidence_crop": crop.name},
                         extracted_value=candidate.value, confidence=candidate.confidence,
                     )]
-                    citations = self._citations(evidence)
+                    citations = self._citations(evidence, state)
                     verified = all([verification.supported, verification.board_matches, verification.field_matches, verification.value_matches, verification.unique_match])
                     verifier = VerifierResult(verifier="same_crop_pdf_vision", passed=verified, confidence=verification.confidence, reason=verification.rationale, supporting_evidence_ids=[evidence[0].id])
                     status = verification_status([verifier, InvariantValidator().validate(evidence=evidence, citations=[Citation.model_validate(item) for item in citations], disposition="answered" if verified else "clarification_required")])
@@ -1337,7 +1346,7 @@ Return only a corrected MultiQueryPlan JSON object."""
                 if not visual_verification.supported:
                     result.confidence = min(result.confidence, visual_verification.confidence)
                     result.ambiguity = visual_verification.rationale
-            citations = self._citations(result.evidence)
+            citations = self._citations(result.evidence, state)
             evidence_result = EvidenceVerifier().verify(
                 result.evidence,
                 self.settings.pdf_confidence_threshold,
@@ -1390,7 +1399,7 @@ Return only a corrected MultiQueryPlan JSON object."""
                 return {"tool_result": {
                     "answer": "I need a configured vision provider before extracting this visual schedule. Please specify the board or circuit once vision verification is available; I will not guess between multiple totals on the page.",
                     "disposition": "clarification_required",
-                    "citations": self._citations(evidence),
+                    "citations": self._citations(evidence, state),
                     "verification": VerificationStatus(status="not_applicable", reason="Vision provider unavailable; no numerical claim was made.").model_dump(),
                     "context_update": {"active_source": SourceType.PDF.value, "previous_query_plan": plan.model_dump()},
                 }, "evidence": [item.model_dump() for item in evidence]}
@@ -1484,14 +1493,14 @@ Return only a corrected MultiQueryPlan JSON object."""
         if (stair_question and not visual.target_visible) or not visual.sufficient_view or visual.occlusion_detected or not (viewer_verification.supported and viewer_verification.claim_supported and viewer_verification.screenshot_sufficient):
             return {"tool_result": {
                 "answer": f"I cannot verify that from this view alone. {claim} Please rotate, zoom, or select the relevant element and capture another view.",
-                "disposition": "clarification_required", "citations": self._citations(evidence),
+                "disposition": "clarification_required", "citations": self._citations(evidence, state),
                 "verification": VerificationStatus(status="not_applicable", reason=viewer_verification.rationale).model_dump(),
                 "context_update": {"active_source": SourceType.VIEWER.value, "active_snapshot_id": viewer.get("snapshot_id")},
             }, "evidence": [item.model_dump() for item in evidence], "model_call_count": model_call_count}
         return {"tool_result": {
             "answer": claim,
             "disposition": "answered",
-            "citations": self._citations(evidence),
+            "citations": self._citations(evidence, state),
             "verification": VerificationStatus(status="passed", verifier_results=[VerifierResult(verifier="same_snapshot_vision", passed=True, confidence=viewer_verification.confidence, reason=viewer_verification.rationale, supporting_evidence_ids=[evidence[0].id])], reason="Vision result was independently verified against the supplied snapshot.").model_dump(),
             "context_update": {"active_source": SourceType.VIEWER.value, "active_snapshot_id": viewer.get("snapshot_id")},
         }, "evidence": [item.model_dump() for item in evidence], "model_call_count": model_call_count}
@@ -1583,12 +1592,24 @@ Return only a corrected MultiQueryPlan JSON object."""
         return AgentResponse.model_validate(outcome["final_response"])
 
     @staticmethod
-    def _citations(evidence: list[Evidence]) -> list[dict]:
+    def _citations(evidence: list[Evidence], state: GraphState) -> list[dict]:
+        # project_id/source_set_id: independent-review finding, confirmed
+        # live (2026-09-13) -- SPEC-M9 §F's "minimal frozen source-
+        # provenance manifest" was stored in the registry and used
+        # internally for cache-key/download-verification, but never
+        # actually surfaced anywhere a caller or auditor could see it.
+        # Two projects can use identical document names (both fixtures in
+        # this repo do, deliberately, to prove isolation) -- without this,
+        # a citation alone cannot prove *which* project's, or which frozen
+        # source_set_id's, document actually produced it.
+        manifest = state["project_resources"].manifest
         return [{
             "evidence_id": item.id,
             "source_type": item.source_type.value,
             "label": item.summary,
             "locator": item.locator,
+            "project_id": manifest.project_id,
+            "source_set_id": manifest.source_set_id,
         } for item in evidence]
 
     @staticmethod

@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parents[1]
 @pytest.fixture(autouse=True)
 def _clear_settings_cache(monkeypatch):
     monkeypatch.delenv("RATE_LIMIT_REQUESTS_PER_MINUTE", raising=False)
+    monkeypatch.delenv("RATE_LIMIT_GLOBAL_REQUESTS_PER_MINUTE", raising=False)
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
@@ -88,6 +89,49 @@ def test_a_real_http_caller_is_rate_limited_after_the_configured_number_of_reque
         # starved by another tab's usage.
         other_tab = client.post("/api/v1/chat", json=body, headers={"X-Session-Id": "tab-2"})
         assert other_tab.status_code == 200
+
+    get_settings.cache_clear()
+
+
+def test_rotating_the_self_declared_session_id_no_longer_evades_the_overall_budget(monkeypatch, tmp_path):
+    """Independent-review finding, confirmed live (2026-09-13): the
+    per-caller limit above is keyed by X-Session-Id, a value the caller
+    self-declares -- POST /api/v1/session issues one but the server never
+    records which values it issued, so nothing stops a caller from just
+    inventing a fresh value per request and always landing in an empty
+    bucket. This is not "fixed" in the sense of closing that per-caller
+    bypass (a self-declared identifier can never be a real cost boundary
+    on its own) -- it is closed by a second, identity-independent limiter
+    that no amount of session-id rotation can evade, since it isn't keyed
+    by caller identity at all.
+    """
+    monkeypatch.setenv("DATA_DIR", str(ROOT / "demo_data"))
+    monkeypatch.setenv("IFC_FILE", "armie_demo.ifc")
+    monkeypatch.setenv("PDF_FILES", '["armie_demo_schedule.pdf"]')
+    monkeypatch.setenv("AUDIT_STORE_PATH", str(tmp_path / "audit.jsonl"))
+    monkeypatch.setenv("EVIDENCE_DIR", str(tmp_path / "evidence"))
+    # Per-caller budget generous (never the thing that trips here); global
+    # budget tight, to isolate which limiter actually fires.
+    monkeypatch.setenv("RATE_LIMIT_REQUESTS_PER_MINUTE", "100")
+    monkeypatch.setenv("RATE_LIMIT_GLOBAL_REQUESTS_PER_MINUTE", "2")
+    get_settings.cache_clear()
+
+    import app.main as main_module
+
+    with TestClient(main_module.app) as client:
+        body = {"question": "What is the connected load for Panel-A?"}
+
+        # Three requests, three entirely fresh, never-reused session ids --
+        # exactly the bypass shape: no caller-identity budget is ever
+        # revisited, so the per-caller limiter alone would allow all three.
+        first = client.post("/api/v1/chat", json=body, headers={"X-Session-Id": "fresh-1"})
+        second = client.post("/api/v1/chat", json=body, headers={"X-Session-Id": "fresh-2"})
+        third = client.post("/api/v1/chat", json=body, headers={"X-Session-Id": "fresh-3"})
+
+        assert first.status_code == 200
+        assert second.status_code == 200
+        assert third.status_code == 429
+        assert "Retry-After" in third.headers
 
     get_settings.cache_clear()
 

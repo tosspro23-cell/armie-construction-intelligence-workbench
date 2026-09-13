@@ -53,6 +53,10 @@ on:
         description: "SPEC-M9, D-023: dfsEndpoint output (infra/bicep/adls.bicep), e.g. https://<storageAccountName>.dfs.core.windows.net, for the already-provisioned multi-project ADLS Gen2 account. Blank (the default) keeps ADLS_ACCOUNT_URL unset, so ServiceContainer.get_project only ever resolves \"demo\" from the local filesystem -- the multi-project selector stays hidden in the frontend and GET /api/v1/projects returns []. This workflow does NOT provision infra/bicep/adls.bicep itself, the same deliberate-separate-step pattern as data.bicep/evidence.bicep."
         required: false
         default: ""
+      rate_limit_requests_per_minute:
+        description: "D-019/D-023 addendum: per-caller cap on POST /api/v1/chat and its resume endpoint. 0 (the default) keeps RATE_LIMIT_REQUESTS_PER_MINUTE unset, a no-op -- found live (independent review, 2026-09-13) that this was never wired into this workflow or apps.bicep at all since D-019 merged the code, the same \"wired but inert\" pattern D-022 found for Azure AI Search: rate limiting has never actually run on a real deployment despite the milestone being marked resolved."
+        required: false
+        default: "0"
 
 permissions:
   id-token: write
@@ -106,6 +110,7 @@ jobs:
       AZURE_SEARCH_SERVICE_NAME: ${{ inputs.azure_search_service_name }}
       PDF_FILES_INPUT: ${{ inputs.pdf_files }}
       ADLS_ACCOUNT_URL: ${{ inputs.adls_account_url }}
+      RATE_LIMIT_REQUESTS_PER_MINUTE: ${{ inputs.rate_limit_requests_per_minute }}
     steps:
       - uses: actions/checkout@v4
 
@@ -248,6 +253,7 @@ jobs:
                          azureSearchEndpoint="${{ steps.platform.outputs.azure_search_endpoint }}" \
                          pdfFiles="$PDF_FILES_INPUT" \
                          adlsAccountUrl="$ADLS_ACCOUNT_URL" \
+                         rateLimitRequestsPerMinute="$RATE_LIMIT_REQUESTS_PER_MINUTE" \
             --query properties.outputs -o json > apps-outputs.json
           cat apps-outputs.json
           echo "web_app_fqdn=$(jq -r .webAppFqdn.value apps-outputs.json)" >> "$GITHUB_OUTPUT"
