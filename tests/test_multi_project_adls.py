@@ -317,6 +317,42 @@ def test_a_corrupted_download_is_never_cached_and_a_retry_succeeds_cleanly(tmp_p
     assert resources.ifc_repository.path.read_bytes() == WESTGATE_IFC.read_bytes()
 
 
+def test_a_tampered_on_disk_cache_from_an_earlier_process_is_not_silently_trusted(tmp_path: Path) -> None:
+    """Independent-review finding (P2 #8), confirmed live 2026-09-13:
+    _download_and_publish's own hash verification only ever runs on the
+    download path. A ServiceContainer's in-memory _project_resources
+    cache is cold on every fresh process, but the *disk* cache_dir a
+    previous process (or a different container instance sharing the same
+    project_cache_dir) already populated is not -- _load_project_sync
+    previously trusted it purely on `cache_dir.exists()`, with no re-
+    check against the registry's own recorded content hashes.
+
+    Reproduced directly: download westgate once (a real, verified
+    download), then tamper with the cached PDF's bytes on disk directly
+    -- simulating disk corruption, a manual edit, or reuse across process
+    restarts with no persistent-volume guarantee -- construct a *second*,
+    independent ServiceContainer instance (standing in for a fresh
+    process; no in-memory cache carries over), and confirm it detects the
+    mismatch and re-downloads clean content rather than serving the
+    tampered file.
+    """
+    settings = _settings(tmp_path, adls_account_url="https://fake.dfs.core.windows.net")
+    real_files = _westgate_files()
+    fake_client = FakeDataLakeClient(real_files)
+    container_1 = ServiceContainer(settings, datalake_client_factory=lambda s: fake_client)
+    asyncio.run(container_1.get_project("westgate"))
+
+    cache_dir = settings.project_cache_dir / "westgate" / "westgate-v1"
+    tampered_pdf = cache_dir / "pdf" / "westgate_schedule.pdf"
+    tampered_pdf.write_bytes(b"tampered-bytes-do-not-trust-me")
+
+    container_2 = ServiceContainer(settings, datalake_client_factory=lambda s: fake_client)
+    resources = asyncio.run(container_2.get_project("westgate"))
+
+    assert resources.document_analyzer.pdf_path.read_bytes() == WESTGATE_PDF.read_bytes()
+    assert b"tampered" not in resources.document_analyzer.pdf_path.read_bytes()
+
+
 def test_cache_key_includes_source_set_id_not_project_id_alone(tmp_path: Path) -> None:
     """SPEC-M9 §F: a future source_set_id bump must not silently serve
     stale cached content under the same key.

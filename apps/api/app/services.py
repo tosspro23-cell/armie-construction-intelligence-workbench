@@ -218,6 +218,19 @@ class ServiceContainer:
 
     def _load_project_sync(self, project_id: str, manifest: SourceManifest) -> ProjectResources:
         cache_dir = self.settings.project_cache_dir / project_id / manifest.source_set_id
+        # Independent-review finding (P2 #8), confirmed live 2026-09-13:
+        # a pre-existing cache_dir was trusted purely on the strength of
+        # existing -- _download_and_publish's own hash verification only
+        # ever runs on the download path, never re-checked when this
+        # process's in-memory _project_resources cache is cold but the
+        # on-disk cache_dir from an earlier process (or manual tampering)
+        # is still there. Re-verified here, once per process's first
+        # admission of a given cache_key -- not on every chat request, in
+        # line with the spec's own "no need to re-hash on every chat
+        # request" scope -- so a corrupted/stale/tampered cache is
+        # quarantined and re-downloaded instead of silently served.
+        if cache_dir.exists() and not self._cache_is_valid(cache_dir, manifest):
+            shutil.rmtree(cache_dir, ignore_errors=True)
         if not cache_dir.exists():
             self._download_and_publish(project_id, manifest, cache_dir)
         ifc_repository = IfcRepository(cache_dir / "ifc" / manifest.ifc_file)
@@ -311,6 +324,22 @@ class ServiceContainer:
                 "or unexpected file."
             )
         dest.write_bytes(data)
+
+    @staticmethod
+    def _cache_is_valid(cache_dir: Path, manifest: SourceManifest) -> bool:
+        """Every file's real content hash matches the registry's recorded
+        `content_sha256` -- the same check `_download_verified` already
+        performs on the download path, applied to a pre-existing on-disk
+        cache_dir before trusting it (P2 #8 above).
+        """
+        ifc_path = cache_dir / "ifc" / manifest.ifc_file
+        if not ifc_path.is_file() or hashlib.sha256(ifc_path.read_bytes()).hexdigest() != manifest.file_hashes[manifest.ifc_file]:
+            return False
+        for pdf_file in manifest.pdf_files:
+            pdf_path = cache_dir / "pdf" / pdf_file
+            if not pdf_path.is_file() or hashlib.sha256(pdf_path.read_bytes()).hexdigest() != manifest.file_hashes[pdf_file]:
+                return False
+        return True
 
     @property
     def document_analyzer(self) -> DocumentAnalyzer:
