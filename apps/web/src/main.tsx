@@ -167,7 +167,17 @@ function App() {
     setTurns((current) => [...current, { id: requestId, user: question.trim() || "(request)", assistant: cancelled, timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }), trace: [] }]);
   }
 
-  function newConversation() { setThreadId(undefined); setTurns([]); setTrace([]); setSelected(null); setSelectionCleared(false); setSnapshot(null); setSnapshotCleared(false); setSourcePreference("auto"); setDrawingEvidence(null); }
+  // question was never cleared here, found live while stress-testing
+  // project switching: submit()'s discard-on-switch branch
+  // (switchSeqRef.current !== switchSeqAtStart -- see switchProject
+  // below) returns before its own setQuestion(""), so a question
+  // in flight when the user switches projects survived into the new
+  // conversation; typing a fresh question then silently concatenated
+  // onto the old, abandoned one with no separator, since both landed in
+  // the same textarea. newConversation() is the actual "start clean"
+  // action (called directly, and by switchProject below), so it -- not
+  // submit()'s own success path -- is the right place to guarantee this.
+  function newConversation() { setThreadId(undefined); setTurns([]); setTrace([]); setSelected(null); setSelectionCleared(false); setSnapshot(null); setSnapshotCleared(false); setSourcePreference("auto"); setDrawingEvidence(null); setQuestion(""); }
 
   function switchProject(nextProjectId: string) {
     // OD-40: switching projects implicitly starts a new conversation (the
