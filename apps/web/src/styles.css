@@ -54,7 +54,18 @@ label { display: grid; gap: 8px; color: #bdc9e2; font-size: .85rem; }
 input, textarea { width: 100%; background: #0b1020; color: #f6f8ff; border: 1px solid #344a78; border-radius: 8px; padding: 10px; }
 .chat { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
 .messages { flex: 1; overflow: auto; min-height: 0; display: flex; flex-direction: column; align-items: stretch; align-content: flex-start; gap: 10px; overscroll-behavior: contain; }
-.message-row { display: flex; width: 100%; min-height: 0; align-items: flex-start; }
+/* flex-shrink: 0, not min-height: 0 -- .messages (the scroll container)
+   needs min-height: 0 on itself to be boundable by its own ancestor, but
+   giving that same min-height: 0 to each *row* removed the flexbox
+   default that keeps a flex item from shrinking below its content's
+   natural height. Once total message height exceeded .messages' visible
+   area, the browser was free to compress individual rows shorter than
+   their actual text/buttons needed, and the overflowing content painted
+   into the next row's space instead of the row's own box growing (or the
+   container simply scrolling, which is what overflow: auto is for) --
+   looked exactly like message bubbles piling on top of each other as a
+   conversation grew past one screen. Found live, 2026-09-13. */
+.message-row { display: flex; width: 100%; flex-shrink: 0; align-items: flex-start; }
 .message-row.user { justify-content: flex-end; }
 .message-row.assistant { justify-content: flex-start; }
 .message { display: inline-flex; flex: 0 0 auto; flex-direction: column; align-self: flex-start; width: fit-content; height: auto; min-height: 0; background: #0c1326; border-left: 3px solid #5994ef; padding: 11px 13px; border-radius: 10px; max-width: min(94%, 680px); }

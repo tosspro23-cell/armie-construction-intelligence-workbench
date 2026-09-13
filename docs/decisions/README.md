@@ -1251,3 +1251,38 @@ and the real audit trace contains an `execute_reconciliation` event -- not just 
 *would* classify it correctly, but that the backend now emits the exact step name the existing
 classifier already knows how to bucket. 291 tests pass (290 + 1 new); `ruff` clean; `npm run
 build` clean.
+
+## D-027 — Chat messages visually piled on top of each other once a conversation outgrew one screen
+
+Owner-reported, 2026-09-13, with a screenshot from real production use: as a conversation
+accumulated turns, message bubbles appeared to overlap/stack rather than stay cleanly separated.
+
+**Root cause, confirmed mechanistically, not guessed.** `apps/web/src/styles.css`'s `.messages`
+(the scrollable conversation panel) correctly sets `min-height: 0` on itself -- required so a
+flex child can be bounded by its own ancestor instead of growing to fit all its content. But
+`.message-row` (each individual turn, a flex *item* inside `.messages`) also had `min-height: 0`
+-- removing the browser's default `min-height: auto` protection that normally stops a flex item
+from shrinking below its own content's natural size. With `flex-shrink`'s default of `1` still
+in effect, once the sum of all rows' heights exceeded `.messages`' visible area, the browser was
+free to compress individual rows *shorter* than their actual text/citation-buttons needed --
+rather than the container simply scrolling past the overflow (`overflow: auto`'s whole job) --
+and the squeezed-out content painted over the following row's space instead. This explains every
+observed symptom precisely: absent with a short (2-turn) conversation that fit on screen, present
+once turns grew past one screen; `Element.getBoundingClientRect()` on `.message-row` reported
+perfectly sequential, non-overlapping box positions the whole time (the *boxes* never moved) --
+only their overflowing *painted content* spilled outward; and neither a window resize, a scroll
+reset, nor forcing `.messages`' own `overflow` to toggle changed anything, because none of those
+actions address a flex item being compressed below its content size.
+
+**Fix.** `.message-row` keeps the browser's default `min-height: auto` (simply removed the
+override) and gains an explicit `flex-shrink: 0` -- belt-and-suspenders, since a flex item never
+needs to shrink at all here; the scrollable *container* is what's supposed to handle overflow,
+not the *rows* compressing.
+
+**Verification.** Reproduced against the real deployed app first: built a 7-turn conversation
+(14 rows, deliberately exceeding the visible conversation panel) and confirmed the pile-up
+visually. Live-patched only `.message-row`'s `min-height`/`flex-shrink` via an injected
+stylesheet against that same broken page (no reload, same overflowing conversation) and
+confirmed the identical rows rendered cleanly with proper separation -- isolating the fix to
+exactly this property pair before committing it to source. `npm run build` clean (CSS-only
+change; no backend/test surface).
