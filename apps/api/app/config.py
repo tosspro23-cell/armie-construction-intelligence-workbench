@@ -128,6 +128,20 @@ class Settings(BaseSettings):
     # docstring for why that's proportional to this project's OD-22
     # single-replica pin, not a real distributed limiter.
     rate_limit_requests_per_minute: int | None = None
+    # D-023 addendum: independent-review finding, confirmed live
+    # (2026-09-13) -- rate_limit_requests_per_minute above is keyed by
+    # X-Session-Id, a value the caller self-declares (POST /api/v1/session
+    # issues one, but never records which values it issued, so nothing
+    # rejects a caller who just invents a fresh one per request). A per-
+    # caller-identity cap can never be the actual cost-protection boundary
+    # when the "identity" is free for the caller to regenerate -- this is
+    # a second, independent limiter keyed by a fixed key regardless of
+    # caller, bounding total spend across every caller combined. Unset
+    # (the default) keeps this a no-op, same opt-in shape as every other
+    # optional setting; deliberately not derived automatically from
+    # rate_limit_requests_per_minute above, since the right ratio depends
+    # on how many legitimate concurrent callers a deployment expects.
+    rate_limit_global_requests_per_minute: int | None = None
     route_confidence_threshold: float = 0.70
     pdf_confidence_threshold: float = 0.75
     max_verification_retries: int = 1
