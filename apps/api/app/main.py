@@ -158,10 +158,25 @@ async def project_metadata(project_id: str = "demo") -> dict:
         "project_id": resources.manifest.project_id,
         "capabilities": container.project_metadata()["capabilities"],
     }
+    # asyncio.to_thread, not a direct call: independent-review finding
+    # (P2 #10), confirmed live 2026-09-13 -- SPEC-M9 made this route
+    # `async def` (needed for the `await _resolve_project` above, since a
+    # cold ADLS-mode project load is a real, legitimately-async download),
+    # but a plain `def` FastAPI route runs in Starlette's own external
+    # threadpool automatically, so the CPU/file work below used to get
+    # that offload for free before this milestone -- an `async def` route
+    # runs directly on the event loop instead, and neither call here has
+    # any `await` of its own, so both would otherwise block every other
+    # concurrent request, health check, and cancellation for as long as
+    # they take. `ifc_repository.metadata()` is a plain method (not
+    # cached -- only `.model`, which it reads from, is a
+    # `@cached_property`), and `document_analyzer.inspect()` re-opens/
+    # re-reads the PDF's first page on every single call -- both
+    # genuinely block on every request, not just a cold project's first.
     if metadata["ifc_available"]:
-        metadata["ifc"] = resources.ifc_repository.metadata()
+        metadata["ifc"] = await asyncio.to_thread(resources.ifc_repository.metadata)
     if metadata["pdf_available"]:
-        metadata["pdf"] = resources.document_analyzer.inspect()
+        metadata["pdf"] = await asyncio.to_thread(resources.document_analyzer.inspect)
     return metadata
 
 
@@ -193,7 +208,12 @@ async def project_pdf_page(page_number: int, project_id: str = "demo"):
     analyzer = resources.document_analyzer
     if page_number < 1 or not analyzer.available:
         raise HTTPException(status_code=404, detail="Requested PDF page was not found.")
-    return FileResponse(analyzer.render_page(page_number, scale=1.5), media_type="image/png")
+    # asyncio.to_thread: see project_metadata's own comment above for why
+    # an async def route here needs this explicitly -- render_page is the
+    # most expensive of these three (PyMuPDF rasterization + a PNG write
+    # to disk, uncached, on every single call).
+    rendered_path = await asyncio.to_thread(analyzer.render_page, page_number, scale=1.5)
+    return FileResponse(rendered_path, media_type="image/png")
 
 
 @app.get("/api/v1/evidence/{filename}")
@@ -244,10 +264,15 @@ async def project_viewer_elements(project_id: str = "demo") -> dict:
     repository = resources.ifc_repository
     if not repository.available:
         raise HTTPException(status_code=404, detail="Configured IFC source file was not found.")
+    # asyncio.to_thread: see project_metadata's own comment above. Only
+    # the first access per loaded IfcRepository instance genuinely parses
+    # geometry (`@cached_property`), but that first parse is real
+    # ifcopenshell work worth deferring off the event loop regardless.
+    elements = await asyncio.to_thread(lambda: repository.viewer_elements)
     return {
         "source_file": repository.path.name,
         "representation": "ifcopenshell_bounding_geometry",
-        "elements": repository.viewer_elements,
+        "elements": elements,
     }
 
 
