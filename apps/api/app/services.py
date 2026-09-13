@@ -270,7 +270,31 @@ class ServiceContainer:
                 pdf_dest.parent.mkdir(parents=True, exist_ok=True)
                 self._download_verified(client, project_id, "pdf", pdf_file, manifest.file_hashes[pdf_file], pdf_dest)
             cache_dir.parent.mkdir(parents=True, exist_ok=True)
-            tmp_dir.rename(cache_dir)
+            try:
+                tmp_dir.rename(cache_dir)
+            except OSError:
+                # Independent-review finding (P2 #6), confirmed live
+                # 2026-09-13: get_project's asyncio.Lock only protects the
+                # *coroutine* waiting on this download -- if that caller is
+                # cancelled (e.g. this session's own request-timeout fix,
+                # or a client disconnect), the lock is released via the
+                # `async with` block's normal cleanup, but the real OS
+                # thread this method runs in keeps running underneath it
+                # (asyncio.to_thread cancellation does not stop the worker
+                # thread -- an already-documented, separate gap; see
+                # REVIEW_REQUIRED.md's M4 entry). A fresh retry for the
+                # same project then races this orphaned thread to publish
+                # the same cache_dir, and whichever renames second hits
+                # "Directory not empty" even though both downloads were
+                # independently verified against the exact same registry
+                # hashes. If someone else already published cache_dir by
+                # the time we get here, that is the correct outcome to
+                # defer to, not a real failure -- discard our own
+                # redundant copy. Anything else (permissions, disk full,
+                # cache_dir existing as a plain file) still re-raises.
+                if not cache_dir.is_dir():
+                    raise
+                shutil.rmtree(tmp_dir, ignore_errors=True)
         except Exception:
             shutil.rmtree(tmp_dir, ignore_errors=True)
             raise

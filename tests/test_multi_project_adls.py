@@ -244,6 +244,51 @@ def test_concurrent_first_access_triggers_exactly_one_download(tmp_path: Path) -
     assert len(fake_client.read_calls) == 2
 
 
+def test_an_orphaned_download_thread_racing_a_fresh_retry_does_not_crash_either(tmp_path: Path) -> None:
+    """Independent-review finding (P2 #6), confirmed live 2026-09-13:
+    get_project's asyncio.Lock only protects the *coroutine* awaiting a
+    download -- if that caller is cancelled (this session's own request-
+    timeout fix, or a client disconnect), the lock releases via the
+    `async with` block's normal cleanup, but the real OS thread
+    _download_and_publish runs in keeps going underneath it
+    (asyncio.to_thread cancellation does not stop the worker thread -- an
+    already-documented, separate gap). A fresh retry for the same project
+    then races that orphaned thread to publish the same cache_dir.
+
+    Reproduced directly (bypassing the asyncio lock entirely, since the
+    whole point is that it does not protect this case): two real OS
+    threads both run _download_and_publish for the exact same cache_dir
+    concurrently. Before the fix, whichever renamed second raised
+    "Directory not empty" and the project failed to load even though both
+    downloads were independently verified against the same content hash.
+    """
+    settings = _settings(tmp_path, adls_account_url="https://fake.dfs.core.windows.net")
+    fake_client = FakeDataLakeClient(_westgate_files())
+    container = ServiceContainer(settings, datalake_client_factory=lambda s: fake_client)
+    manifest = container._project_registry["westgate"]
+    cache_dir = settings.project_cache_dir / "westgate" / manifest.source_set_id
+
+    errors: list[Exception] = []
+
+    def run_download() -> None:
+        try:
+            container._download_and_publish("westgate", manifest, cache_dir)
+        except Exception as error:  # noqa: BLE001 -- captured for the assertion below, not swallowed
+            errors.append(error)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        future_a = pool.submit(run_download)
+        future_b = pool.submit(run_download)
+        future_a.result()
+        future_b.result()
+
+    assert errors == []
+    assert cache_dir.is_dir()
+    assert (cache_dir / "ifc" / "westgate.ifc").read_bytes() == WESTGATE_IFC.read_bytes()
+    # No leftover temp directory from whichever attempt deferred to the other.
+    assert list(settings.project_cache_dir.glob("tmp*")) == []
+
+
 def test_a_corrupted_download_is_never_cached_and_a_retry_succeeds_cleanly(tmp_path: Path) -> None:
     settings = _settings(tmp_path, adls_account_url="https://fake.dfs.core.windows.net")
     real_files = _westgate_files()
