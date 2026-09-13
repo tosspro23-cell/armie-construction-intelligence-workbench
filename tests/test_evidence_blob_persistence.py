@@ -192,3 +192,63 @@ def test_evidence_endpoint_falls_back_to_local_when_blob_storage_does_not_have_i
         assert response.content == b"\x89PNG-local-only-bytes"
 
     get_settings.cache_clear()
+
+
+def test_evidence_endpoint_rejects_the_literal_parent_directory_reference(monkeypatch, tmp_path):
+    """Found in an independent self-review (2026-09-13): the basename-
+    containment check (`Path(filename).name != filename`) is meant to
+    reject any path-traversal attempt, but `Path("..").name` returns
+    `".."` unchanged -- a pathlib quirk, not a slip in `..` specifically
+    being special-cased elsewhere -- so the literal two-character string
+    `".."` passed the check unmodified. `Path("foo/../bar").name` etc. are
+    all correctly caught (any string containing a `/` changes under
+    `.name`); only the bare `".."` segment slipped through.
+
+    A literal `..` in the URL is normalized away by any well-behaved HTTP
+    client before the request is even sent (confirmed: `httpx.Request`
+    resolves `.../evidence/..` to `.../v1` client-side per RFC 3986 dot-
+    segment removal) -- so this is reproduced the way a real attacker
+    would actually reach it: percent-encoded (`%2e%2e`), which bypasses
+    client-side normalization and is decoded back to `..` by Starlette's
+    own routing before `filename` is bound. Confirmed against the
+    pre-fix code: this reached `FileResponse` with a *directory* path
+    (`evidence_dir`'s parent) and raised an unhandled `RuntimeError`
+    ("... is not a file"), an uncaught-exception/500 path, not a clean
+    400 -- the check's own claim ("prevents ... from exposing arbitrary
+    paths") was not accurate for this input, even though FastAPI's
+    default `{filename}: str` path converter (no literal `/` possible)
+    bounds the real damage to a crash, never a chosen file's content: a
+    real file living just outside `evidence_dir` proves that content is
+    still never disclosed, before or after this fix.
+    """
+    monkeypatch.setenv("DATA_DIR", str(ROOT / "demo_data"))
+    monkeypatch.setenv("IFC_FILE", "armie_demo.ifc")
+    monkeypatch.setenv("PDF_FILES", '["armie_demo_schedule.pdf"]')
+    monkeypatch.setenv("AUDIT_STORE_PATH", str(tmp_path / "audit.jsonl"))
+    evidence_dir = tmp_path / "evidence"
+    monkeypatch.setenv("EVIDENCE_DIR", str(evidence_dir))
+    get_settings.cache_clear()
+
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "outside-evidence-dir-secret.txt").write_bytes(b"should never be servable")
+    fake_client = FakeBlobContainerClient()
+
+    import app.main as main_module
+
+    # raise_server_exceptions=False: pre-fix, this reaches an unhandled
+    # RuntimeError (FileResponse refusing to serve a directory), which
+    # TestClient's own default (True) would instead re-raise in this test
+    # process -- False sees the same 500 response shape a real deployed
+    # app's ServerErrorMiddleware would actually return to a caller.
+    with TestClient(main_module.app, raise_server_exceptions=False) as client:
+        main_module.app.state.container.blob_container_client_factory = lambda s: fake_client
+
+        # Percent-encoded, not a literal "..": see the docstring above --
+        # a literal ".." never reaches the server at all, normalized away
+        # client-side before this test could exercise the real defect.
+        response = client.get("/api/v1/evidence/%2e%2e")
+
+        assert response.status_code == 400
+        assert b"should never be servable" not in response.content
+
+    get_settings.cache_clear()
