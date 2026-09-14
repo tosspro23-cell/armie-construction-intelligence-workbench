@@ -53,6 +53,67 @@ class ReconciliationItem(BaseModel):
     detail: str
 
 
+class FindingStatus(str, Enum):
+    """SPEC-M11 §5: an EngineeringFinding's lifecycle. `status` is created
+    directly as OPEN -- the instant before persistence is not a state any
+    human ever acts on, so there is no separate persisted DETECTED value.
+    WAIVED/FALSE_POSITIVE/VERIFIED_CLOSED are terminal: no further
+    transition is accepted from them except a fresh auto-creation (see
+    FindingStore.upsert_from_reconciliation) if reconciliation detects the
+    same tag/finding_type again later.
+    """
+
+    OPEN = "open"
+    ACKNOWLEDGED = "acknowledged"
+    ACTION_REQUIRED = "action_required"
+    RESOLVED = "resolved"
+    VERIFIED_CLOSED = "verified_closed"
+    WAIVED = "waived"
+    FALSE_POSITIVE = "false_positive"
+
+
+class FindingHistoryEntry(BaseModel):
+    """One append-only transition record. `actor_session_id` is the
+    caller's `X-Session-Id` (D-016) -- a per-tab correlation token, not a
+    real login -- for whichever transition a human triggered; `None` for
+    the system's own automatic transitions (initial creation, re-verify).
+    """
+
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    from_status: FindingStatus | None = None
+    to_status: FindingStatus
+    actor_session_id: str | None = None
+    note: str | None = None
+    at: datetime = Field(default_factory=utc_now)
+
+
+class EngineeringFinding(BaseModel):
+    """SPEC-M11: a persisted, human-reviewable promotion of one non-matched
+    `ReconciliationItem` -- reconciliation's own join/comparison is
+    unchanged (OD-15's door/window-only scope is not broadened by this);
+    this only adds a lifecycle on top of an already-computed result.
+    """
+
+    finding_id: str = Field(default_factory=lambda: str(uuid4()))
+    project_id: str
+    source_set_id: str
+    trace_id: str
+    tag: str
+    finding_type: Literal["dimension_mismatch", "missing_in_pdf", "missing_in_ifc"]
+    severity: Literal["low", "medium", "high"]
+    status: FindingStatus = FindingStatus.OPEN
+    detail: str
+    ifc_width_m: float | None = None
+    ifc_height_m: float | None = None
+    pdf_width_m: float | None = None
+    pdf_height_m: float | None = None
+    evidence_refs: list[str] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+    last_actor_session_id: str | None = None
+    history: list[FindingHistoryEntry] = Field(default_factory=list)
+
+
 class ViewerContext(BaseModel):
     selected_global_ids: list[str] = Field(default_factory=list)
     selected_express_ids: list[int] = Field(default_factory=list)

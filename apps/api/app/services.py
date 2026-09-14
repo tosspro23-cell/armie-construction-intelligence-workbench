@@ -12,7 +12,8 @@ from app.config import Settings
 from app.evidence_storage import get_blob_container_client
 from app.persistence.audit_store import AuditStore
 from app.persistence.conversation_store import ConversationStore
-from app.persistence.factory import get_audit_store, get_conversation_store
+from app.persistence.factory import get_audit_store, get_conversation_store, get_finding_store
+from app.persistence.finding_store import FindingStore
 from app.providers.base import EmbeddingProvider, ModelProvider
 from app.providers.factory import (
     get_embedding_provider,
@@ -33,6 +34,7 @@ BlobContainerClientFactory = Callable[[Settings], "object | None"]
 DataLakeClientFactory = Callable[[Settings], "object | None"]
 ConversationStoreFactory = Callable[[Settings], ConversationStore]
 AuditStoreFactory = Callable[[Settings], AuditStore]
+FindingStoreFactory = Callable[[Settings], FindingStore]
 
 
 class ProjectNotFoundError(LookupError):
@@ -120,10 +122,12 @@ class ServiceContainer:
         datalake_client_factory: DataLakeClientFactory = get_datalake_client,
         conversation_store_factory: ConversationStoreFactory = get_conversation_store,
         audit_store_factory: AuditStoreFactory = get_audit_store,
+        finding_store_factory: FindingStoreFactory = get_finding_store,
     ) -> None:
         self.settings = settings
         self.audit_store = audit_store_factory(settings)
         self.conversation_store = conversation_store_factory(settings)
+        self.finding_store = finding_store_factory(settings)
         self.ifc_repository = IfcRepository(settings.ifc_path)
         # SPEC-M6: one DocumentAnalyzer per configured document, keyed by
         # filename, in `settings.pdf_files`' own order -- not filesystem/

@@ -71,6 +71,12 @@ jobs:
           psql "$TEST_DATABASE_URL" -f apps/api/migrations/0001_conversations_and_audit_events.sql
           psql "$TEST_DATABASE_URL" -f apps/api/migrations/0003_thread_projects.sql
           psql "$TEST_DATABASE_URL" -f apps/api/migrations/0005_backfill_thread_projects_demo.sql
+          # 0007 is the real Azure production role's least-privilege grant
+          # (like 0002a/0002b/0004 before it), not applicable to CI's own
+          # superuser `armie` role -- deliberately not run here. D-024
+          # already fixed this exact "CI silently only ran 0001" gap once;
+          # add every new migration here going forward, not just this one.
+          psql "$TEST_DATABASE_URL" -f apps/api/migrations/0006_engineering_findings.sql
       - name: Run backend test suite
         run: PYTHONPATH=apps/api python3 -m pytest -q
 

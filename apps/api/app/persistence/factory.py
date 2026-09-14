@@ -3,6 +3,7 @@ from __future__ import annotations
 from app.config import Settings
 from app.persistence.audit_store import AuditStore, JsonlAuditStore
 from app.persistence.conversation_store import ConversationStore, InMemoryConversationStore
+from app.persistence.finding_store import FindingStore, InMemoryFindingStore
 
 
 def get_conversation_store(settings: Settings) -> ConversationStore:
@@ -25,3 +26,16 @@ def get_audit_store(settings: Settings) -> AuditStore:
 
         return PostgresAuditStore(settings.database_url, use_managed_identity=settings.database_use_managed_identity)
     return JsonlAuditStore(settings.audit_store_path)
+
+
+def get_finding_store(settings: Settings) -> FindingStore:
+    """SPEC-M11: same opt-in-when-unset seam as the two factories above --
+    `database_url` unset keeps findings process-local (fine for local
+    development and the default deployment), setting it opts into
+    Postgres-backed durability across a Container App revision replacement.
+    """
+    if settings.database_url:
+        from app.persistence.postgres_store import PostgresFindingStore
+
+        return PostgresFindingStore(settings.database_url, use_managed_identity=settings.database_use_managed_identity)
+    return InMemoryFindingStore()

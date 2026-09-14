@@ -9,7 +9,7 @@ from psycopg.conninfo import make_conninfo
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
-from app.schemas.models import AuditEvent
+from app.schemas.models import AuditEvent, EngineeringFinding, FindingHistoryEntry, FindingStatus
 
 # The Cognitive Services scope reused for Azure OpenAI (SPEC-M3, OD-23) does
 # not apply here: an Entra ID access token usable as a Postgres password
@@ -236,6 +236,155 @@ class PostgresAuditStore:
             data["id"] = str(data["id"])
             events.append(AuditEvent.model_validate(data))
         return events
+
+    def close(self) -> None:
+        self._pool.close()
+
+
+# SPEC-M11 §4B: findings live/resolved/pending-verification still count as
+# "the active one for this tag+finding_type" -- matches
+# migrations/0006_engineering_findings.sql's own partial unique index
+# predicate exactly. Kept as a literal SQL fragment, not built from the
+# Python-side ACTIVE_STATUSES constant, so the two never drift silently out
+# of sync with each other without a diff showing it.
+_ACTIVE_STATUSES_SQL = "('open', 'acknowledged', 'action_required', 'resolved')"
+
+
+class PostgresFindingStore:
+    """``FindingStore`` backed by Azure Database for PostgreSQL (SPEC-M11).
+
+    Same interface as ``InMemoryFindingStore`` -- callers never need to
+    know which one is live.
+    """
+
+    def __init__(self, database_url: str, *, use_managed_identity: bool = False) -> None:
+        self._pool = _make_pool(database_url, use_managed_identity=use_managed_identity)
+
+    def upsert_from_reconciliation(
+        self, *, project_id: str, source_set_id: str, trace_id: str, tag: str,
+        finding_type: str, severity: str, detail: str,
+        ifc_width_m: float | None, ifc_height_m: float | None,
+        pdf_width_m: float | None, pdf_height_m: float | None,
+        evidence_refs: list[str],
+    ) -> EngineeringFinding:
+        from uuid import uuid4
+        finding_id = str(uuid4())
+        with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            # `(xmax = 0)` is the standard Postgres idiom for "did this
+            # INSERT...ON CONFLICT DO UPDATE actually insert a new row, or
+            # touch an existing one" -- xmax is unset (0) only for a row
+            # this same command just created. Needed here because, unlike
+            # the simpler upserts elsewhere in this file, only a genuine
+            # *insert* also gets a "Detected by reconciliation" history row.
+            cur.execute(
+                f"""
+                INSERT INTO engineering_findings
+                    (finding_id, project_id, source_set_id, trace_id, tag, finding_type, severity,
+                     status, detail, ifc_width_m, ifc_height_m, pdf_width_m, pdf_height_m, evidence_refs)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, 'open', %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (project_id, tag, finding_type) WHERE status IN {_ACTIVE_STATUSES_SQL}
+                DO UPDATE SET
+                    trace_id = EXCLUDED.trace_id, detail = EXCLUDED.detail,
+                    ifc_width_m = EXCLUDED.ifc_width_m, ifc_height_m = EXCLUDED.ifc_height_m,
+                    pdf_width_m = EXCLUDED.pdf_width_m, pdf_height_m = EXCLUDED.pdf_height_m,
+                    evidence_refs = EXCLUDED.evidence_refs, updated_at = now()
+                RETURNING *, (xmax = 0) AS inserted
+                """,
+                (
+                    finding_id, project_id, source_set_id, trace_id, tag, finding_type, severity,
+                    detail, ifc_width_m, ifc_height_m, pdf_width_m, pdf_height_m, json.dumps(evidence_refs),
+                ),
+            )
+            row = cur.fetchone()
+            was_inserted = row.pop("inserted")
+            if was_inserted:
+                cur.execute(
+                    """
+                    INSERT INTO engineering_finding_history (id, finding_id, from_status, to_status, actor_session_id, note)
+                    VALUES (%s, %s, NULL, 'open', NULL, 'Detected by reconciliation.')
+                    """,
+                    (str(uuid4()), row["finding_id"]),
+                )
+            conn.commit()
+        return self.get(row["finding_id"])  # re-read: simplest way to get history consistently populated either branch
+
+    def get(self, finding_id: str) -> EngineeringFinding | None:
+        with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT * FROM engineering_findings WHERE finding_id = %s", (finding_id,))
+            row = cur.fetchone()
+            if row is None:
+                return None
+            cur.execute(
+                "SELECT id, from_status, to_status, actor_session_id, note, at "
+                "FROM engineering_finding_history WHERE finding_id = %s ORDER BY at ASC",
+                (finding_id,),
+            )
+            history_rows = cur.fetchall()
+        return self._to_model(row, history_rows)
+
+    def list_for_project(self, project_id: str, status: FindingStatus | None = None) -> list[EngineeringFinding]:
+        with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            if status is not None:
+                cur.execute(
+                    "SELECT * FROM engineering_findings WHERE project_id = %s AND status = %s ORDER BY created_at DESC",
+                    (project_id, status.value),
+                )
+            else:
+                cur.execute(
+                    "SELECT * FROM engineering_findings WHERE project_id = %s ORDER BY created_at DESC",
+                    (project_id,),
+                )
+            rows = cur.fetchall()
+        # History is fetched per-finding via get() by callers that need it
+        # (the list view itself never needs to render another finding's
+        # full history) -- avoids an N+1 history join for what is, in this
+        # milestone, a list endpoint that only shows status/detail/severity.
+        return [self._to_model(row, []) for row in rows]
+
+    def append_transition(
+        self, finding_id: str, *, to_status: FindingStatus, actor_session_id: str | None, note: str | None,
+        updates: dict | None = None,
+    ) -> EngineeringFinding:
+        from uuid import uuid4
+        existing = self.get(finding_id)
+        if existing is None:
+            raise KeyError(finding_id)
+        set_clauses = ["status = %s", "last_actor_session_id = %s", "updated_at = now()"]
+        params: list[Any] = [to_status.value, actor_session_id]
+        for key, value in (updates or {}).items():
+            set_clauses.append(f"{key} = %s")
+            params.append(value)
+        params.append(finding_id)
+        with self._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(f"UPDATE engineering_findings SET {', '.join(set_clauses)} WHERE finding_id = %s", params)
+            cur.execute(
+                """
+                INSERT INTO engineering_finding_history (id, finding_id, from_status, to_status, actor_session_id, note)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (str(uuid4()), finding_id, existing.status.value, to_status.value, actor_session_id, note),
+            )
+            conn.commit()
+        return self.get(finding_id)
+
+    @staticmethod
+    def _to_model(row: dict, history_rows: list[dict]) -> EngineeringFinding:
+        return EngineeringFinding(
+            finding_id=row["finding_id"], project_id=row["project_id"], source_set_id=row["source_set_id"],
+            trace_id=row["trace_id"], tag=row["tag"], finding_type=row["finding_type"], severity=row["severity"],
+            status=row["status"], detail=row["detail"],
+            ifc_width_m=row["ifc_width_m"], ifc_height_m=row["ifc_height_m"],
+            pdf_width_m=row["pdf_width_m"], pdf_height_m=row["pdf_height_m"],
+            evidence_refs=row["evidence_refs"], created_at=row["created_at"], updated_at=row["updated_at"],
+            last_actor_session_id=row["last_actor_session_id"],
+            history=[
+                FindingHistoryEntry(
+                    id=str(item["id"]), from_status=item["from_status"], to_status=item["to_status"],
+                    actor_session_id=item["actor_session_id"], note=item["note"], at=item["at"],
+                )
+                for item in history_rows
+            ],
+        )
 
     def close(self) -> None:
         self._pool.close()
