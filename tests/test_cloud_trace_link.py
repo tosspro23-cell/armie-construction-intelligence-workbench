@@ -85,7 +85,18 @@ class _RecordingSpan:
         self.attributes[key] = value
 
 
-def test_chat_tags_the_current_otel_span_with_this_requests_own_trace_id(monkeypatch, tmp_path):
+def test_chat_tags_the_current_otel_span_with_the_responses_own_trace_id_not_the_request_id(monkeypatch, tmp_path):
+    """D-031: the original D-028 fix tagged the span *before* calling
+    AgentService.invoke, using the caller-supplied request_id -- but
+    invoke() always mints its own fresh trace_id internally
+    (str(uuid4()), graph.py), completely independent of request_id.
+    Everything else in the system (AuditStore, citations, cloud_trace_
+    url/query) keys on response.trace_id, not request_id, so tagging with
+    request_id pointed the whole cloud-provenance link at telemetry that
+    was never actually associated with the answer. Found live, 2026-09-14,
+    from a real Application Insights query returning zero rows for a real,
+    successful answer.
+    """
     monkeypatch.setenv("DATA_DIR", str(ROOT / "demo_data"))
     monkeypatch.setenv("IFC_FILE", "armie_demo.ifc")
     monkeypatch.setenv("PDF_FILES", '["armie_demo_schedule.pdf"]')
@@ -102,4 +113,48 @@ def test_chat_tags_the_current_otel_span_with_this_requests_own_trace_id(monkeyp
         response = client.post("/api/v1/chat", json={"request_id": "trace-tag-1", "question": "How many doors are there?"})
 
     assert response.status_code == 200
-    assert recorded_span.attributes.get("app.trace_id") == "trace-tag-1"
+    body = response.json()
+    assert body["trace_id"] != "trace-tag-1"  # AgentService.invoke's own fresh uuid4, not the request_id
+    assert recorded_span.attributes.get("app.trace_id") == body["trace_id"]
+
+
+def test_chat_tags_the_span_on_a_terminal_response_exit_using_that_responses_trace_id(monkeypatch, tmp_path):
+    """_terminal_response's own early-exit paths (project-bind failure,
+    timeout, cancelled, ...) never reach AgentService.invoke, and
+    _terminal_response itself sets trace_id=request_id for the AgentResponse
+    it builds -- so this is the one case where the two IDs are legitimately
+    the same value. Exercised here via a genuinely-reachable exit
+    (conversations.get raising on an unreadable thread, patched directly
+    rather than trying to force a project-bind failure through real I/O),
+    confirming _tag_span_with_trace_id's single call site handles a
+    _terminal_response exit correctly without needing to know in advance
+    which of the two IDs a given branch happens to use.
+    """
+    monkeypatch.setenv("DATA_DIR", str(ROOT / "demo_data"))
+    monkeypatch.setenv("IFC_FILE", "armie_demo.ifc")
+    monkeypatch.setenv("PDF_FILES", '["armie_demo_schedule.pdf"]')
+    monkeypatch.setenv("AUDIT_STORE_PATH", str(tmp_path / "audit.jsonl"))
+    monkeypatch.setenv("EVIDENCE_DIR", str(tmp_path / "evidence"))
+    get_settings.cache_clear()
+
+    import app.main as main_module
+
+    recorded_span = _RecordingSpan()
+    monkeypatch.setattr(main_module.otel_trace, "get_current_span", lambda: recorded_span)
+
+    def _raise(*args, **kwargs):
+        raise RuntimeError("conversation store unavailable")
+
+    # Patched only after TestClient's own `with` entry runs `lifespan` and
+    # constructs the real app.state.container -- patching the module-level
+    # `app`'s container before that point patches a stale/nonexistent
+    # object, since a fresh container replaces it on every lifespan start.
+    with TestClient(main_module.app) as client:
+        monkeypatch.setattr(main_module.app.state.container.conversation_store, "get", _raise)
+        response = client.post("/api/v1/chat", json={"request_id": "trace-tag-2", "question": "How many doors are there?"})
+
+    assert response.status_code == 200  # _terminal_response is itself an honest 200 (D-004/D-010), not an HTTP error
+    body = response.json()
+    assert body["disposition"] == "error"
+    assert body["trace_id"] == "trace-tag-2"
+    assert recorded_span.attributes.get("app.trace_id") == "trace-tag-2"

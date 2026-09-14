@@ -1409,3 +1409,45 @@ tenant/resource ID) -- the copy-query fallback works independently of whether th
 does. 294 tests pass; `ruff` clean; `npm run build` clean. The bbox-padding and crop-sizing CSS
 fixes have no dedicated test (no frontend test harness, same as D-029) -- verified visually
 against the live app after deployment.
+
+## D-031 — The Cloud Provenance link was tagging the wrong trace ID entirely
+
+Found live, 2026-09-14, the hard way: the owner ran the exact KQL D-030's "Copy query" button
+copied, against the real Application Insights resource, through both the Portal UI and its own
+Copilot agent, and got zero rows every time -- for a real, successfully-answered chat request.
+Diagnosed directly with `az monitor app-insights query` (read-only, three targeted checks) rather
+than guessing again: (1) `requests | count` over the last 24h returned real, non-zero volume, so
+the telemetry *pipeline* itself was healthy, not broken; (2) recent `POST /api/v1/chat` rows *did*
+carry a populated `customDimensions["app.trace_id"]` -- so the tagging mechanism from D-028 was
+firing successfully; (3) `search *` for the owner's own specific trace ID across every telemetry
+table found it exactly once, but only inside the *URL* of a `GET /api/v1/traces/{trace_id}` call
+(that endpoint naturally has the ID in its path; unrelated to any tagging) -- never on the
+`POST /api/v1/chat` row whose answer it actually belonged to.
+
+**Root cause.** `main.py`'s `chat()` (D-028) tagged the span with `request_id` -- the
+caller-supplied/generated ID used for `app.state.requests` tracking, D-016 ownership, and rate
+limiting -- called *before* `agent.invoke(...)` ever ran. But `AgentService.invoke` (`graph.py`)
+always mints its own fresh `trace_id` internally (`"trace_id": str(uuid4())` in its initial
+`GraphState`), completely independent of whatever `request_id` the caller happened to supply.
+Every consumer that actually matters for the Cloud Provenance link -- `AuditStore`, citations,
+`/api/v1/traces/{trace_id}`, and `_cloud_trace_url`/`_cloud_trace_query` themselves -- keys on
+`response.trace_id`, not `request_id`. Tagging with `request_id` before the real value even
+existed pointed the whole feature at a UUID nothing else in the system ever looks up an answered
+response by. (`_terminal_response`'s own early-exit paths happen to set `trace_id=request_id` for
+the `AgentResponse` they construct, which is exactly why D-028's own tests -- which only exercised
+the deterministic fast-path success case -- passed: nothing in them distinguished the two IDs.)
+
+**Fix.** `_tag_span_with_trace_id(response)` tags the span from the actual `AgentResponse` about
+to be returned, applied at every one of `chat()`'s exit points (all seven `_terminal_response`
+early exits plus the final success return) via one call site, rather than needing to know in
+advance which of the two IDs a given branch happens to use.
+
+**Verification.** `tests/test_cloud_trace_link.py`'s existing span-tagging test was itself
+rewritten, not just supplemented -- it had asserted the old, wrong behavior (`request_id` on the
+span) and passed only because it never distinguished the two IDs; a documented defect fix per
+this project's own stop-condition discipline, not a silent adjustment. It now asserts
+`recorded_span.attributes["app.trace_id"] == body["trace_id"]` and explicitly that this differs
+from the input `request_id`. A second new test covers the legitimate `_terminal_response` case
+(request_id and trace_id are the same value there by that helper's own design) via a real,
+reachable failure path (a patched `conversation_store.get` raising), not a mock of the exit logic
+itself. 295 tests pass (294 + 1 net new); `ruff` clean; `npm run build` unaffected (backend-only).

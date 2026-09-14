@@ -316,6 +316,35 @@ def _terminal_response(request: ChatRequest, request_id: str, disposition: Dispo
     )
 
 
+def _tag_span_with_trace_id(response: AgentResponse) -> AgentResponse:
+    """D-028/D-031: tags the current request's own OpenTelemetry span with
+    the trace_id AuditStore/citations/`/api/v1/traces/{trace_id}`/
+    `execution_metadata.cloud_trace_url` all actually key on --
+    `response.trace_id`, not the caller-supplied `request_id` chat() also
+    carries.
+
+    Found live, 2026-09-14, from the owner's own Application Insights
+    query returning zero rows for a real, successful answer's Cloud
+    Provenance link: `_terminal_response` above happens to set
+    `trace_id=request_id` for every early-exit path, but the successful
+    path's `response` comes from `AgentService.invoke`, which always mints
+    its own fresh `trace_id` internally (`str(uuid4())`, `graph.py`)
+    completely independent of `request_id` -- confirmed by reading
+    `AgentService.invoke`'s own `GraphState` construction, not assumed.
+    Tagging with `request_id` before that call, as the original D-028 fix
+    did, tagged the span with a UUID nothing else in the system ever
+    looks up an answered response by. Called once, on the actual response
+    about to be returned, covering every exit path uniformly instead of
+    needing to know which of the two IDs a given branch happens to use.
+
+    Safe to call unconditionally: see D-028's own note on
+    `get_current_span()` being a harmless no-op when telemetry isn't
+    configured.
+    """
+    otel_trace.get_current_span().set_attribute("app.trace_id", response.trace_id)
+    return response
+
+
 async def _safe_audit_append(audit_store, event: AuditEvent) -> str | None:
     """Best-effort audit write for a terminal branch (cancelled/timeout):
     the response's disposition is already fully determined by this point,
@@ -363,23 +392,11 @@ async def chat(request: ChatRequest, x_session_id: str | None = Header(default=N
     # keeps the record unrestricted, matching pre-D-016 behaviour.
     record = {"status": "running", "stage": "queued", "task": asyncio.current_task(), "trace_id": request_id, "session_id": x_session_id}
     app.state.requests[request_id] = record
-    # D-028: tags this request's own OpenTelemetry span with the app's own
-    # trace_id (AuditStore/citations/`/api/v1/traces/{trace_id}` all key on
-    # this value already) so the two independently-generated trace-id
-    # schemes -- this app's own UUID, and whatever OpenTelemetry's FastAPI
-    # auto-instrumentation assigns the underlying HTTP span -- become
-    # joinable in Application Insights via a `customDimensions` filter.
-    # Safe to call unconditionally: when telemetry.configure_telemetry
-    # never ran (otel_exporter_connection_string unset, every deployment
-    # before this fix and every test), get_current_span() returns
-    # OpenTelemetry's own no-op span and set_attribute is a documented
-    # harmless no-op on it.
-    otel_trace.get_current_span().set_attribute("app.trace_id", request_id)
     try:
         bound_project_id = await asyncio.to_thread(conversations.bind_project, thread_id, requested_project_id)
     except Exception as error:
         record.update(status="error", stage="project_bind_error", error=str(error))
-        return _terminal_response(request, request_id, Disposition.ERROR, f"The request failed safely: could not resolve project binding: {error}")
+        return _tag_span_with_trace_id(_terminal_response(request, request_id, Disposition.ERROR, f"The request failed safely: could not resolve project binding: {error}"))
     if bound_project_id != requested_project_id:
         record.update(status="error", stage="project_mismatch")
         raise HTTPException(
@@ -408,7 +425,7 @@ async def chat(request: ChatRequest, x_session_id: str | None = Header(default=N
         record.update(status="timeout", stage="project_load_timeout")
         audit_error = await _safe_audit_append(app.state.container.audit_store, AuditEvent(trace_id=request_id, thread_id=request.thread_id or request_id, step="request", event_type="timeout", summary="Loading the project's source files exceeded the bounded request deadline.", payload={"request_id": request_id, "project_id": bound_project_id, "timeout_seconds": settings.request_timeout_seconds}, project_id=bound_project_id))
         extra = {"audit_persist_error": audit_error} if audit_error else {}
-        return _terminal_response(request, request_id, Disposition.TIMEOUT, "The request exceeded its time limit while loading the project's source files. Please retry shortly.", **extra)
+        return _tag_span_with_trace_id(_terminal_response(request, request_id, Disposition.TIMEOUT, "The request exceeded its time limit while loading the project's source files. Please retry shortly.", **extra))
     except Exception as error:
         # Independent-review finding, confirmed live (2026-09-13): this
         # previously had no except-Exception branch at all, so an ADLS
@@ -419,7 +436,7 @@ async def chat(request: ChatRequest, x_session_id: str | None = Header(default=N
         # terminal status, so GET /api/v1/requests/{request_id} reported
         # "running" forever for a request that had already failed.
         record.update(status="error", stage="project_load_error", error=str(error))
-        return _terminal_response(request, request_id, Disposition.ERROR, f"The request failed safely: could not load the project's source files: {error}")
+        return _tag_span_with_trace_id(_terminal_response(request, request_id, Disposition.ERROR, f"The request failed safely: could not load the project's source files: {error}"))
     try:
         # await asyncio.to_thread, not a direct call: with SPEC-M4's
         # Postgres-backed ConversationStore configured, this is a real
@@ -434,7 +451,7 @@ async def chat(request: ChatRequest, x_session_id: str | None = Header(default=N
         context = await asyncio.to_thread(conversations.get, thread_id) or {}
     except Exception as error:
         record.update(status="error", stage="context_read_error", error=str(error))
-        return _terminal_response(request, request_id, Disposition.ERROR, f"The request failed safely: could not read conversation context: {error}")
+        return _tag_span_with_trace_id(_terminal_response(request, request_id, Disposition.ERROR, f"The request failed safely: could not read conversation context: {error}"))
     record["stage"] = "agent_execution"
     # The remaining budget, not a fresh full-length window: the deadline
     # this endpoint promises the client is for the whole request
@@ -455,15 +472,15 @@ async def chat(request: ChatRequest, x_session_id: str | None = Header(default=N
         record.update(status="cancelled", stage="cancelled")
         audit_error = await _safe_audit_append(app.state.container.audit_store, AuditEvent(trace_id=request_id, thread_id=request.thread_id or request_id, step="request", event_type="cancelled", summary="Request was cancelled before a terminal response.", payload={"request_id": request_id}, project_id=project_resources.manifest.project_id, source_set_id=project_resources.manifest.source_set_id))
         extra = {"audit_persist_error": audit_error} if audit_error else {}
-        return _terminal_response(request, request_id, Disposition.CANCELLED, "Request cancelled. No result was committed to the conversation context.", **extra)
+        return _tag_span_with_trace_id(_terminal_response(request, request_id, Disposition.CANCELLED, "Request cancelled. No result was committed to the conversation context.", **extra))
     except asyncio.TimeoutError:
         record.update(status="timeout", stage="timeout")
         audit_error = await _safe_audit_append(app.state.container.audit_store, AuditEvent(trace_id=request_id, thread_id=request.thread_id or request_id, step="request", event_type="timeout", summary="Request exceeded the bounded request deadline.", payload={"request_id": request_id, "timeout_seconds": settings.request_timeout_seconds}, project_id=project_resources.manifest.project_id, source_set_id=project_resources.manifest.source_set_id))
         extra = {"audit_persist_error": audit_error} if audit_error else {}
-        return _terminal_response(request, request_id, Disposition.TIMEOUT, "The request exceeded its time limit. Partial audit events were preserved; please retry with a narrower question.", **extra)
+        return _tag_span_with_trace_id(_terminal_response(request, request_id, Disposition.TIMEOUT, "The request exceeded its time limit. Partial audit events were preserved; please retry with a narrower question.", **extra))
     except Exception as error:
         record.update(status="error", stage="error", error=str(error))
-        return _terminal_response(request, request_id, Disposition.ERROR, f"The request failed safely: {error}")
+        return _tag_span_with_trace_id(_terminal_response(request, request_id, Disposition.ERROR, f"The request failed safely: {error}"))
 
     response = response.model_copy(update={
         "execution_metadata": {
@@ -512,7 +529,7 @@ async def chat(request: ChatRequest, x_session_id: str | None = Header(default=N
         response = response.model_copy(update={
             "execution_metadata": {**response.execution_metadata, "context_persist_error": context_persist_error}
         })
-    return response
+    return _tag_span_with_trace_id(response)
 
 
 @app.post("/api/v1/chat/{thread_id}/resume", dependencies=[Depends(require_rate_limit)])
