@@ -31,6 +31,30 @@ function renderAnswerMarkdown(text: string): React.ReactNode {
   );
 }
 
+// A cited bbox is tight to the actual text ink (word-level extraction, no
+// margin) -- rendering the evidence-focus outline exactly at that
+// boundary put the 3px outline itself directly across the glyphs at
+// higher zoom levels, obscuring the very number it was meant to point at.
+// Found live, 2026-09-14. Padded by a fixed few PDF points on every side
+// (in the bbox's own coordinate space, before converting to percentages)
+// so the highlighted region visibly surrounds the value instead of
+// hugging it.
+const EVIDENCE_BOX_PADDING_PT = 4;
+
+function evidenceBoxStyle(bbox: number[], pageWidth: number, pageHeight: number): React.CSSProperties {
+  const [x0, y0, x1, y1] = bbox;
+  const left = Math.max(0, x0 - EVIDENCE_BOX_PADDING_PT);
+  const top = Math.max(0, y0 - EVIDENCE_BOX_PADDING_PT);
+  const right = Math.min(pageWidth, x1 + EVIDENCE_BOX_PADDING_PT);
+  const bottom = Math.min(pageHeight, y1 + EVIDENCE_BOX_PADDING_PT);
+  return {
+    left: `${(left / pageWidth) * 100}%`,
+    top: `${(top / pageHeight) * 100}%`,
+    width: `${((right - left) / pageWidth) * 100}%`,
+    height: `${((bottom - top) / pageHeight) * 100}%`,
+  };
+}
+
 type ProjectOption = { project_id: string; display_name: string };
 
 function App() {
@@ -273,7 +297,7 @@ function App() {
             <button type="button" onClick={() => changeDrawingPage((drawingEvidence?.page ?? 1) + 1)} disabled={(drawingEvidence?.page ?? 1) >= drawingPageCount}>Next page ›</button>
             <button type="button" onClick={() => adjustDrawingZoom(drawingZoom - .25)}>−</button><span>{Math.round(drawingZoom * 100)}%</span><button type="button" onClick={() => adjustDrawingZoom(drawingZoom + .25)}>+</button><button type="button" onClick={() => setDrawingZoom(1)}>Fit page</button><button type="button" onClick={() => setDrawingZoom(1.15)}>Fit width</button>{drawingEvidence && <button type="button" onClick={() => { setDrawingEvidence(null); setDrawingZoom(1); }}>Clear evidence focus</button>}
           </div>
-          <div className="drawing-stage" aria-label="Zoomable engineering drawing. Pinch to zoom; two-finger scroll pans." onWheel={onDrawingWheel}><div className="drawing-page" style={{ transform: `scale(${drawingZoom})` }}><AuthedImage src={`/api/v1/project/pdf/pages/${drawingEvidence?.page ?? 1}.png?${new URLSearchParams({ ...(projectId ? { project_id: projectId } : {}), ...(drawingDocument ? { document: drawingDocument } : {}) }).toString()}`} alt={`${drawingDocument || "Engineering load schedule"} page ${drawingEvidence?.page ?? 1}`} />{drawingEvidence?.bbox && <div ref={drawingEvidenceRef} className="drawing-evidence-box" style={{ left: `${(drawingEvidence.bbox[0] / (drawingDocInfo?.page_sizes?.[(drawingEvidence.page || 1) - 1]?.[0] || 1191)) * 100}%`, top: `${(drawingEvidence.bbox[1] / (drawingDocInfo?.page_sizes?.[(drawingEvidence.page || 1) - 1]?.[1] || 842)) * 100}%`, width: `${((drawingEvidence.bbox[2] - drawingEvidence.bbox[0]) / (drawingDocInfo?.page_sizes?.[(drawingEvidence.page || 1) - 1]?.[0] || 1191)) * 100}%`, height: `${((drawingEvidence.bbox[3] - drawingEvidence.bbox[1]) / (drawingDocInfo?.page_sizes?.[(drawingEvidence.page || 1) - 1]?.[1] || 842)) * 100}%` }} title={`${drawingEvidence.board || "PDF evidence"}${drawingEvidence.field ? ` · ${drawingEvidence.field}` : ""}`} />}</div></div><p className="empty">{drawingEvidence?.localized === false ? "This evidence's location could not be precisely determined; showing the full page for manual review." : drawingEvidence?.bbox ? `Focused evidence: ${drawingEvidence.board || "drawing region"}${drawingEvidence.field ? ` · ${drawingEvidence.field}` : ""}.` : "Pinch to zoom and use two-finger scrolling to pan; citations focus a cited drawing region."}</p></section>}
+          <div className="drawing-stage" aria-label="Zoomable engineering drawing. Pinch to zoom; two-finger scroll pans." onWheel={onDrawingWheel}><div className="drawing-page" style={{ transform: `scale(${drawingZoom})` }}><AuthedImage src={`/api/v1/project/pdf/pages/${drawingEvidence?.page ?? 1}.png?${new URLSearchParams({ ...(projectId ? { project_id: projectId } : {}), ...(drawingDocument ? { document: drawingDocument } : {}) }).toString()}`} alt={`${drawingDocument || "Engineering load schedule"} page ${drawingEvidence?.page ?? 1}`} />{drawingEvidence?.bbox && <div ref={drawingEvidenceRef} className="drawing-evidence-box" style={evidenceBoxStyle(drawingEvidence.bbox, drawingDocInfo?.page_sizes?.[(drawingEvidence.page || 1) - 1]?.[0] || 1191, drawingDocInfo?.page_sizes?.[(drawingEvidence.page || 1) - 1]?.[1] || 842)} title={`${drawingEvidence.board || "PDF evidence"}${drawingEvidence.field ? ` · ${drawingEvidence.field}` : ""}`} />}</div></div><p className="empty">{drawingEvidence?.localized === false ? "This evidence's location could not be precisely determined; showing the full page for manual review." : drawingEvidence?.bbox ? `Focused evidence: ${drawingEvidence.board || "drawing region"}${drawingEvidence.field ? ` · ${drawingEvidence.field}` : ""}.` : "Pinch to zoom and use two-finger scrolling to pan; citations focus a cited drawing region."}</p></section>}
         {tab === "snapshot" && <section className="snapshot"><h2>Viewer Snapshot</h2>{snapshot ? <img src={snapshot} alt="Captured IFC viewer context" /> : <p className="empty">Capture a BIM view to enable image-grounded inspection.</p>}<p>Selected: {selected?.globalId || "none"}</p></section>}
       </aside>
       <section className="chat"><h2>Conversation</h2><div className="messages" ref={timelineRef}>{turns.length === 0 ? <p className="empty">Ask a BIM, drawing, or current-view question. Auto chooses the source; overrides remain in technical details.</p> : turns.map((turn) => <React.Fragment key={turn.id}><div className="message-row user"><article className="message user-message"><div className="message-meta"><span>User</span><time>{turn.timestamp}</time></div><p>{turn.user}</p></article></div><div className="message-row assistant"><article className={`message assistant-message ${turn.assistant.disposition}`}><div className="message-meta"><span>Assistant</span><span>{turn.assistant.disposition.replace(/_/g, " ")}</span><span className={turn.assistant.verification.status}>{turn.assistant.verification.status}</span><time>{turn.timestamp}</time></div><p>{renderAnswerMarkdown(turn.assistant.answer_markdown)}</p><details className="technical-details"><summary>Technical details</summary><small>Source: {turn.assistant.execution_metadata.source || "—"} · Planner: {turn.assistant.execution_metadata.planning_mode || "—"} · Models: {turn.assistant.execution_metadata.model_call_count || 0} · Tools: {turn.assistant.execution_metadata.tool_call_count || 0} · Trace: {turn.assistant.trace_id}</small></details></article></div></React.Fragment>)}</div><form onSubmit={submit}><textarea value={question} onChange={(e) => setQuestion(e.target.value)} placeholder="e.g. How many doors are in the project?" rows={3} /><div className="submit-row"><button disabled={busy}>{busy ? `Checking evidence… ${requestStage}` : "Ask with audit trail"}</button>{busy && <button type="button" className="stop-button" onClick={stopRequest}>Stop request</button>}</div></form></section>

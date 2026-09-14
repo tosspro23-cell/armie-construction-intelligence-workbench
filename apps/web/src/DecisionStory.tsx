@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { AuthedImage } from "./apiClient";
 
 // Interview/demo-facing redesign (2026-09-13, user request): the previous
@@ -87,6 +88,29 @@ function stableCitationKey(citation: Citation) {
       : `${citation.source_type}:${locator.snapshot_id}`;
 }
 
+// Found live, 2026-09-14: the owner's own Azure Portal opened the Cloud
+// Provenance link's Logs blade into its "Queries hub" picker with no data
+// shown -- a per-account Portal default this URL cannot control. This
+// button offers the same KQL as plain, copyable text so pasting it
+// directly into that picker's own search box still reaches the data.
+function CopyQueryButton({ query }: { query: string }) {
+  const [copied, setCopied] = useState(false);
+  return <button
+    type="button"
+    className="cloud-provenance-copy"
+    title="Copy this trace's Application Insights query -- paste it into the 'Queries hub' search box if the link above doesn't run it automatically."
+    onClick={async () => {
+      try {
+        await navigator.clipboard.writeText(query);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+      } catch {
+        window.prompt("Copy this query manually:", query);
+      }
+    }}
+  >{copied ? "Copied ✓" : "Copy query"}</button>;
+}
+
 function StepHeader({ number, icon, title, subtitle }: { number: number; icon: string; title: string; subtitle?: string }) {
   return <div className="story-step-header">
     <span className="story-step-number">{number}</span>
@@ -158,16 +182,14 @@ export function DecisionStory({ latest, trace, projectId, onOpenCitation }: {
         azure_tenant_id/app_insights_resource_id configured (opt-in, same
         pattern as every other optional Azure setting); otherwise this
         stays plain text exactly as before this fix, never a broken link. */}
-    {(meta.project_id || projectId) && (meta.cloud_trace_url
-      ? <a className="cloud-provenance" href={meta.cloud_trace_url} target="_blank" rel="noreferrer" title="Opens Application Insights Logs, pre-filtered to this request's trace ID. If a 'Queries hub' dialog opens first, close it (×) to see the pre-filled query underneath.">
-          <span className="cloud-provenance-icon" aria-hidden="true">☁️</span>
-          <span>Cloud provenance — Project <strong>{meta.project_id || projectId}</strong> · Frozen source version <strong>{meta.source_set_id || "—"}</strong></span>
-          <span className="cloud-provenance-link-hint">View in Application Insights →</span>
-        </a>
-      : <div className="cloud-provenance">
-          <span className="cloud-provenance-icon" aria-hidden="true">☁️</span>
-          <span>Cloud provenance — Project <strong>{meta.project_id || projectId}</strong> · Frozen source version <strong>{meta.source_set_id || "—"}</strong></span>
-        </div>)}
+    {(meta.project_id || projectId) && <div className="cloud-provenance">
+      <span className="cloud-provenance-icon" aria-hidden="true">☁️</span>
+      <span>Cloud provenance — Project <strong>{meta.project_id || projectId}</strong> · Frozen source version <strong>{meta.source_set_id || "—"}</strong></span>
+      <span className="cloud-provenance-actions">
+        {meta.cloud_trace_url && <a href={meta.cloud_trace_url} target="_blank" rel="noreferrer" title="Opens Application Insights Logs, pre-filtered to this request's trace ID. If a 'Queries hub' dialog opens first, use 'Copy query' instead and paste it into that dialog's own search box.">View in Application Insights →</a>}
+        {meta.cloud_trace_query && <CopyQueryButton query={meta.cloud_trace_query} />}
+      </span>
+    </div>}
 
     <ol className="story-steps">
       <li className="story-step">

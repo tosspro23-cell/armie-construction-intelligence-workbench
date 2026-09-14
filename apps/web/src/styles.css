@@ -47,7 +47,13 @@ small { color: #a8b4cf; line-height: 1.5; }
    and stretching that to the evidence card's own width made it dominate
    the card and look pixelated relative to how little of it mattered.
    Found live, 2026-09-13. */
-.evidence-crop { width: 100%; max-height: 200px; object-fit: contain; margin-top: 8px; border: 1px solid #314d80; border-radius: 8px; background: #fff; display: block; }
+/* max-width, not width: 100% -- a tight native-extraction crop (one table
+   cell, naturally small) was being stretched up to fill the whole card,
+   making its text look oversized/zoomed rather than displayed at a normal
+   size. width: 100% still applies once the full-page fallback crop (D-024
+   #3) is actually wider than the card, so that case is unaffected. Found
+   live, 2026-09-14. */
+.evidence-crop { max-width: 100%; max-height: 200px; object-fit: contain; margin-top: 8px; border: 1px solid #314d80; border-radius: 8px; background: #fff; display: block; }
 .evidence-crop.unlocalized { border-style: dashed; border-color: #5b6c94; opacity: .88; }
 .evidence-unlocalized-note { margin: 4px 0 0; font-size: .72rem; color: #9fb0d1; font-style: italic; }
 label { display: grid; gap: 8px; color: #bdc9e2; font-size: .85rem; }
@@ -115,12 +121,14 @@ button:disabled { opacity: .6; cursor: wait; }
    (project/source version) made visible instead of computed-but-hidden. */
 .decision-story { display: grid; gap: 12px; min-width: 0; }
 .decision-story.empty-story { padding: 4px 0; }
-.cloud-provenance { display: flex; align-items: center; gap: 8px; padding: 9px 12px; background: #102a1e; border: 1px solid #2a6547; border-radius: 8px; font-size: .78rem; color: #b8f3cf; }
-a.cloud-provenance { text-decoration: none; cursor: pointer; transition: border-color .12s ease, background .12s ease; }
-a.cloud-provenance:hover { border-color: #48b47c; background: #123626; }
+.cloud-provenance { display: flex; align-items: center; gap: 8px; padding: 9px 12px; background: #102a1e; border: 1px solid #2a6547; border-radius: 8px; font-size: .78rem; color: #b8f3cf; flex-wrap: wrap; }
 .cloud-provenance strong { color: #eafff1; }
 .cloud-provenance-icon { font-size: 1rem; }
-.cloud-provenance-link-hint { margin-left: auto; color: #7fe3ab; white-space: nowrap; font-weight: 600; }
+.cloud-provenance-actions { display: flex; align-items: center; gap: 10px; margin-left: auto; }
+.cloud-provenance-actions a { color: #7fe3ab; white-space: nowrap; font-weight: 600; text-decoration: none; }
+.cloud-provenance-actions a:hover { text-decoration: underline; }
+.cloud-provenance-copy { padding: 4px 9px; background: #1b4230; border: 1px solid #2a6547; border-radius: 6px; color: #b8f3cf; font-size: .72rem; cursor: pointer; white-space: nowrap; }
+.cloud-provenance-copy:hover { border-color: #48b47c; }
 .story-steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
 .story-step { position: relative; padding: 10px 0 16px 34px; border-left: 2px solid #263457; }
 .story-step:last-of-type { border-left-color: transparent; padding-bottom: 0; }

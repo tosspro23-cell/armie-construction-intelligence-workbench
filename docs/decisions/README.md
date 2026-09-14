@@ -1370,3 +1370,42 @@ is unaffected by construction (294 pass, confirmed). No dedicated frontend test 
 (this project has no frontend test harness yet -- the same gap `D-023`'s access-key/project-
 selector race noted); verified by inspection of the `stageTimingsMs`/`auditStage` interaction
 against real trace shapes from earlier sessions' live-verification runs.
+
+## D-030 — Three findings from the owner's own live walkthrough of D-028/D-029
+
+Owner confirmed the model-backed path itself was healthy (D-028's deploy had tripped the deploy
+workflow's own model-backed smoke test with a 41-second, ultimately-failed semantic-planning
+call -- re-tested live by the owner and found working, so treated as a transient Azure OpenAI
+hiccup, not a regression from that deploy's frontend-only changes). Three real findings from
+that same walkthrough:
+
+1. **The drawing evidence-focus outline sat directly across the cited number's own glyphs.**
+   `main.tsx` rendered the highlight box at the cited `bbox` exactly as returned -- tight to the
+   actual text ink (word-level extraction has no margin built in) -- so at higher zoom the 3px
+   outline visibly overlapped/obscured characters instead of surrounding them. Fixed with
+   `evidenceBoxStyle`: the box is padded by a fixed 4 PDF points on every side (in the bbox's own
+   coordinate space, before converting to the percentage-based CSS position) so the highlighted
+   region visibly surrounds the value with a small margin, clamped to the page's own bounds.
+2. **A tight native-extraction crop (one table cell) was stretched to fill the whole evidence
+   card, making its text look artificially huge.** `.evidence-crop`'s `width: 100%` forced every
+   crop -- including a naturally small one -- up to the card's full width; `max-width: 100%`
+   (removing the forced `width`) lets a small crop display at its own real (2x-zoom) resolution
+   instead, while the D-024 #3 full-page-fallback crop (genuinely often wider than the card) is
+   unaffected, since `max-width` only ever constrains growth, never forces it.
+3. **The Application Insights link opened Azure Portal's "Queries hub" picker with no data
+   shown**, even though the URL format matches Microsoft's own documented deep-link pattern (see
+   D-028) -- a per-account/tenant Portal-side default this project's URL cannot control, not
+   something the owner's repeated re-login prompts (a separate, unrelated AAD session behavior)
+   were causing either. Rather than guess at another unverifiable URL variant, `AgentService.
+   _cloud_trace_query` now exposes the raw KQL text itself (factored out of `_cloud_trace_url`,
+   which still builds on top of it) as `execution_metadata.cloud_trace_query`, and the Cloud
+   Provenance banner gained a "Copy query" button (`navigator.clipboard.writeText`, with a
+   `window.prompt` fallback if the clipboard API is unavailable) so pasting it directly into that
+   picker's own search box reaches the same data regardless of how the URL itself is handled.
+
+**Verification.** `tests/test_cloud_trace_link.py` extended: `cloud_trace_query` is present and
+carries the response's own `trace_id` even when `cloud_trace_url` is `None` (unconfigured
+tenant/resource ID) -- the copy-query fallback works independently of whether the one-click link
+does. 294 tests pass; `ruff` clean; `npm run build` clean. The bbox-padding and crop-sizing CSS
+fixes have no dedicated test (no frontend test harness, same as D-029) -- verified visually
+against the live app after deployment.

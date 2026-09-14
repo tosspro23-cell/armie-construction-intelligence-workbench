@@ -1614,6 +1614,26 @@ Return only a corrected MultiQueryPlan JSON object."""
         )
         return rewritten
 
+    @staticmethod
+    def _cloud_trace_query(trace_id: str) -> str:
+        """The raw KQL this deployment's Application Insights telemetry for
+        one specific request is filtered by -- factored out of
+        `_cloud_trace_url` so the frontend can offer it as plain, copyable
+        text (D-029), not only baked into a URL. Found live, 2026-09-14:
+        the owner's own Azure Portal opened this deployment's Logs blade
+        into its "Queries hub" picker instead of running the pre-filled
+        query, with no data shown -- a per-account/tenant Portal-side
+        default this project's own URL cannot control (confirmed against
+        Microsoft's documented deep-link format, which is what `_cloud_
+        trace_url` already produces). Pasting this text directly into that
+        hub's own search box still reaches the same data.
+        """
+        return (
+            "union requests, dependencies, traces, exceptions\n"
+            f'| where tostring(customDimensions["app.trace_id"]) == "{trace_id}"\n'
+            "| order by timestamp desc"
+        )
+
     def _cloud_trace_url(self, trace_id: str) -> str | None:
         """D-028: a one-click Azure Portal link into this deployment's own
         Application Insights telemetry for this specific request, requested
@@ -1637,11 +1657,7 @@ Return only a corrected MultiQueryPlan JSON object."""
         if not (self.settings.azure_tenant_id and self.settings.app_insights_resource_id):
             return None
         from urllib.parse import quote
-        query = (
-            "union requests, dependencies, traces, exceptions\n"
-            f'| where tostring(customDimensions["app.trace_id"]) == "{trace_id}"\n'
-            "| order by timestamp desc"
-        )
+        query = self._cloud_trace_query(trace_id)
         return (
             f"https://portal.azure.com/#@{self.settings.azure_tenant_id}"
             f"/resource{self.settings.app_insights_resource_id}/logs"
@@ -1701,6 +1717,13 @@ Return only a corrected MultiQueryPlan JSON object."""
                     "answer_polished": answer_polished,
                     "pre_polish_answer": result["answer"] if answer_polished else None,
                     "cloud_trace_url": self._cloud_trace_url(state["trace_id"]),
+                    # A copy-pastable fallback for the URL above: found
+                    # live, 2026-09-14, that opening the URL landed on
+                    # Azure Portal's own "Queries hub" picker with no data
+                    # shown -- a Portal-side default this project's URL
+                    # cannot control. Pasting this text into that picker's
+                    # own search box still reaches the same data.
+                    "cloud_trace_query": self._cloud_trace_query(state["trace_id"]),
                     "response_language": result.get("response_language"),
                     "normalized_request": state.get("multi_plan", {}).get("normalized_request") or state.get("question"),
                     "corrections": state.get("multi_plan", {}).get("corrections", []),

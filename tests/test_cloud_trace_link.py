@@ -50,6 +50,10 @@ def test_cloud_trace_url_is_absent_when_tenant_and_resource_id_are_unconfigured(
     response = service.invoke(project_resources=_demo(container), thread_id="cloud-link-off", question="How many doors are there?", viewer_context=None)
 
     assert response.execution_metadata.get("cloud_trace_url") is None
+    # The raw KQL fallback (D-029) is offered regardless of whether the URL
+    # settings are configured -- it's plain text the user pastes into
+    # whatever Application Insights resource they already have open.
+    assert response.trace_id in response.execution_metadata.get("cloud_trace_query", "")
 
 
 def test_cloud_trace_url_is_built_from_configured_tenant_and_resource_id_and_carries_the_trace_id(tmp_path: Path) -> None:
