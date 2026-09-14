@@ -1451,3 +1451,104 @@ from the input `request_id`. A second new test covers the legitimate `_terminal_
 (request_id and trace_id are the same value there by that helper's own design) via a real,
 reachable failure path (a patched `conversation_store.get` raising), not a mock of the exit logic
 itself. 295 tests pass (294 + 1 net new); `ruff` clean; `npm run build` unaffected (backend-only).
+
+## D-032 — SPEC-M11: Engineering Finding Workflow
+
+Owner-prioritized follow-on from an outside consultant's interview feedback (relayed by the
+owner, 2026-09-14): promote reconciliation's own per-tag `matched`/`dimension_mismatch`/
+`missing_in_pdf`/`missing_in_ifc` output (SPEC-M2, D-011) into a persisted, human-reviewable
+`EngineeringFinding` object with a real review lifecycle, instead of a value that only ever
+existed inside one response and was then gone. Deliberately does **not** broaden OD-15's
+door/window-only reconciliation-join scope -- findings are a persistence/workflow layer on top
+of an already-authorized, unchanged computation, not a new cross-source join shape. New Owner
+Decision confirming this reading explicitly, per this project's practice of never assuming a
+capability-boundary question silently: **OD-44 (needs owner confirmation)** -- persisting and
+workflow-governing reconciliation's existing output does not count as broadening cross-source
+capability under OD-15. **OD-45 (owner-confirmed 2026-09-14, in conversation)** -- build the
+Finding workflow now, ahead of the consultant's second, Dataset Pack proposal, per the owner's
+own explicit sequencing; the Dataset Pack proceeds only after its own licensing/technical
+go/no-go spike, not in parallel. Severity is a separate, unconditioned design choice (not an
+Owner Decision): one fixed deterministic rule this milestone (`dimension_mismatch` -> `medium`,
+`missing_in_pdf`/`missing_in_ifc` -> `high`, an element absent from a source entirely being
+judged a bigger integrity problem than a measured disagreement), not configurable, not a model
+call.
+
+**Domain model and state machine** (`apps/api/app/schemas/models.py`, `apps/api/app/
+finding_workflow.py`). `FindingStatus`: `OPEN -> ACKNOWLEDGED -> ACTION_REQUIRED -> RESOLVED`,
+with `WAIVED`/`FALSE_POSITIVE` reachable from `ACKNOWLEDGED` and `VERIFIED_CLOSED` reachable
+only from `RESOLVED` via re-verify (never a client-chosen transition). No persisted `DETECTED`
+state -- a finding is created directly as `OPEN`, since the instant before persistence is not a
+state any human ever acts on; a deliberate simplification of the consultant's original 6-state
+proposal, stated as such rather than silently dropped. Every transition is validated server-side
+against one table (`validate_transition`); an illegal one is a `409`, never a silent no-op.
+
+**Auto-creation, not manual promotion** (`AgentService._upsert_findings_from_reconciliation`,
+hooked into `_finalize` after the response is fully built). Every non-`matched` reconciliation
+item automatically becomes/updates a finding the moment a reconciliation response is finalized --
+there is no separate "promote to finding" action. Upsert, not insert, keyed on
+`(project_id, tag, finding_type)`, matched against "active" statuses that deliberately *include*
+`RESOLVED` (not just `OPEN`/`ACKNOWLEDGED`/`ACTION_REQUIRED`): a human's claimed fix has not been
+independently re-verified yet, so a fresh detection of the same condition should update that same
+finding, not spawn a duplicate next to it. A `matched` item whose tag has an existing open finding
+does not auto-close it -- closing only happens through the explicit re-verify action below, so a
+human always sees the transition rather than a finding silently vanishing.
+
+**The actual differentiating claim: closed-loop re-verification, not a trust-the-human checkbox.**
+`POST /api/v1/findings/{id}/reverify` is legal only from `RESOLVED`, and re-runs the *real*
+deterministic IFC/PDF comparison for that one tag (`AgentService.reverify_reconciliation_tag`,
+built on `_compare_reconciliation_item` -- extracted verbatim out of
+`_synthesize_reconciliation_response`'s own per-tag loop, not a re-implementation that could
+quietly drift from the original join logic, confirmed behavior-preserving by the full existing
+`tests/test_reconciliation.py` suite passing unmodified after the refactor). Only transitions to
+`VERIFIED_CLOSED` if the fresh read agrees; otherwise bounces back to `ACTION_REQUIRED` with the
+freshly observed values, never trusting the finding's own stored "resolved" state as proof.
+
+**Persistence** (`apps/api/app/persistence/finding_store.py`, `postgres_store.py`) follows
+`ConversationStore`/`AuditStore`'s exact Protocol-plus-two-implementations shape (D-007/D-014):
+`InMemoryFindingStore` (default) and `PostgresFindingStore` (opt-in via `DATABASE_URL`, reusing
+the existing Managed-Identity conninfo path), with the insert-vs-update branch decided in one
+round trip via `INSERT ... ON CONFLICT ... RETURNING *, (xmax = 0) AS inserted`. New migration
+`0006_engineering_findings.sql` (CI-applied) plus a production-only, CI-excluded least-privilege
+grant file `0007_grant_engineering_findings.sql`, matching `0004`'s established split exactly.
+
+**`X-Session-Id` as the actor, explicitly not a real identity.** Every human-triggered
+transition records the caller's `X-Session-Id` (D-016's per-tab correlation token, not a login --
+this project still has no per-user identity system, OD-28 unchanged) as
+`last_actor_session_id`/`FindingHistoryEntry.actor_session_id`. Stated plainly in the model's own
+docstrings and the route docstrings, and tracked as an open, known limitation rather than left
+implicit -- see `docs/decisions/REVIEW_REQUIRED.md` "M11: `X-Session-Id` stands in for a real
+actor identity on Finding transitions."
+
+**Frontend** (`apps/web/src/Findings.tsx`, SS D). A new "Findings" tab alongside BIM Model/
+Drawing/Viewer Snapshot: status/severity badges, IFC/PDF dimension comparison, transition
+history, and buttons scoped to the actions legal from the finding's current status (a
+client-side mirror of the same table, for gating only -- the server independently re-validates
+and 409s on its own). Also fixes a pre-existing, unrelated gap this milestone's own plan
+surfaced while reading the code: `AgentResponse.reconciliation_items` had been computed and
+returned by every reconciliation answer since SPEC-M2 but was never rendered anywhere --
+`DecisionStory`'s Evidence step now shows a compact per-tag status table.
+
+**Dataset Pack proposal (the consultant's second initiative): assessed, explicitly not started.**
+The owner sequenced this second, after the Finding Workflow. Feasibility read, recorded here so
+it isn't re-litigated from scratch later: directionally reasonable, but not ready to commit
+engineering time to without a bounded go/no-go spike first -- the consultant's license citation
+points at a third-party Hugging Face re-packaging, not the original rights-holder's own license
+statement, and this project's deterministic IFC tooling is characterized against a small,
+controlled synthetic fixture whose real-world-IFC fit (element count, `Tag`-equivalent field
+availability) is unverified. No code, fixture, or infrastructure work for this proposal has
+happened; it remains fully out of scope until that spike runs.
+
+**Verification.** `tests/test_engineering_findings.py` (new): the state machine's full legal/
+illegal transition table (`validate_transition`, `resolve_reverify_outcome`); auto-creation
+produces exactly the three real non-matched findings from the fixture (W05/W02/D04) with correct
+`finding_type`/`severity`; re-running reconciliation updates the same finding rather than
+duplicating it (same `finding_id` across two runs); an illegal transition over HTTP is a real
+`409`, not a no-op; and both real re-verify branches -- still-mismatched bounces back to
+`ACTION_REQUIRED` with fresh detail (the genuine, unmodified fixture data), and now-matching
+closes to `VERIFIED_CLOSED`, the latter proven by faking only the PDF-source-read I/O seam (the
+same technique `tests/test_reconciliation.py`'s own
+`test_pdf_read_failure_is_reported_as_error_not_answered` already established for this seam) so
+the actual comparison/outcome logic under test runs for real, unmocked. All four new HTTP routes
+and the full acknowledge -> start_action -> resolve -> re-check flow were also walked end-to-end
+in a real browser against the real demo fixture before being reported as done (not only
+`pytest`/`tsc`). 320 tests pass (295 + 25 new); `ruff` clean; `npm run build` clean.

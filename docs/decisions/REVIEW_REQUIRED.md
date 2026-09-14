@@ -385,3 +385,18 @@ per `PROJECT_STATE.md`'s scoping note, ADLS Gen2 (a real document source of trut
 still-separate evidence-persistence gap) remains a future milestone; this one indexes directly
 from `demo_data/` by design (§B, disproportionate to build a full indexer pipeline for 18
 documents).
+
+## M11: `X-Session-Id` stands in for a real actor identity on Finding transitions
+
+SPEC-M11's Engineering Finding Workflow (D-032) records `last_actor_session_id` and each
+`FindingHistoryEntry.actor_session_id` from the caller's `X-Session-Id` header -- D-016's
+per-tab correlation token, issued to any holder of the shared API secret, never a real login
+(OD-28 stands; this project still has no per-user identity system). A finding's history
+therefore shows *which browser tab* acknowledged/resolved/waived it, not *which person* did,
+and any shared-secret holder can act as any session simply by sending its `X-Session-Id`
+value (the same trust boundary D-016 already accepted for request ownership/cancellation, now
+extended to Finding transitions). This is a deliberate, documented scope limitation carried
+over from the milestone's own plan, not an oversight discovered afterward -- flagged here
+per this project's own practice of tracking known gaps explicitly rather than leaving them
+implicit. Resolving it for real would mean building actual per-user authentication, which is
+a materially larger project than this milestone (or D-016) ever set out to be.
