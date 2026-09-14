@@ -2,17 +2,19 @@ import React, { FormEvent, useCallback, useEffect, useMemo, useRef, useState } f
 import { createRoot } from "react-dom/client";
 import { api, ApiAuthError, AuthedImage, ensureSessionId, setStoredApiKey } from "./apiClient";
 import { DecisionStory } from "./DecisionStory";
+import { Findings } from "./Findings";
 import { IfcViewer, ViewerStatus } from "./IfcViewer";
 import "./styles.css";
 
 type SourcePreference = "auto" | "ifc" | "pdf" | "viewer_snapshot";
-type WorkspaceTab = "bim" | "drawing" | "snapshot";
+type WorkspaceTab = "bim" | "drawing" | "snapshot" | "findings";
 type Citation = { evidence_id: string; source_type: string; label: string; locator: Record<string, any>; project_id?: string; source_set_id?: string; source_file?: string };
 type TraceEvent = { id: string; step: string; event_type: string; summary: string; payload: Record<string, any>; actual_provider?: string; actual_model?: string; planning_mode?: string; model_call_count?: number; tool_call_count?: number };
+type ReconciliationItem = { tag: string; entity_type?: string | null; storey?: string | null; ifc_width_m?: number | null; ifc_height_m?: number | null; pdf_width_m?: number | null; pdf_height_m?: number | null; status: string; detail: string };
 type Response = {
   thread_id: string; trace_id: string; disposition: "answered" | "partially_answered" | "clarification_required" | "refused" | "error" | "timeout" | "cancelled";
   answer_markdown: string; citations: Citation[]; verification: { status: string; reason?: string };
-  execution_metadata: Record<string, any>;
+  execution_metadata: Record<string, any>; reconciliation_items?: ReconciliationItem[];
 };
 type Selected = { globalId?: string; expressId?: number; type?: string; name?: string };
 type ConversationTurn = { id: string; user: string; assistant: Response; timestamp: string; trace: TraceEvent[] };
@@ -287,7 +289,7 @@ function App() {
       <button type="button" onClick={newConversation}>New conversation</button><button type="button" onClick={() => { setSelected(null); setSelectionCleared(true); }}>Clear selection</button><button type="button" onClick={() => { setSnapshot(null); setSnapshotCleared(true); }}>Clear snapshot</button>
     </div>
     <section className="workspace">
-      <aside className="viewer"><div className="tabs"><button className={tab === "bim" ? "active" : ""} onClick={() => setTab("bim")}>BIM Model</button><button className={tab === "drawing" ? "active" : ""} onClick={() => setTab("drawing")}>Drawing</button><button className={tab === "snapshot" ? "active" : ""} onClick={() => setTab("snapshot")}>Viewer Snapshot</button></div>
+      <aside className="viewer"><div className="tabs"><button className={tab === "bim" ? "active" : ""} onClick={() => setTab("bim")}>BIM Model</button><button className={tab === "drawing" ? "active" : ""} onClick={() => setTab("drawing")}>Drawing</button><button className={tab === "snapshot" ? "active" : ""} onClick={() => setTab("snapshot")}>Viewer Snapshot</button><button className={tab === "findings" ? "active" : ""} onClick={() => setTab("findings")}>Findings</button></div>
         {tab === "bim" && <><h2>IFC Viewer</h2><IfcViewer projectId={projectId} onSelection={handleSelection} onSnapshot={(value) => { setSnapshot(value); setSnapshotCleared(false); }} onStatus={setViewerStatus} focusGlobalId={selected?.globalId} /><dl className="selection-details"><div><dt>Element</dt><dd>{selected ? `${selected.type}: ${selected.name}` : "No IFC element selected"}</dd></div><div><dt>IFC type</dt><dd>{selected?.type || "—"}</dd></div><div><dt>ExpressID</dt><dd>{selected?.expressId ?? "—"}</dd></div><div><dt>GlobalId</dt><dd>{selected?.globalId || "—"}</dd></div></dl></>}
         {tab === "drawing" && <section className="drawing"><h2>Engineering Drawing</h2>
           <div className="drawing-toolbar">
@@ -299,6 +301,7 @@ function App() {
           </div>
           <div className="drawing-stage" aria-label="Zoomable engineering drawing. Pinch to zoom; two-finger scroll pans." onWheel={onDrawingWheel}><div className="drawing-page" style={{ transform: `scale(${drawingZoom})` }}><AuthedImage src={`/api/v1/project/pdf/pages/${drawingEvidence?.page ?? 1}.png?${new URLSearchParams({ ...(projectId ? { project_id: projectId } : {}), ...(drawingDocument ? { document: drawingDocument } : {}) }).toString()}`} alt={`${drawingDocument || "Engineering load schedule"} page ${drawingEvidence?.page ?? 1}`} />{drawingEvidence?.bbox && <div ref={drawingEvidenceRef} className="drawing-evidence-box" style={evidenceBoxStyle(drawingEvidence.bbox, drawingDocInfo?.page_sizes?.[(drawingEvidence.page || 1) - 1]?.[0] || 1191, drawingDocInfo?.page_sizes?.[(drawingEvidence.page || 1) - 1]?.[1] || 842)} title={`${drawingEvidence.board || "PDF evidence"}${drawingEvidence.field ? ` · ${drawingEvidence.field}` : ""}`} />}</div></div><p className="empty">{drawingEvidence?.localized === false ? "This evidence's location could not be precisely determined; showing the full page for manual review." : drawingEvidence?.bbox ? `Focused evidence: ${drawingEvidence.board || "drawing region"}${drawingEvidence.field ? ` · ${drawingEvidence.field}` : ""}.` : "Pinch to zoom and use two-finger scrolling to pan; citations focus a cited drawing region."}</p></section>}
         {tab === "snapshot" && <section className="snapshot"><h2>Viewer Snapshot</h2>{snapshot ? <img src={snapshot} alt="Captured IFC viewer context" /> : <p className="empty">Capture a BIM view to enable image-grounded inspection.</p>}<p>Selected: {selected?.globalId || "none"}</p></section>}
+        {tab === "findings" && <Findings projectId={projectId} />}
       </aside>
       <section className="chat"><h2>Conversation</h2><div className="messages" ref={timelineRef}>{turns.length === 0 ? <p className="empty">Ask a BIM, drawing, or current-view question. Auto chooses the source; overrides remain in technical details.</p> : turns.map((turn) => <React.Fragment key={turn.id}><div className="message-row user"><article className="message user-message"><div className="message-meta"><span>User</span><time>{turn.timestamp}</time></div><p>{turn.user}</p></article></div><div className="message-row assistant"><article className={`message assistant-message ${turn.assistant.disposition}`}><div className="message-meta"><span>Assistant</span><span>{turn.assistant.disposition.replace(/_/g, " ")}</span><span className={turn.assistant.verification.status}>{turn.assistant.verification.status}</span><time>{turn.timestamp}</time></div><p>{renderAnswerMarkdown(turn.assistant.answer_markdown)}</p><details className="technical-details"><summary>Technical details</summary><small>Source: {turn.assistant.execution_metadata.source || "—"} · Planner: {turn.assistant.execution_metadata.planning_mode || "—"} · Models: {turn.assistant.execution_metadata.model_call_count || 0} · Tools: {turn.assistant.execution_metadata.tool_call_count || 0} · Trace: {turn.assistant.trace_id}</small></details></article></div></React.Fragment>)}</div><form onSubmit={submit}><textarea value={question} onChange={(e) => setQuestion(e.target.value)} placeholder="e.g. How many doors are in the project?" rows={3} /><div className="submit-row"><button disabled={busy}>{busy ? `Checking evidence… ${requestStage}` : "Ask with audit trail"}</button>{busy && <button type="button" className="stop-button" onClick={stopRequest}>Stop request</button>}</div></form></section>
       <aside className="inspector"><DecisionStory latest={latest} trace={trace} projectId={projectId} onOpenCitation={openCitation} /></aside>

@@ -164,3 +164,33 @@ pre { max-width: 100%; overflow: auto; white-space: pre-wrap; overflow-wrap: any
 .api-key-gate { align-items: center; justify-content: center; }
 .api-key-gate form { position: static; background: #121a30; border: 1px solid #263457; border-radius: 14px; padding: 28px; max-width: 380px; }
 .api-key-gate input { padding: 10px; border-radius: 8px; border: 1px solid #344a78; background: #0b1020; color: #f6f8ff; }
+
+/* SPEC-M11 SS D: Findings tab -- the persisted EngineeringFinding
+   lifecycle, surfaced alongside the reconciliation table below (Decision
+   Story's own Evidence step) which shows the same per-tag comparison
+   before it is ever promoted into a finding. */
+.findings { display: grid; gap: 12px; min-height: 0; overflow: auto; }
+.findings-header { display: flex; align-items: center; justify-content: space-between; }
+.findings-header button { padding: 7px 10px; font-size: .75rem; }
+.finding-cards { display: grid; gap: 10px; }
+.finding-card { padding: 10px; background: #0c1326; border: 1px solid #263457; border-radius: 10px; }
+.finding-card summary { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; cursor: pointer; }
+.finding-card[open] summary { margin-bottom: 8px; }
+.finding-tag { color: #d5e0f5; font-weight: 700; font-size: .82rem; }
+.finding-type { color: #8ab0e6; font-size: .78rem; }
+.finding-badge { padding: 3px 8px; border-radius: 999px; font-size: .68rem; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; background: #233861; color: #dce9ff; }
+.finding-badge.status-open { background: #3a3320; color: #ffcf7a; }
+.finding-badge.status-acknowledged { background: #233861; color: #9fbfff; }
+.finding-badge.status-action_required { background: #42202a; color: #ffb0b0; }
+.finding-badge.status-resolved, .finding-badge.status-verified_closed { background: #1f3a2e; color: #8ff0b1; }
+.finding-badge.status-waived, .finding-badge.status-false_positive { background: #26335c; color: #8190ad; }
+.finding-badge.severity-high { background: #42202a; color: #ff9696; }
+.finding-badge.severity-medium { background: #3a3320; color: #ffcf7a; }
+.finding-badge.severity-low { background: #1f3a2e; color: #8ff0b1; }
+.finding-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.finding-actions button { padding: 7px 10px; font-size: .76rem; }
+.reconciliation-table { margin: 0 0 10px; }
+.reconciliation-table table { border-collapse: collapse; width: 100%; font-size: .8rem; }
+.reconciliation-table th, .reconciliation-table td { text-align: left; padding: 4px 8px; border-bottom: 1px solid #26335c; overflow-wrap: anywhere; }
+.reconciliation-table th { color: #9fbfff; font-weight: 600; }
+.reconciliation-table tr.mismatch td { color: #ffcf7a; }

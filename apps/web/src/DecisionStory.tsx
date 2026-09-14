@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { AuthedImage } from "./apiClient";
+import { formatDims } from "./Findings";
 
 // Interview/demo-facing redesign (2026-09-13, user request): the previous
 // "Evidence Inspector" + "Audit Trail" were two disconnected sections --
@@ -18,9 +19,10 @@ import { AuthedImage } from "./apiClient";
 
 type Citation = { evidence_id: string; source_type: string; label: string; locator: Record<string, any>; project_id?: string; source_set_id?: string; source_file?: string };
 type TraceEvent = { id: string; step: string; event_type: string; summary: string; payload: Record<string, any>; actual_provider?: string; actual_model?: string; planning_mode?: string; model_call_count?: number; tool_call_count?: number; timestamp?: string };
+type ReconciliationItem = { tag: string; entity_type?: string | null; storey?: string | null; ifc_width_m?: number | null; ifc_height_m?: number | null; pdf_width_m?: number | null; pdf_height_m?: number | null; status: string; detail: string };
 type Response = {
   disposition: string; answer_markdown: string; citations: Citation[]; verification: { status: string; reason?: string };
-  execution_metadata: Record<string, any>;
+  execution_metadata: Record<string, any>; reconciliation_items?: ReconciliationItem[];
 };
 
 type Stage = "Intent Understanding" | "Normalization" | "Planning" | "Execution" | "Verification" | "Final Response";
@@ -148,6 +150,7 @@ export function DecisionStory({ latest, trace, projectId, onOpenCitation }: {
 
   const meta = latest.execution_metadata || {};
   const citations = Array.from(new Map<string, Citation>((latest.citations || []).map((item) => [stableCitationKey(item), item])).values());
+  const reconciliationItems = latest.reconciliation_items || [];
   const subplans: any[] = meta.subplans || [];
   const retrievalEvent = trace.find((event) => event.event_type === "retrieval_evaluated");
   // Independent-review-style finding, self-caught while demo-testing
@@ -244,6 +247,23 @@ export function DecisionStory({ latest, trace, projectId, onOpenCitation }: {
 
       <li className="story-step story-step-evidence">
         <StepHeader number={4} icon="📄" title="Evidence" subtitle={`${citations.length} citation(s)`} />
+        {/* SPEC-M11 SS D: AgentResponse.reconciliation_items has been
+            computed and returned by every reconciliation answer since
+            SPEC-M2, but nothing rendered it -- a stranger reading a
+            reconciliation answer's prose summary had no way to see the
+            actual per-tag comparison behind it. This is that table; the
+            persisted, human-reviewable version of each non-matched row
+            lives in the Findings tab (main.tsx). */}
+        {reconciliationItems.length > 0 && <div className="reconciliation-table">
+          <table><thead><tr><th>Tag</th><th>Status</th><th>IFC</th><th>PDF</th></tr></thead><tbody>
+            {reconciliationItems.map((item) => <tr key={item.tag} className={item.status !== "matched" ? "mismatch" : undefined}>
+              <td>{item.tag}</td>
+              <td>{item.status.replace(/_/g, " ")}</td>
+              <td>{formatDims(item.ifc_width_m, item.ifc_height_m)}</td>
+              <td>{formatDims(item.pdf_width_m, item.pdf_height_m)}</td>
+            </tr>)}
+          </tbody></table>
+        </div>}
         {/* Collapsed by default, one click to open -- matches the same
             collapsed-summary-then-expandable-detail pattern already used
             for each step's own raw trace and the AI Search relevance
