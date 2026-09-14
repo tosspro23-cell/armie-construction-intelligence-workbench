@@ -42,6 +42,7 @@ from app.schemas.models import (
     MultiQueryPlan,
     QueryPlan,
     ReconciliationItem,
+    ReconciliationStatus,
     ResponseLanguage,
     SourceType,
     VerificationStatus,
@@ -1664,6 +1665,58 @@ Return only a corrected MultiQueryPlan JSON object."""
             f"?query={quote(query)}"
         )
 
+    # SPEC-M11 §4B: one fixed rule, not a model call and not configurable
+    # this milestone -- an element absent from one source entirely is a
+    # bigger data-integrity problem than a measured disagreement between
+    # two sources that both at least named it.
+    _FINDING_SEVERITY_BY_TYPE = {
+        "dimension_mismatch": "medium",
+        "missing_in_pdf": "high",
+        "missing_in_ifc": "high",
+    }
+
+    def _upsert_findings_from_reconciliation(self, state: GraphState, response: AgentResponse) -> None:
+        """SPEC-M11: promotes every non-`matched` reconciliation item on
+        this response into a persisted `EngineeringFinding` -- auto-creation,
+        not a separate "promote" action a human has to remember to take.
+        Does not touch reconciliation's own computation (`_synthesize_
+        reconciliation_response` stays a pure, side-effect-free function);
+        this only persists what it already decided.
+
+        A `matched` item is never auto-closed here, even if it belongs to a
+        tag with an existing open finding -- closing only ever happens
+        through the explicit re-verify action, so a human always sees that
+        transition rather than a finding silently vanishing between chat
+        turns.
+
+        Best-effort: a persistence failure here must not turn an otherwise
+        correct, already-computed reconciliation answer into an error --
+        losing this milestone's workflow tracking for one response is a
+        strictly lesser failure than losing the answer itself (the same
+        proportionality D-014's `context_persist_error` already applies to
+        conversation-context persistence).
+        """
+        manifest = state["project_resources"].manifest
+        evidence_refs = [citation.evidence_id for citation in response.citations]
+        for item in response.reconciliation_items:
+            if item.status == ReconciliationStatus.MATCHED:
+                continue
+            try:
+                self.container.finding_store.upsert_from_reconciliation(
+                    project_id=manifest.project_id, source_set_id=manifest.source_set_id,
+                    trace_id=state["trace_id"], tag=item.tag, finding_type=item.status.value,
+                    severity=self._FINDING_SEVERITY_BY_TYPE[item.status.value], detail=item.detail,
+                    ifc_width_m=item.ifc_width_m, ifc_height_m=item.ifc_height_m,
+                    pdf_width_m=item.pdf_width_m, pdf_height_m=item.pdf_height_m,
+                    evidence_refs=evidence_refs,
+                )
+            except Exception as error:
+                self._audit(
+                    state, "finding_upsert", "error",
+                    "Could not persist an EngineeringFinding for this reconciliation item; the answer itself is unaffected.",
+                    {"tag": item.tag, "finding_type": item.status.value, "error": str(error)},
+                )
+
     def _finalize(self, state: GraphState) -> dict:
         if state.get("clarification"):
             response = AgentResponse(
@@ -1736,6 +1789,8 @@ Return only a corrected MultiQueryPlan JSON object."""
                 context_update=result.get("context_update", {}),
                 reconciliation_items=[ReconciliationItem.model_validate(item) for item in result.get("reconciliation_items", [])],
             )
+            if response.reconciliation_items:
+                self._upsert_findings_from_reconciliation(state, response)
         self._audit(
             state,
             "finalize",
