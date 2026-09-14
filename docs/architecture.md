@@ -40,6 +40,43 @@ Each tool result produces evidence locators: IFC GlobalId/ExpressID or PDF page/
 
 The UI groups existing audit events into intent, normalization, planning, execution, verification, and final response. Raw payloads remain available in a collapsed developer view. This makes provider, model, tool, parameters, evidence, verification, disposition, and latency inspectable without turning the normal answer into raw JSON.
 
-## Extensibility boundary
+## Multi-project workspace (SPEC-M9, D-023)
 
-The current release intentionally exposes one active project workspace. Future `ProjectWorkspace`, `SourceDescriptor`, `SourceRegistry`, and `CapabilityRegistry` abstractions can support multiple sources without weakening the typed planning and capability-gate boundary.
+`ServiceContainer.get_project(project_id)` resolves a committed registry
+(`demo_data/projects_registry.json`) to a `ProjectResources` (its own `IfcRepository` and
+`DocumentAnalyzer`s), downloaded and verified once per project against Azure Data Lake Storage
+Gen2 when configured (`ADLS_ACCOUNT_URL`), with a frozen `source_set_id` provenance value
+recorded on every citation and audit event. `ConversationStore.bind_project` binds one thread to
+exactly one project for its lifetime, enforced backend-side. This is not a hypothetical future
+abstraction: two independently-isolated projects (`demo`, `westgate`) run against the real
+deployed slice today, each with its own directory-level POSIX ACL on the underlying storage
+account, verified with a minimal service principal holding zero RBAC roles.
+
+Still bounded, deliberately: one project per thread, no cross-project query, and no general
+`SourceRegistry`/`CapabilityRegistry` abstraction beyond what `ServiceContainer`/`ProjectResources`
+already provide -- broadening that further is an explicit owner decision, not an assumed next
+step.
+
+## Azure profile (SPEC-M3/M4/M7/M8/M9, D-012/014/018/020/023)
+
+The identical application code runs either fully local (no Azure setting configured) or as a
+real cloud-native slice, opt-in per setting in `apps/api/app/config.py`:
+
+```text
+React (Azure Container App: web, public)
+  -> FastAPI + LangGraph (Azure Container App: api, internal-only)
+       -> Azure OpenAI (Managed Identity)                 -- interpretation/planning/vision/polish
+       -> Azure AI Search (Managed Identity)               -- retrieval-directed miss, opt-in
+       -> Azure Database for PostgreSQL (Managed Identity) -- conversation + audit persistence
+       -> Azure Blob Storage (Managed Identity)            -- evidence crop persistence
+       -> Azure Data Lake Storage Gen2 (Managed Identity)  -- multi-project source isolation
+       -> Application Insights (OpenTelemetry)             -- per-request trace, Cloud Provenance link
+```
+
+No API keys anywhere in the codebase or infrastructure -- every Azure dependency authenticates
+via a Managed Identity scoped to least-privilege RBAC. Every layer above degrades cleanly to a
+local, zero-cost equivalent (or is simply absent) when its own setting is unset; there is exactly
+one codebase, not a fork for "the local demo" versus "the real deployment." `infra/bicep/`
+provisions it; `.github/workflows/azure-deploy.yml` (manual `workflow_dispatch` only) builds,
+deploys, and runs a post-deploy smoke test against the real subscription on every run, including
+a guard that refuses to silently disable an already-enabled optional feature on redeploy.

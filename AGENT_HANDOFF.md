@@ -42,6 +42,9 @@ This is a cold-start guide for a new vendor or frontier coding agent. Read this 
 | Azure AI Search retrieval fallback (opt-in, `AZURE_SEARCH_ENDPOINT`) -- ranks documents by relevance, informs the directed-vs-blanket miss message, never a substitute for `native_lookup` (SPEC-M7, D-018) | `apps/api/app/retrieval.py`, `apps/api/app/providers/azure_openai_provider.py` (`AzureOpenAIEmbeddingProvider`), `apps/api/app/agent/graph.py` (`_retrieve_relevant_documents`), `scripts/index_document_corpus.py` |
 | Per-caller rate limiting on `/api/v1/chat`/resume (opt-in, `RATE_LIMIT_REQUESTS_PER_MINUTE`), in-process only (SPEC-M6's OD-22 single-replica pin) (D-019) | `apps/api/app/rate_limit.py`, `apps/api/app/security.py` (`require_rate_limit`) |
 | Evidence crop persistence via Azure Blob Storage (opt-in, `EVIDENCE_STORAGE_ACCOUNT_URL`) -- dual-write from `DocumentAnalyzer.crop_evidence`, blob-first/local-fallback serving (SPEC-M8, D-020) | `apps/api/app/evidence_storage.py`, `apps/api/app/tools/document/analyzer.py` (`crop_evidence`), `apps/api/app/main.py` (`evidence_file`) |
+| Multi-project workspace (opt-in, `ADLS_ACCOUNT_URL`) -- `ServiceContainer.get_project`, per-project `ProjectResources`, one thread bound to one project for its lifetime (SPEC-M9, D-023) | `apps/api/app/services.py` (`ServiceContainer.get_project`, `ProjectResources`), `apps/api/app/persistence/*` (`bind_project`), `demo_data/projects_registry.json` |
+| Optional answer-wording polish (opt-in, `ENABLE_ANSWER_POLISH`) -- number-preservation guard is the actual enforcement, not the prompt (SPEC-M10, D-025) | `apps/api/app/agent/graph.py` (`_polish_answer`, `_polish_preserves_facts`) |
+| Cloud Provenance -> Application Insights deep link (opt-in, `AZURE_TENANT_ID`/`APP_INSIGHTS_RESOURCE_ID`) -- tags the OpenTelemetry span with `AgentService.invoke`'s own `trace_id`, not the request-lifecycle `request_id` (D-028, fixed in D-031 after shipping with the wrong ID) | `apps/api/app/main.py` (`_tag_span_with_trace_id`), `apps/api/app/agent/graph.py` (`_cloud_trace_url`, `_cloud_trace_query`) |
 | Independent and invariant verification | `apps/api/app/verification/verifiers.py` |
 | Browser state, viewer, citations, audit grouping, cancellation | `apps/web/src/main.tsx`, `apps/web/src/IfcViewer.tsx`, `apps/web/src/styles.css` |
 | Deterministic-contract, failure-path, characterization, and seam-invariance tests | `tests/` (see `docs/specs/SPEC-M1-reliability-foundation-v1.md`) |
@@ -75,7 +78,15 @@ This is a cold-start guide for a new vendor or frontier coding agent. Read this 
 
 ## Current repository state
 
-The public `main` line contains the initial public release plus synthetic screenshot documentation. This handoff is documentation-only and should be developed on a dedicated branch; it does not authorize a merge or production change. Runtime output under `runtime/` is local and ignored.
+The public `main` line is well past the initial release: ten milestones (`docs/specs/SPEC-M1-*`
+through `SPEC-M10-*`) and thirty-one decision-log entries (`docs/decisions/README.md`, D-001
+through D-031) are merged, including a real, currently-deployed Azure profile (Container Apps,
+Azure OpenAI, Azure AI Search, PostgreSQL, ADLS Gen2 multi-project isolation, Blob Storage,
+Application Insights) alongside the original local Ollama profile. `PROJECT_STATE.md`'s
+"Milestone history" section is the authoritative, dated record -- read it, not just this file's
+own code map, before assuming a capability is future work. This handoff is documentation-only
+and should be developed on a dedicated branch; it does not authorize a merge or production
+change. Runtime output under `runtime/` is local and ignored.
 
 ## Takeover questions
 

@@ -2,9 +2,24 @@
 
 ## Purpose and scope
 
-ARMIE Construction Intelligence Workbench is a local, public reference implementation for auditable questions over one synthetic IFC model, one synthetic engineering schedule, and an optional current viewer snapshot. It demonstrates how natural-language interpretation can be separated from deterministic domain execution, evidence, independent verification, and an inspectable audit trail.
+**This section was last substantively rewritten at M1 and had drifted well behind the actual
+milestone history below (M6 through M10) until 2026-09-14 -- corrected here rather than left
+stale; see the "Milestone history" section for the authoritative, dated account of everything
+this paragraph now summarizes.**
 
-This repository is not a production SaaS, compliance engine, unrestricted BIM query language, multi-tenant service, or production data-governance boundary. The public fixture and all committed screenshots are synthetic.
+ARMIE Construction Intelligence Workbench is a public reference implementation, runnable two
+ways from the identical codebase: fully local (Ollama, one synthetic project, zero cost) or as a
+real, currently-deployed Azure cloud-native slice (Container Apps, Azure OpenAI, Azure AI
+Search, PostgreSQL, ADLS Gen2, Blob Storage, Application Insights, all behind Managed Identity --
+see the M3/M4/M7/M8/M9 milestone entries below). It demonstrates how natural-language
+interpretation can be separated from deterministic domain execution, evidence, independent
+verification, and an inspectable, cloud-observable audit trail -- across a real multi-project,
+multi-document corpus on the Azure profile, not only the original single-fixture local demo.
+
+This repository is not a production SaaS, compliance engine, unrestricted BIM query language, or
+production data-governance boundary. It **is**, as of M9, a real multi-project system (two
+independently ACL-isolated projects), which the original wording above no longer accurately
+excluded. The public fixtures and all committed screenshots are synthetic.
 
 ## Current implementation
 
@@ -32,8 +47,12 @@ The main orchestration lives in `apps/api/app/agent/graph.py`. Shared contracts 
 - Current-view screenshot inspection with target-visibility and sufficient-view checks; clarification is preferred over an unsupported visual claim.
 - A narrow, first-class IFC<->drawing reconciliation for door/window quantities, joined on the IFC `Tag` field against the schedule's Mark column, zero model calls, item-level `matched`/`dimension_mismatch`/`missing_in_pdf`/`missing_in_ifc` results (`docs/decisions/README.md` D-011). Every other cross-source shape remains refused, unchanged.
 - Short-term conversational context, explicit clarification, unsupported/refused dispositions, request cancellation/deadlines, citations, grouped audit stages, and independent verification.
-- Local Ollama provider path using `qwen3:8b` and `qwen3-vl:8b`. OpenAI provider hooks remain in the provider abstraction, but the public release has not been validated end to end with OpenAI.
+- Local Ollama provider path using `qwen3:8b` and `qwen3-vl:8b` (default, zero cost). **Azure OpenAI is validated end to end, not just a hook**: the deployed `armiem3-api` runs `llm_provider=azure` against a real Azure OpenAI resource (Managed Identity, no API keys), verified on every deploy by `azure-deploy.yml`'s own post-deploy smoke test (a real model-backed question, not only the deterministic path). See the M3 milestone entry below.
 - Optional bounded escalation for persistent semantic-plan validation failures: set `OLLAMA_ESCALATION_MODEL` in `.env` to a larger local model to enable it. It is disabled by default; no developer or CI environment is required to hold a large model. Provider access for planning, vision, and escalation goes through factories injected on `ServiceContainer` (`apps/api/app/services.py`), so the probabilistic path can be driven in tests by a fake provider with no live model (see `docs/decisions/README.md` D-007).
+- **Real multi-project workspaces (M9, D-023)**: two independently ADLS-isolated projects (`demo`, `westgate`) on the Azure profile, each with its own IFC/PDF corpus, directory-level POSIX ACL, and frozen `source_set_id` provenance surfaced on every citation/audit event. One thread is bound to exactly one project for its lifetime.
+- **Multi-document corpus and retrieval (M6/M7)**: 18 configured documents on the Azure profile (schedules, spec sheets, RFI logs, meeting minutes), a naive zero-model-call deterministic baseline first, and an opt-in Azure AI Search hybrid (BM25 + `text-embedding-3-small`) retrieval fallback that directs an honest miss to the most relevant document instead of a blanket "not found."
+- **Optional answer-wording polish (M10, D-025)**: a final model call may reword an already-verified deterministic answer for tone, gated by a code-level guard (`AgentService._polish_preserves_facts`) that rejects any rewrite whose set of numbers doesn't exactly match the original. Off by default.
+- **Cloud-native operational surface (M3/M4/M7/M8, D-012/014/018/020/028/031)**: Postgres-backed conversation/audit persistence, Azure Blob-backed evidence crop persistence, per-caller and global rate limiting, and a one-click Cloud Provenance link from any answer into that specific request's own Application Insights telemetry (OpenTelemetry-tagged with the app's own trace ID, not a generic dashboard).
 
 The committed public fixture contains two storeys, four synthetic doors, four synthetic windows, controlled quantities, and fictional schedule identifiers. Fixture facts are test/demo data, not claims about a real project.
 
@@ -48,7 +67,7 @@ The committed public fixture contains two storeys, four synthetic doors, four sy
 
 ## Known limitations and production gaps
 
-- One active local workspace and one IFC/PDF pair; no authentication, tenancy, or deployment SLOs. A durable conversation/audit store now exists (SPEC-M4, opt-in via `DATABASE_URL`) but is single-database, no migration framework beyond one additive SQL file -- not a multi-tenant or schema-evolution-hardened store.
+- **Corrected 2026-09-14**: the local profile's default is one active workspace and one IFC/PDF pair, but this is no longer true of the Azure profile -- M9 (D-023) added real multi-project isolation (two independently ACL-isolated projects, `demo`/`westgate`), and M5 (D-015) added shared-secret authentication on the public API, app-wide. Neither is enterprise-grade: the multi-project model is one thread-per-project, not a general multi-tenant data model, and the shared secret authenticates possession of it, not per-user identity or per-project authorization (Entra ID-backed authorization is tracked as a future step, not built). No deployment SLOs are claimed. A durable conversation/audit store now exists (SPEC-M4, opt-in via `DATABASE_URL`) but is single-database, no migration framework beyond additive SQL files -- not a schema-evolution-hardened store.
 - The IFC query surface is deliberately bounded. It is not an arbitrary property-query language, nearest-room search, cross-source join engine, or compliance engine.
 - Viewer geometry is a bounded browser projection of the IFC. Autonomous camera planning and general spatial reasoning are not implemented.
 - The deterministic document extractor uses tolerance-based row/column clustering (word coordinates -> row bands by `y`, column bands by the header row's `x` extents) characterized specifically against the committed synthetic schedule's clean, left-aligned layout. It is **not** a general table-extraction capability: no claim is made that it works on an arbitrary drawing, a multi-page document, a scanned/OCR-required document, or a ruled-line table (`docs/decisions/README.md` D-009). When it fails or is ambiguous, the Ollama vision path is a bounded fallback, which can be slow and probabilistic; evidence and verification are required, but production document-layout/OCR infrastructure is out of scope.
@@ -56,20 +75,27 @@ The committed public fixture contains two storeys, four synthetic doors, four sy
 - The `/api/v1/evidence/{filename}` endpoint enforces basename containment (`Path(filename).name != filename` is rejected) before resolving into `evidence_dir`; this was previously an undocumented invariant rather than a gap.
 - LangSmith hooks and the direct-OpenAI provider path remain unvalidated extension points. The Docker images and the Azure profile are no longer in that category: M3 (`docs/reports/2026-09-08-m3-azure-deployment-baseline.md`) ran a real deployment against a real Azure subscription and answered a real question through it, evidenced above. This is still a single-environment, single-replica-per-app Phase 1 slice, not a claim of a hardened, multi-environment, or auto-scaling production deployment. No Compose file is present in this repository.
 - The graph module is large and carries historical compatibility paths. Refactoring it should preserve the typed plan and verification boundaries.
-- The automated public test surface is 151 tests across 9 files (`tests/`; see the "Verification state" section below), CI-verified on Python 3.9-3.12 via `.github/workflows/ci.yml`. This is a deterministic-contract and fake-provider-driven regression net for the router/planning/verification boundary, not a scored or graded evaluation harness; there is no claim of a 216-case/deep evaluation run in this repository.
+- The automated public test surface is 295 tests (`tests/`; see the "Verification state" section below, and the M6 through M10 milestone entries for what each batch added), CI-verified on Python 3.9-3.12 via `.github/workflows/ci.yml`. This is a deterministic-contract and fake-provider-driven regression net for the router/planning/verification/retrieval/multi-project/persistence/polish boundaries, not a scored or graded evaluation harness; there is no claim of a large-scale graded evaluation run in this repository. Azure-specific behavior is additionally verified against the real subscription by `azure-deploy.yml`'s own post-deploy smoke tests on every deploy, and by hand (`docs/reports/`, dated deployment-baseline reports).
 - CORS is configured for the documented local development origins. A deployment must replace this with an explicit environment-specific policy.
 - **Resolved by M1.5 (D-010):** the `error`/`clarification_required`/`unsupported` dispositions previously all collapsed into `refused` on the semantic-planning failure path; `AgentService._unsupported_subresult` now maps the actual underlying cause to the correct disposition. See `docs/decisions/README.md` D-010 and `tests/test_disposition_contract.py`.
 
 ## Verification state (this checkout)
 
-The last local verification for the public workspace was:
+**The paragraph below (167 tests, M1/M1.5/M2/M2P1 only) is the state as of those milestones and
+is kept for historical/methodology reference; it is not the current count.** The current count
+(295 tests, through M10) is in "Known limitations and production gaps" above and the "Milestone
+history" section below, which is the authoritative, dated record of what each later milestone
+added and how it was verified -- this section was not kept current turn-by-turn and should not
+be read as the latest state.
+
+The last local verification for the public workspace **at M1.5/M2** was:
 
 ```text
 PYTHONPATH=apps/api python3 -m pytest -q  -> 167 passed
 cd apps/web && npm ci && npm run build    -> passed (Vite chunk-size warning only)
 ```
 
-The 167 tests are: 2 `IfcRepository` fixture tests (`test_public_workspace.py`); deterministic
+The 167 tests were: 2 `IfcRepository` fixture tests (`test_public_workspace.py`); deterministic
 contract tests for `router.py`, `plan_validation.py`, and `verifiers.py` (no provider); 12
 failure-path evals F1-F12 (`test_failure_path_evals.py`) driven by a scripted, no-network fake
 provider, asserting the disposition contract in `docs/specs/SPEC-M1-reliability-foundation-v1.md`
@@ -143,7 +169,13 @@ Both `npm ci` and `npm install` work with no flags (`three` is pinned to `0.149.
 
 **M6 — Multi-document corpus and its naive deterministic baseline** (`docs/specs/SPEC-M6-multi-document-corpus-v1.md`, D-017), merged to `main`. Satisfies the Phase 3 prerequisite from the scoping note below: `Settings.pdf_files` (list, was a single `pdf_file`) and `ServiceContainer.document_analyzers` (one `DocumentAnalyzer` per configured file) replace the previous hardcoded one-document assumption; default stays a single-element list, so no deployment that doesn't override it changes behaviour. `QueryPlan.requested_document` exists but is not yet wired to any live API/UI override -- natural-language document-name inference is SPEC-M7's concern. The new `_execute_pdf_multi_document` naive baseline (zero model calls, never falls through to vision) evidences two distinct failure modes rather than one, after the owner rejected the first spec draft's single-collision scope as insufficient to justify Azure AI Search: a **precision failure** (the same field answerable from more than one document -- `clarification_required`, OD-32) and a **recall failure** (a realistically-phrased question's answer exists only under different vocabulary than any table uses, so no document matches at all -- `clarification_required`, OD-33, indistinguishable here from a genuine no-answer case, which is the point). A new 17-document corpus (`demo_data/corpus/`, 6 schedule variants + 4 spec sheets + 4 RFI entries + 3 meeting-minutes excerpts) plus the existing schedule reaches 18 documents total -- an owner-confirmed (OD-30) mechanism-demonstration scale, explicitly not an enterprise-scale claim. `armie_demo_schedule.pdf`/`armie_demo.ifc` are untouched (SPEC-M2's Tag/reconciliation fixture work depends on the original schedule staying exactly as it is). 227 tests pass (201 + 26 new); every existing PDF-lookup test passes unmodified (mechanical `pdf_file=` -> `pdf_files=[...]` fallout only, no assertion changed).
 
-## Deferred beyond M5 / D-016 / M6
+## Milestone history, continued (M7 onward) -- despite this section's own title
+
+**This header's name is a leftover from when it was genuinely "what's deferred after M6" -- every
+milestone from M7 onward (through M10, plus every D-024–D-031 live fix) was appended below it
+without renaming, so a reader taking the title literally would wrongly conclude M7-M10 never
+happened. They did; see below. The actual current "not yet done" list lives in
+`docs/decisions/REVIEW_REQUIRED.md`, not here.**
 
 Dead `web-ifc`/`web-ifc-three` removal, `graph.py` decomposition more broadly, the `ResponseLanguage` (`pt-PT`/`fr`/`es`) contract decision, the vision-path `ambiguity`-field validation gap, the English-only PDF-question routing gap, `scripts/generate_demo_data.py` drift from the committed fixtures (no `Tag` population, no schedule page 2 -- unrelated to M6's separate `demo_data/corpus/` additions), any cross-source shape beyond door/window reconciliation, per-call Azure client/credential reuse (each provider call currently constructs a new one), the `asyncio.to_thread` cancellation gap (a timed-out model call keeps running in its worker thread after the client sees a timeout response), request-tracking/cancellation state having no cross-replica representation (so OD-22's single-replica pin stands even with M4's Postgres persistence -- see `docs/decisions/REVIEW_REQUIRED.md` "M4: request-tracking/cancellation state has no cross-replica representation"), natural-language document-name inference and any actual retrieval-by-meaning (SPEC-M7, gated on M6's two evidenced failure modes above), and Azure Phases 4-5 (AKS, construction-intelligence expansion) — all tracked in `docs/decisions/REVIEW_REQUIRED.md` or their own future spec.
 
