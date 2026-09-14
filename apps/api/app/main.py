@@ -13,6 +13,11 @@ from opentelemetry import trace as otel_trace
 
 from app.agent.graph import AgentService
 from app.config import get_settings
+from app.finding_workflow import (
+    IllegalFindingTransition,
+    resolve_reverify_outcome,
+    validate_transition,
+)
 from app.persistence.conversation_store import ConversationStore
 from app.rate_limit import InMemorySlidingWindowRateLimiter
 from app.schemas.models import (
@@ -21,6 +26,8 @@ from app.schemas.models import (
     ChatRequest,
     ClarificationResumeRequest,
     Disposition,
+    FindingStatus,
+    FindingTransitionRequest,
     VerificationStatus,
 )
 from app.security import (
@@ -588,3 +595,75 @@ def request_status(request_id: str, x_session_id: str | None = Header(default=No
 @app.get("/api/v1/traces/{trace_id}")
 def trace(trace_id: str):
     return app.state.container.audit_store.by_trace(trace_id)
+
+
+@app.get("/api/v1/findings")
+def list_findings(project_id: str = "demo", status: FindingStatus | None = None) -> list[dict]:
+    """SPEC-M11 §4C. `require_api_key` already covers this app-wide -- no
+    new auth surface for this or any route below.
+    """
+    container: ServiceContainer = app.state.container
+    return [item.model_dump() for item in container.finding_store.list_for_project(project_id, status)]
+
+
+@app.get("/api/v1/findings/{finding_id}")
+def get_finding(finding_id: str) -> dict:
+    container: ServiceContainer = app.state.container
+    finding = container.finding_store.get(finding_id)
+    if finding is None:
+        raise HTTPException(status_code=404, detail=f"Finding '{finding_id}' was not found.")
+    return finding.model_dump()
+
+
+@app.post("/api/v1/findings/{finding_id}/transition")
+def transition_finding(finding_id: str, request: FindingTransitionRequest, x_session_id: str | None = Header(default=None)) -> dict:
+    """SPEC-M11 §4C/§5: `validate_transition` is the single source of truth
+    for legality -- an illegal action is a 409, never a silent no-op or an
+    unhandled 500. `x_session_id` (D-016's per-tab correlation token, not a
+    real login -- see the model's own field docstring) is recorded as the
+    acting "human" for this transition.
+    """
+    container: ServiceContainer = app.state.container
+    finding = container.finding_store.get(finding_id)
+    if finding is None:
+        raise HTTPException(status_code=404, detail=f"Finding '{finding_id}' was not found.")
+    try:
+        target_status = validate_transition(finding.status, request.action)
+    except IllegalFindingTransition as error:
+        raise HTTPException(status_code=409, detail=str(error)) from None
+    updated = container.finding_store.append_transition(
+        finding_id, to_status=target_status, actor_session_id=x_session_id, note=request.note,
+    )
+    return updated.model_dump()
+
+
+@app.post("/api/v1/findings/{finding_id}/reverify")
+async def reverify_finding(finding_id: str, x_session_id: str | None = Header(default=None)) -> dict:
+    """SPEC-M11 §4C: the actual closed-loop claim. Legal only from
+    RESOLVED; re-reads the real IFC/PDF sources for this finding's own tag
+    (`AgentService.reverify_reconciliation_tag`, zero model calls, the same
+    comparison a full reconciliation run uses) rather than trusting the
+    human's own "I fixed it" click -- transitions to VERIFIED_CLOSED only
+    if that fresh read now agrees, otherwise bounces back to
+    ACTION_REQUIRED with the newly-observed values.
+    """
+    container: ServiceContainer = app.state.container
+    agent: AgentService = app.state.agent
+    finding = container.finding_store.get(finding_id)
+    if finding is None:
+        raise HTTPException(status_code=404, detail=f"Finding '{finding_id}' was not found.")
+    if finding.status != FindingStatus.RESOLVED:
+        raise HTTPException(status_code=409, detail=f"Cannot re-verify a finding in status '{finding.status.value}'; only RESOLVED findings can be re-verified.")
+    _, resources = await _resolve_project(finding.project_id)
+    fresh = await asyncio.to_thread(agent.reverify_reconciliation_tag, resources, finding.tag)
+    now_matches = fresh["status"] == "matched"
+    target_status = resolve_reverify_outcome(finding.status, now_matches=now_matches)
+    updated = container.finding_store.append_transition(
+        finding_id, to_status=target_status, actor_session_id=x_session_id,
+        note="Re-verified against the current sources." if now_matches else "Re-verify found the mismatch still present.",
+        updates={
+            "detail": fresh["detail"], "ifc_width_m": fresh["ifc_width_m"], "ifc_height_m": fresh["ifc_height_m"],
+            "pdf_width_m": fresh["pdf_width_m"], "pdf_height_m": fresh["pdf_height_m"],
+        },
+    )
+    return updated.model_dump()

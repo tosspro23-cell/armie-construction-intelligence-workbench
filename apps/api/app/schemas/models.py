@@ -144,6 +144,16 @@ class ChatRequest(BaseModel):
     source_preference: Literal["auto", "ifc", "pdf", "viewer_snapshot"] = "auto"
 
 
+class FindingTransitionRequest(BaseModel):
+    """SPEC-M11: body of `POST /api/v1/findings/{finding_id}/transition`.
+    `action` is validated against `finding_workflow.validate_transition`,
+    not trusted as a status value directly.
+    """
+
+    action: str = Field(min_length=1, max_length=64)
+    note: str | None = Field(default=None, max_length=2000)
+
+
 class ClarificationResumeRequest(BaseModel):
     answer: str = Field(min_length=1, max_length=4000)
     # SPEC-M9: optional, defense-in-depth only -- the source of truth is

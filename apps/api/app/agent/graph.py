@@ -782,6 +782,51 @@ Return only a corrected MultiQueryPlan JSON object."""
             items[mark] = {"tag": mark, "width_m": _value(width_index), "height_m": _value(height_index)}
         return items
 
+    def _compare_reconciliation_item(self, tag: str, ifc_item: dict | None, pdf_item: dict | None) -> dict[str, Any]:
+        """The actual per-tag join/comparison rule (SPEC-M2 §4D) -- factored
+        out of `_synthesize_reconciliation_response`'s own loop (SPEC-M11)
+        so `reverify_reconciliation_tag` below can re-run the *exact* same
+        comparison for one tag, not a re-implementation that could quietly
+        drift from the original.
+        """
+        if ifc_item and not pdf_item:
+            status, detail = "missing_in_pdf", f"{tag} is present in the IFC model but has no matching row on the PDF schedule."
+        elif pdf_item and not ifc_item:
+            status, detail = "missing_in_ifc", f"{tag} is present on the PDF schedule but has no matching IFC element."
+        else:
+            width_delta = abs((ifc_item["width_m"] or 0.0) - (pdf_item["width_m"] or 0.0))
+            height_delta = abs((ifc_item["height_m"] or 0.0) - (pdf_item["height_m"] or 0.0))
+            if width_delta <= self._RECONCILIATION_TOLERANCE_M and height_delta <= self._RECONCILIATION_TOLERANCE_M:
+                status = "matched"
+                detail = f"{tag}: IFC and PDF dimensions agree within tolerance (±{self._RECONCILIATION_TOLERANCE_M} m)."
+            else:
+                status = "dimension_mismatch"
+                detail = (f"{tag}: IFC {ifc_item['width_m']}×{ifc_item['height_m']} m vs PDF "
+                           f"{pdf_item['width_m']}×{pdf_item['height_m']} m differ beyond the "
+                           f"±{self._RECONCILIATION_TOLERANCE_M} m tolerance.")
+        return {
+            "tag": tag,
+            "entity_type": (ifc_item or {}).get("entity_type"),
+            "storey": (ifc_item or {}).get("storey"),
+            "ifc_width_m": (ifc_item or {}).get("width_m"),
+            "ifc_height_m": (ifc_item or {}).get("height_m"),
+            "pdf_width_m": (pdf_item or {}).get("width_m"),
+            "pdf_height_m": (pdf_item or {}).get("height_m"),
+            "status": status,
+            "detail": detail,
+        }
+
+    def reverify_reconciliation_tag(self, project_resources: ProjectResources, tag: str) -> dict[str, Any]:
+        """SPEC-M11 §4C: re-reads both sources for exactly one tag and
+        re-runs the same comparison a full reconciliation would -- the
+        actual "closed-loop" claim, proven by a fresh read, never by
+        trusting a finding's own stored values. Zero model calls, same as
+        the full reconciliation this is a single-tag slice of.
+        """
+        ifc_items = self._reconciliation_ifc_items(project_resources)
+        pdf_items = self._reconciliation_pdf_items(project_resources)
+        return self._compare_reconciliation_item(tag, ifc_items.get(tag), pdf_items.get(tag))
+
     def _synthesize_reconciliation_response(self, state: GraphState, multi_plan: MultiQueryPlan) -> dict:
         """SPEC-M2 §4D: join the IFC and PDF door/window sides on Tag/Mark.
 
@@ -800,33 +845,9 @@ Return only a corrected MultiQueryPlan JSON object."""
         evidence: list[Evidence] = []
         for tag in sorted(set(ifc_items) | set(pdf_items)):
             ifc_item, pdf_item = ifc_items.get(tag), pdf_items.get(tag)
-            if ifc_item and not pdf_item:
-                status, detail = "missing_in_pdf", f"{tag} is present in the IFC model but has no matching row on the PDF schedule."
-            elif pdf_item and not ifc_item:
-                status, detail = "missing_in_ifc", f"{tag} is present on the PDF schedule but has no matching IFC element."
-            else:
-                width_delta = abs((ifc_item["width_m"] or 0.0) - (pdf_item["width_m"] or 0.0))
-                height_delta = abs((ifc_item["height_m"] or 0.0) - (pdf_item["height_m"] or 0.0))
-                if width_delta <= self._RECONCILIATION_TOLERANCE_M and height_delta <= self._RECONCILIATION_TOLERANCE_M:
-                    status = "matched"
-                    detail = f"{tag}: IFC and PDF dimensions agree within tolerance (±{self._RECONCILIATION_TOLERANCE_M} m)."
-                else:
-                    status = "dimension_mismatch"
-                    detail = (f"{tag}: IFC {ifc_item['width_m']}×{ifc_item['height_m']} m vs PDF "
-                               f"{pdf_item['width_m']}×{pdf_item['height_m']} m differ beyond the "
-                               f"±{self._RECONCILIATION_TOLERANCE_M} m tolerance.")
-            counts[status] += 1
-            reconciliation_items.append({
-                "tag": tag,
-                "entity_type": (ifc_item or {}).get("entity_type"),
-                "storey": (ifc_item or {}).get("storey"),
-                "ifc_width_m": (ifc_item or {}).get("width_m"),
-                "ifc_height_m": (ifc_item or {}).get("height_m"),
-                "pdf_width_m": (pdf_item or {}).get("width_m"),
-                "pdf_height_m": (pdf_item or {}).get("height_m"),
-                "status": status,
-                "detail": detail,
-            })
+            item = self._compare_reconciliation_item(tag, ifc_item, pdf_item)
+            counts[item["status"]] += 1
+            reconciliation_items.append(item)
             if ifc_item:
                 evidence.append(Evidence(source_type=SourceType.IFC, source_file=state["project_resources"].ifc_repository.path.name,
                     summary=f"IFC {ifc_item['entity_type']} Tag={tag}.", locator={"global_id": ifc_item["global_id"], "express_id": ifc_item["express_id"], "tag": tag}))
