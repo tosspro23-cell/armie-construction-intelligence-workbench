@@ -16,7 +16,7 @@ import { AuthedImage } from "./apiClient";
 // bottom.
 
 type Citation = { evidence_id: string; source_type: string; label: string; locator: Record<string, any>; project_id?: string; source_set_id?: string; source_file?: string };
-type TraceEvent = { id: string; step: string; event_type: string; summary: string; payload: Record<string, any>; actual_provider?: string; actual_model?: string; planning_mode?: string; model_call_count?: number; tool_call_count?: number };
+type TraceEvent = { id: string; step: string; event_type: string; summary: string; payload: Record<string, any>; actual_provider?: string; actual_model?: string; planning_mode?: string; model_call_count?: number; tool_call_count?: number; timestamp?: string };
 type Response = {
   disposition: string; answer_markdown: string; citations: Citation[]; verification: { status: string; reason?: string };
   execution_metadata: Record<string, any>;
@@ -33,6 +33,43 @@ function auditStage(event: TraceEvent): Stage {
   if (step.includes("execute") || type.includes("tool") || type.includes("subplan")) return "Execution";
   if (step.includes("verif") || type.includes("verif") || type.includes("evidence")) return "Verification";
   return "Final Response";
+}
+
+// Owner-requested, 2026-09-14: the Result step showed one total latency
+// with no way to tell which step actually spent the time. There is no
+// per-event duration recorded anywhere (AuditEvent.duration_ms exists but
+// is never populated) -- this is a client-side approximation from each
+// event's own `timestamp`, already present on every event, not a new
+// backend measurement. Each stage's span runs from its own first event
+// until the next stage-with-events' first event (or the trace's last
+// event, for whichever stage ran last) -- this charges the "thinking
+// time" between a stage's last audit call and the next stage's first one
+// to the stage that was actually running during that gap, which a naive
+// max-minus-min *within* one stage's own events would miss entirely for
+// any stage that only ever logs a single event.
+function stageTimingsMs(trace: TraceEvent[]): Partial<Record<Stage, number>> {
+  const firstSeen = new Map<Stage, number>();
+  let lastSeen = -Infinity;
+  for (const event of trace) {
+    if (!event.timestamp) continue;
+    const t = new Date(event.timestamp).getTime();
+    if (Number.isNaN(t)) continue;
+    const stage = auditStage(event);
+    if (!firstSeen.has(stage) || t < firstSeen.get(stage)!) firstSeen.set(stage, t);
+    if (t > lastSeen) lastSeen = t;
+  }
+  const ordered = [...firstSeen.entries()].sort((a, b) => a[1] - b[1]);
+  const durations: Partial<Record<Stage, number>> = {};
+  ordered.forEach(([stage, start], index) => {
+    const end = index + 1 < ordered.length ? ordered[index + 1][1] : lastSeen;
+    durations[stage] = Math.max(0, end - start);
+  });
+  return durations;
+}
+
+function formatMs(ms: number | undefined): string | null {
+  if (ms === undefined) return null;
+  return ms < 1000 ? `~${Math.round(ms)} ms` : `~${(ms / 1000).toFixed(1)} s`;
 }
 
 function citationFacts(citation: Citation): Array<[string, string]> {
@@ -104,6 +141,13 @@ export function DecisionStory({ latest, trace, projectId, onOpenCitation }: {
   // silently empty.
   const clarificationEvent = trace.find((event) => event.event_type === "clarification_requested");
   const byStage = (stage: Stage) => trace.filter((event) => auditStage(event) === stage);
+  const stageTimings = stageTimingsMs(trace);
+  // Plan's own StepTrace below already combines Planning + Normalization
+  // events into one list -- their latencies are combined here too, so the
+  // subtitle's number matches what that step's trace actually covers.
+  const planLatencyMs = stageTimings["Planning"] === undefined && stageTimings["Normalization"] === undefined
+    ? undefined
+    : (stageTimings["Planning"] ?? 0) + (stageTimings["Normalization"] ?? 0);
 
   return <section className="decision-story">
     <h2>Decision Trace</h2>
@@ -115,7 +159,7 @@ export function DecisionStory({ latest, trace, projectId, onOpenCitation }: {
         pattern as every other optional Azure setting); otherwise this
         stays plain text exactly as before this fix, never a broken link. */}
     {(meta.project_id || projectId) && (meta.cloud_trace_url
-      ? <a className="cloud-provenance" href={meta.cloud_trace_url} target="_blank" rel="noreferrer">
+      ? <a className="cloud-provenance" href={meta.cloud_trace_url} target="_blank" rel="noreferrer" title="Opens Application Insights Logs, pre-filtered to this request's trace ID. If a 'Queries hub' dialog opens first, close it (×) to see the pre-filled query underneath.">
           <span className="cloud-provenance-icon" aria-hidden="true">☁️</span>
           <span>Cloud provenance — Project <strong>{meta.project_id || projectId}</strong> · Frozen source version <strong>{meta.source_set_id || "—"}</strong></span>
           <span className="cloud-provenance-link-hint">View in Application Insights →</span>
@@ -127,7 +171,7 @@ export function DecisionStory({ latest, trace, projectId, onOpenCitation }: {
 
     <ol className="story-steps">
       <li className="story-step">
-        <StepHeader number={1} icon="❓" title="Question" subtitle={meta.normalized_request ? undefined : "as asked"} />
+        <StepHeader number={1} icon="❓" title="Question" subtitle={[meta.normalized_request ? null : "as asked", formatMs(stageTimings["Intent Understanding"])].filter(Boolean).join(" · ") || undefined} />
         <p className="story-step-body">{meta.normalized_request || "—"}</p>
         <StepTrace events={byStage("Intent Understanding")} />
       </li>
@@ -142,7 +186,7 @@ export function DecisionStory({ latest, trace, projectId, onOpenCitation }: {
             this step's own trace and, correctly, couldn't find one. The
             total now lives on the Result step below, which is the one
             step that actually summarizes the whole request. */}
-        <StepHeader number={2} icon="🧭" title="Plan" subtitle={`${meta.planning_mode || "—"} planning`} />
+        <StepHeader number={2} icon="🧭" title="Plan" subtitle={[`${meta.planning_mode || "—"} planning`, formatMs(planLatencyMs)].filter(Boolean).join(" · ")} />
         {subplans.length === 0 ? <p className="story-step-body empty">No plan recorded.</p> : <ul className="plan-list">
           {subplans.map((plan, index) => <li key={plan.subtask_id || index}>
             <span className="plan-op">{plan.operation || plan.intent || "—"}{plan.entity_type ? ` · ${plan.entity_type}` : ""}</span>
@@ -153,7 +197,7 @@ export function DecisionStory({ latest, trace, projectId, onOpenCitation }: {
       </li>
 
       <li className="story-step">
-        <StepHeader number={3} icon="⚙️" title="Execution" subtitle={`source: ${meta.source || "—"} · ${meta.tool_call_count || 0} tool call(s)`} />
+        <StepHeader number={3} icon="⚙️" title="Execution" subtitle={[`source: ${meta.source || "—"}`, `${meta.tool_call_count || 0} tool call(s)`, formatMs(stageTimings["Execution"])].filter(Boolean).join(" · ")} />
         {retrievalEvent ? <div className="retrieval-evidence">
           <p className="retrieval-summary">
             <strong>Azure AI Search retrieval considered</strong> — {retrievalEvent.payload.documents_evaluated?.length || 0} document(s) scored,
@@ -178,19 +222,26 @@ export function DecisionStory({ latest, trace, projectId, onOpenCitation }: {
 
       <li className="story-step story-step-evidence">
         <StepHeader number={4} icon="📄" title="Evidence" subtitle={`${citations.length} citation(s)`} />
+        {/* Collapsed by default, one click to open -- matches the same
+            collapsed-summary-then-expandable-detail pattern already used
+            for each step's own raw trace and the AI Search relevance
+            table. Previously every citation's full card (including its
+            evidence-crop image) rendered open at once, which was the
+            first thing a stranger saw regardless of how many citations an
+            answer had. Owner-requested, 2026-09-14. */}
         {citations.length === 0 ? <p className="story-step-body empty">No citations for this answer.</p> : <div className="evidence-cards">
-          {citations.map((citation) => <article key={stableCitationKey(citation)} className="evidence-card" onClick={() => onOpenCitation(citation)}>
-            <header><span className={`evidence-badge ${citation.source_type}`}>{citation.source_type}</span><span className="evidence-label">{citation.label}</span></header>
+          {citations.map((citation) => <details key={stableCitationKey(citation)} className="evidence-card">
+            <summary><span className={`evidence-badge ${citation.source_type}`}>{citation.source_type}</span><span className="evidence-label">{citation.label}</span></summary>
             {citation.locator?.evidence_crop && <AuthedImage className={`evidence-crop ${citation.locator.localized === false ? "unlocalized" : ""}`} src={`/api/v1/evidence/${citation.locator.evidence_crop}`} alt="Cited PDF evidence crop" />}
             {citation.locator?.localized === false && <p className="evidence-unlocalized-note">Exact location on the page could not be confidently determined — showing the full page for manual review.</p>}
             <dl className="citation-facts">{citationFacts(citation).slice(0, 4).map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{value}</dd></div>)}</dl>
-            <span className="evidence-jump">Jump to this evidence →</span>
-          </article>)}
+            <button type="button" className="evidence-jump" onClick={() => onOpenCitation(citation)}>Jump to this evidence →</button>
+          </details>)}
         </div>}
       </li>
 
       <li className="story-step">
-        <StepHeader number={5} icon="✅" title="Verification" subtitle={latest.verification.status} />
+        <StepHeader number={5} icon="✅" title="Verification" subtitle={[latest.verification.status, formatMs(stageTimings["Verification"])].filter(Boolean).join(" · ")} />
         <p className={`story-step-body verification-reason ${latest.verification.status}`}>{latest.verification.reason || (latest.verification.status === "passed" ? "Every value was independently checked against its own source before being presented." : "—")}</p>
         <StepTrace events={byStage("Verification")} />
       </li>

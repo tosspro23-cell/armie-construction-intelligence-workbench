@@ -1328,3 +1328,45 @@ when unconfigured and a correctly-shaped URL (tenant, resource ID, and the respo
 `chat()` actually tags the live span with `app.trace_id`, not just that the helper function
 would produce a URL if it were tagged. 294 tests pass (291 + 3 new); `ruff` clean; `npm run
 build` clean.
+
+## D-029 — Four Decision Trace polish items from the owner's own D-028 walkthrough
+
+Owner clicked the new Application Insights link (D-028) and reported four follow-on items in
+the same pass, all frontend-only (`apps/web/src/`).
+
+1. **The Application Insights link's own UX.** Azure Portal shows a "Queries hub" picker dialog
+   over the Logs blade on first visit, and (separately, an Azure AD session/cookie behavior, not
+   this link) can re-prompt for login. Neither is something a URL parameter controls -- confirmed
+   by checking Microsoft's own documented "shareable Logs query" link format (`.../logs?query=
+   <KQL>`), which is already what `AgentService._cloud_trace_url` produces; the alternative,
+   Azure's compressed-blade query-share format that skips the hub, requires reverse-implementing
+   an undocumented compression scheme client-side -- judged disproportionate risk (a
+   miscompressed link is a broken link, worse than the current one-extra-click) for what the
+   hub dialog already solves by clicking its own × to reveal the pre-filled query underneath.
+   Addressed with a `title` tooltip on the link explaining what to expect, not a URL change.
+2. **Redundant inline citation buttons under every chat bubble** (`main.tsx`'s three `"View
+   {type} evidence"` buttons per turn) removed -- the Decision Trace's own Evidence step already
+   covers this, per-citation, with strictly more detail (crop image, locator facts, a jump
+   button). `stableCitationKey`, now unused in `main.tsx`, removed with it.
+3. **Every citation card in the Evidence step rendered fully open at once.** Now a `<details>`
+   per citation, collapsed by default -- the same collapsed-summary-then-expandable-detail
+   pattern already used for each step's own raw trace and the AI Search relevance table, just
+   not previously applied here. The card's own "Jump to this evidence" action moved from an
+   `onClick` on the whole (now-collapsible) card to its own button, so opening a card and jumping
+   to its evidence are two distinct, unambiguous actions.
+4. **The Result step's latency was one number for the whole request.** No per-event duration is
+   recorded anywhere (`AuditEvent.duration_ms` exists but has never been populated by anything);
+   `stageTimingsMs` is a client-side approximation from each event's own `timestamp` (already
+   present on every trace event, just not previously typed/used in the frontend) -- each stage's
+   span runs from its own first event to the next stage-with-events' first event, so a stage that
+   only ever logs a single audit event still gets a real, non-zero duration covering the actual
+   work done before the next stage started, not a naive same-stage max-minus-min that would
+   report ~0ms for exactly the stages most likely to have just one event. Surfaced as `~N ms`/
+   `~N s` next to Question/Plan/Execution/Verification's own subtitles; Result keeps the
+   server-measured total unchanged.
+
+**Verification.** `npm run build` clean; no backend surface changed, so the full `pytest` suite
+is unaffected by construction (294 pass, confirmed). No dedicated frontend test exists for these
+(this project has no frontend test harness yet -- the same gap `D-023`'s access-key/project-
+selector race noted); verified by inspection of the `stageTimingsMs`/`auditStage` interaction
+against real trace shapes from earlier sessions' live-verification runs.
