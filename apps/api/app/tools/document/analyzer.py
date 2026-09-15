@@ -179,6 +179,12 @@ class DocumentAnalyzer:
             return None
         import fitz
         document = fitz.open(self.pdf_path)
+        if page_number < 1 or page_number > len(document):
+            # A schedule that spans more pages than a caller assumed (see
+            # AgentService._reconciliation_pdf_items's page-range loop) must
+            # end its scan cleanly on the first out-of-range page, not raise
+            # -- fitz's own page indexing would otherwise throw here.
+            return None
         page = document[page_number - 1]
         words = page.get_text("words")
         if not words:

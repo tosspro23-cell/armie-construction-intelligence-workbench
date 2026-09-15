@@ -104,10 +104,15 @@
     "files": {
       "DigitalHub_FM-ARC_v2.ifc": {
         "content_sha256": "19d7d02d53c2b88e86890ee236297b12bbb0f7748030cd32ff6a22762e9966bb"
+      },
+      "digitalhub_schedule.pdf": {
+        "content_sha256": "4f6f4896240dd933020468908d8721e489d51e6466fdfa02cbc7bc2c43a4bac2"
       }
     },
     "ifc_file": "DigitalHub_FM-ARC_v2.ifc",
-    "pdf_files": [],
-    "source_set_id": "digitalhub-v1"
+    "pdf_files": [
+      "digitalhub_schedule.pdf"
+    ],
+    "source_set_id": "digitalhub-v2"
   }
 }

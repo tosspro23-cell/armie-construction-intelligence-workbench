@@ -23,6 +23,7 @@ from app.agent.router import (
 from app.config import Settings
 from app.schemas.models import MultiQueryPlan, QueryPlan, ResponseLanguage
 from app.services import ProjectResources, ServiceContainer
+from app.tools.document.analyzer import _Table, _TableCell, _TableColumn
 from fakes.fake_provider import FakeModelProvider
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -264,6 +265,49 @@ def test_semantic_planner_recognizing_reconciliation_intent_routes_to_the_same_d
     actual = {item.tag: item.status.value for item in response.reconciliation_items}
     assert actual == EXPECTED_STATUSES
     assert response.execution_metadata.get("source") == "ifc+pdf (reconciliation)"
+
+
+def test_reconciliation_pdf_items_spans_multiple_schedule_pages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """D-036: found live, 2026-09-15, adding a real building's full
+    door/window schedule (~100+ items) as a second Dataset Pack fixture --
+    SPEC-M2's original synthetic schedule (9 items) always fit on page 2
+    alone, so `_reconciliation_pdf_items` never needed to look further.
+    A real schedule this size legitimately spans several pages; before this
+    fix, everything past page 2 was silently invisible to reconciliation,
+    which would have reported every one of those real items as
+    "missing from the PDF" -- not because they were missing, but because
+    the reader never looked.
+
+    Fakes only the PDF-source-read I/O seam (the same technique already
+    established by test_pdf_read_failure_is_reported_as_error_not_answered
+    for this exact seam) across three calls -- a real table on page 2, a
+    real table on page 3 with a *different* mark, and `None` on page 4 --
+    so the real merge/stop logic in `_reconciliation_pdf_items` runs
+    unmocked.
+    """
+    settings = _settings(tmp_path)
+    fake = FakeModelProvider()
+    container, service = _service(settings, fake)
+
+    page_2_table = _Table(
+        columns=[_TableColumn(label="Mark", bbox=[0, 0, 0, 0]), _TableColumn(label="Width (m)", bbox=[0, 0, 0, 0]), _TableColumn(label="Height (m)", bbox=[0, 0, 0, 0])],
+        rows=[[_TableCell(text="D01", bbox=[0, 0, 0, 0]), _TableCell(text="0.90", bbox=[0, 0, 0, 0]), _TableCell(text="2.10", bbox=[0, 0, 0, 0])]],
+    )
+    page_3_table = _Table(
+        columns=[_TableColumn(label="Mark", bbox=[0, 0, 0, 0]), _TableColumn(label="Width (m)", bbox=[0, 0, 0, 0]), _TableColumn(label="Height (m)", bbox=[0, 0, 0, 0])],
+        rows=[[_TableCell(text="W03", bbox=[0, 0, 0, 0]), _TableCell(text="1.20", bbox=[0, 0, 0, 0]), _TableCell(text="1.50", bbox=[0, 0, 0, 0])]],
+    )
+
+    def fake_read_table(page_number: int):
+        return {2: page_2_table, 3: page_3_table}.get(page_number)
+
+    monkeypatch.setattr(container.document_analyzer, "_read_table", fake_read_table)
+
+    items = service._reconciliation_pdf_items(_demo(container))
+
+    assert set(items) == {"D01", "W03"}
+    assert items["D01"] == {"tag": "D01", "width_m": pytest.approx(0.90), "height_m": pytest.approx(2.10)}
+    assert items["W03"] == {"tag": "W03", "width_m": pytest.approx(1.20), "height_m": pytest.approx(1.50)}
 
 
 def test_pdf_read_failure_is_reported_as_error_not_answered(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -735,7 +735,9 @@ Return only a corrected MultiQueryPlan JSON object."""
         return items
 
     def _reconciliation_pdf_items(self, project_resources: ProjectResources, page_number: int = 2) -> dict[str, dict[str, Any]]:
-        """Read every row of the schedule's page-2 Mark/Level/Type/Width/Height table.
+        """Read every row of the schedule's Mark/Level/Type/Width/Height table,
+        starting at `page_number` and continuing onto however many further
+        pages the schedule actually spans.
 
         Reuses `DocumentAnalyzer._read_table` exactly as M2P1 built it --
         the same word-coordinate row/column clustering already used by
@@ -744,42 +746,62 @@ Return only a corrected MultiQueryPlan JSON object."""
         its contract is one question-driven record/field lookup, not "every
         row of this table."
 
-        Raises when the page's table structure could not be read at all
-        (`_read_table` returns `None`: the PDF is unavailable, or the page
-        has no legible text/no header row) -- this is a genuine execution
-        failure, distinct from a legitimately empty table (a header row was
-        found but it names no Mark-like column, or it names one with zero
-        data rows). Collapsing both into an empty mapping would let the
+        SPEC-M2's original synthetic fixture (9 items) always fit on one
+        page, so this read exactly one fixed page for that milestone's
+        entire lifetime. Found live, 2026-09-15, adding a real building's
+        full door/window schedule (~100+ items): a real schedule this size
+        does not fit on one page, and `_read_table`'s own single-page
+        contract silently produced a schedule missing every item past the
+        first page. Reads consecutive pages starting at `page_number` and
+        merges every page's rows into one mapping, stopping at the first
+        page with no table (a following non-schedule page, or the
+        document's actual end) -- honest for both the tiny single-page
+        fixture (stops after page 2, unchanged) and a real multi-page one.
+
+        Raises only when `page_number` itself has no table at all
+        (`_read_table` returns `None` there: the PDF is unavailable, or that
+        page has no legible text/no header row) -- this is a genuine
+        execution failure, distinct from a legitimately empty table (a
+        header row was found but it names no Mark-like column, or it names
+        one with zero data rows) and distinct from the schedule simply
+        ending after one or more pages that did read successfully.
+        Collapsing the first case into an empty mapping would let the
         caller report "checked, every IFC item missing from the PDF" when
-        the schedule was never actually read (SPEC-M2 §4G).
+        the schedule was never actually read at all (SPEC-M2 §4G).
         """
-        table = project_resources.document_analyzer._read_table(page_number)
-        if table is None:
-            raise RuntimeError(f"The schedule's page {page_number} table structure could not be read.")
         items: dict[str, dict[str, Any]] = {}
-        labels = [column.label.lower() for column in table.columns]
+        page = page_number
+        while True:
+            table = project_resources.document_analyzer._read_table(page)
+            if table is None:
+                if page == page_number:
+                    raise RuntimeError(f"The schedule's page {page_number} table structure could not be read.")
+                break
+            labels = [column.label.lower() for column in table.columns]
 
-        def _index(prefix: str) -> int | None:
-            return next((i for i, label in enumerate(labels) if label.startswith(prefix)), None)
+            def _index(prefix: str) -> int | None:
+                return next((i for i, label in enumerate(labels) if label.startswith(prefix)), None)
 
-        mark_index, width_index, height_index = _index("mark"), _index("width"), _index("height")
-        if mark_index is None:
-            return items
-        for row in table.rows:
-            mark_cell = row[mark_index] if mark_index < len(row) else None
-            if not mark_cell or not mark_cell.text.strip():
+            mark_index, width_index, height_index = _index("mark"), _index("width"), _index("height")
+            if mark_index is None:
+                page += 1
                 continue
-            mark = mark_cell.text.strip()
+            for row in table.rows:
+                mark_cell = row[mark_index] if mark_index < len(row) else None
+                if not mark_cell or not mark_cell.text.strip():
+                    continue
+                mark = mark_cell.text.strip()
 
-            def _value(index: int | None) -> float | None:
-                cell = row[index] if index is not None and index < len(row) else None
-                text = cell.text.strip() if cell else ""
-                try:
-                    return float(text) if text else None
-                except ValueError:
-                    return None
+                def _value(index: int | None) -> float | None:
+                    cell = row[index] if index is not None and index < len(row) else None
+                    text = cell.text.strip() if cell else ""
+                    try:
+                        return float(text) if text else None
+                    except ValueError:
+                        return None
 
-            items[mark] = {"tag": mark, "width_m": _value(width_index), "height_m": _value(height_index)}
+                items[mark] = {"tag": mark, "width_m": _value(width_index), "height_m": _value(height_index)}
+            page += 1
         return items
 
     def _compare_reconciliation_item(self, tag: str, ifc_item: dict | None, pdf_item: dict | None) -> dict[str, Any]:

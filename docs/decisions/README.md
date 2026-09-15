@@ -1694,3 +1694,48 @@ project switcher, which requires `ServiceContainer.get_project` to be reachable 
 `adls_account_url` per SPEC-M9's own design -- a real, separate infra step, not attempted here);
 generating the synthetic companion schedule; and any reconciliation test against this building
 (there is nothing to reconcile against yet).
+
+## D-036 — DigitalHub's full real schedule needed a multi-page reconciliation reader
+
+Owner-directed follow-on from D-035: generate the ARMIE-synthetic companion schedule
+`digitalhub_schedule.pdf` (`scripts/generate_digitalhub_schedule.py`) for the real building added
+there, so reconciliation has something real to check it against, with planted discrepancies for
+the Findings demo.
+
+**A real gap found only by actually building the schedule, not foreseeable from the earlier
+spike.** The go/no-go spike (D-035) confirmed DigitalHub's IFC quantities needed zero code
+changes -- true, but that spike never built a full schedule. `AgentService.
+_reconciliation_pdf_items` hardcoded reading exactly one page (`page_number: int = 2`), because
+SPEC-M2's original synthetic fixture (9 items) always fit on one page and no milestone since has
+needed more. DigitalHub has 111 real tagged doors/windows -- its full schedule needs 5 table
+pages (plus a cover page), and everything past page 2 would have been silently invisible to
+reconciliation, which would have reported ~90 real, correctly-documented items as fabricated
+`missing_in_pdf` findings -- not because they were missing, but because the reader never looked
+past the first page. Found by actually generating the schedule and running reconciliation against
+it before deploying anything, not assumed safe from the earlier spike's own scope.
+
+**Fix.** `_reconciliation_pdf_items` now reads consecutive pages starting at `page_number`,
+merging every page's rows into one mapping, and stops cleanly at the first page with no table
+(the schedule's own end, or a following non-schedule page) -- unchanged behavior for the original
+single-page fixture (the loop still stops after page 2), and now correct for a schedule spanning
+any number of pages. `DocumentAnalyzer._read_table` also gained a bounds check so scanning one
+page past the document's actual end returns `None` cleanly instead of `fitz` raising on an
+out-of-range page index -- a real latent gap for any caller, not unique to this loop.
+
+**The schedule itself.** `scripts/generate_digitalhub_schedule.py` reads every one of the real
+IFC's 111 tagged doors/windows directly via `ifcopenshell` and writes them to the schedule with
+their true Tag/storey/width/height, correctly matching -- except four deliberately planted,
+documented discrepancies (in the script's own header): one real door omitted entirely
+(`missing_in_pdf`), one fabricated row with no matching real IFC element (`missing_in_ifc`), and
+two real doors/windows with an altered width or height (`dimension_mismatch`). Same fixture-design
+pattern as SPEC-M2's original synthetic schedule, at real-building scale.
+
+**Verification.** Reproduced the gap first: a monkeypatched-page-3-table test
+(`test_reconciliation_pdf_items_spans_multiple_schedule_pages`) fails on the pre-fix code (page 3's
+item is silently dropped) and passes after, isolating the merge/stop logic itself without needing
+a real multi-page PDF. Then verified the whole real pipeline end-to-end, locally, before deploying
+anything: ran the actual reconciliation question against the real IFC and the newly-generated
+111-row, 6-page schedule, and got exactly the intended result -- **108 matched, 2 dimension
+mismatch, 1 missing from the PDF, 1 missing from the IFC model**, zero model calls -- matching the
+plant exactly, not approximately. 326 tests pass (325 + 1 new); `ruff` clean (including
+`scripts/`); `npm run build` clean.
