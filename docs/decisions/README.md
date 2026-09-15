@@ -1915,3 +1915,43 @@ color. Re-verified selection highlighting (the emissive overlay used when clicki
 still reads correctly against the new, dimmer lighting. Confirmed live against both the real Duplex
 building and the original synthetic demo fixture (no regression). `npm run build` clean;
 frontend-only, 327 backend tests unaffected, `ruff` clean.
+
+## D-041 — Exterior overview was fully opaque, hiding interior structure; windows needed more contrast
+
+Owner-reported, 2026-09-15, immediately after D-040 shipped: rotating inside the building now reads
+clearly (D-040's fix worked), but viewing the whole building from *outside* still shows a fully
+solid shell -- the outermost ring of walls hides every interior wall, slab, and stair behind it.
+Separately, windows are visible from outside but still low-contrast against the wall color.
+
+**Not a heuristic -- checked the real data first.** Before writing any "guess which wall is
+exterior" logic (e.g. by position relative to the building's bounding box), checked whether the
+source IFC files already carry this as a real, standard property. They do: `IsExternal`, part of
+`Pset_WallCommon` (or whichever Pset a given exporter attaches it to), is present and populated on
+every wall in both real Dataset Pack buildings -- Duplex (57 walls: 23 external, 34 internal) and
+DigitalHub (178 walls: 100 external, 78 internal), confirmed with a standalone ifcopenshell script
+independent of this project's own code. The original synthetic `demo` fixture never sets this
+property at all, so it must read as genuinely unknown (`None`), not a guessed `False` -- collapsing
+"not set" into "internal" would have silently mismodeled every wall in the one fixture that has no
+real data to check against.
+
+**What shipped.** `IfcRepository._is_external` (`apps/api/app/tools/ifc/repository.py`) reads the
+real `IsExternal` boolean from whichever Pset carries it and returns `None` when no Pset sets it,
+never a guessed default; `viewer_elements()` now includes `is_external` in its per-element payload.
+`IfcViewer.tsx` gained `materialPropsFor()`, which selects a new `EXTERIOR_WALL_MATERIAL` (opacity
+0.3, alpha-blended) specifically for walls where `is_external === true` -- an explicit `=== true`
+check, so `None`/`false` walls keep the normal opaque D-040 material -- giving the outside-overview
+camera an X-ray view straight through the outer shell to the real interior slabs/stairs/walls
+behind it, while a wall genuinely known to be internal (or a fixture with no data at all) stays
+solid. `IfcWindow`'s palette color also moved from `#bfe0ee` to a more saturated `#6fb4d6`, and its
+material's opacity/metalness were raised slightly, for better contrast against the wall color when
+viewed from outside.
+
+**Verification.** Confirmed the backend's `is_external` counts match the independent ifcopenshell
+check exactly (Duplex: 23/34 split) via a live local API request. Confirmed live in the browser
+against the real Duplex building: the exterior overview now shows a translucent outer wall ring
+with interior floor slabs visible through it, the effect the owner asked for; interior walk-through
+view (D-040's fix) is unaffected since `EXTERIOR_WALL_MATERIAL` only ever applies to walls flagged
+`is_external === true`. Confirmed no regression against the original synthetic `demo` fixture --
+its walls report `is_external: null` (not a guessed `false`) and keep D-040's normal opaque
+material and `#cdc6b8` color unchanged. Full backend suite: 327 passed, 5 skipped; `ruff check
+--select F,E9,I,F401 apps/api tests scripts` clean; `npm run build` clean.

@@ -106,11 +106,17 @@ class IfcRepository:
         # reading a file's own material colors is a larger, separate change.
         # See apps/web/src/IfcViewer.tsx for the matching per-type
         # opacity/roughness tuning (glass vs. matte) applied at render time.
+        #
+        # D-041: owner-reported, 2026-09-15 -- windows read as too washed
+        # out to identify clearly in an exterior overview. Deepened from a
+        # very pale glass blue to a more saturated one; the frontend also
+        # raised window opacity/metalness to give it a more definite
+        # glassy sheen while staying clearly translucent.
         palette = {
             "IfcWall": "#cdc6b8",
             "IfcSlab": "#a49c8f",
             "IfcDoor": "#8a5d3b",
-            "IfcWindow": "#bfe0ee",
+            "IfcWindow": "#6fb4d6",
             "IfcStair": "#b3a89d",
             "IfcRoof": "#6f5b48",
         }
@@ -154,6 +160,7 @@ class IfcRepository:
                         "entity_type": element.is_a(), "name": self._name_of(element),
                         "storey": self._storey_name(element), "center": origin,
                         "dimensions": dimensions, "color": palette.get(element.is_a(), "#cdc6b8"),
+                        "is_external": self._is_external(element),
                     })
                     continue
                 dimensions = [max(maximum[index] - minimum[index], 0.05) for index in range(3)]
@@ -166,6 +173,7 @@ class IfcRepository:
                     "center": [(minimum[index] + maximum[index]) / 2 for index in range(3)],
                     "dimensions": dimensions,
                     "color": palette.get(entity_type, "#cdc6b8"),
+                    "is_external": self._is_external(element),
                 })
         return output
 
@@ -555,6 +563,24 @@ class IfcRepository:
     @staticmethod
     def _name_of(element: Any) -> str:
         return str(getattr(element, "Name", None) or getattr(element, "LongName", None) or "Unnamed")
+
+    @staticmethod
+    def _is_external(element: Any) -> bool | None:
+        """D-041: real `IsExternal` from whichever Pset carries it
+        (`Pset_WallCommon` etc.) -- confirmed present on every wall in both
+        real Dataset Pack buildings (Duplex, DigitalHub), not a guessed
+        heuristic. `None` when the property genuinely isn't set (the
+        synthetic demo fixture, most non-wall types), distinct from a real
+        `False` (an interior wall) -- the viewer only treats an explicit
+        `True` as "make this see-through from outside."
+        """
+        import ifcopenshell.util.element as ifc_element_util
+
+        for props in ifc_element_util.get_psets(element).values():
+            if "IsExternal" in props:
+                value = props["IsExternal"]
+                return bool(value) if isinstance(value, bool) else None
+        return None
 
     @staticmethod
     def _compact_element(element: Any) -> dict[str, Any]:

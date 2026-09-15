@@ -19,6 +19,11 @@ type ViewerElement = {
   dimensions: [number, number, number];
   color: string;
   storey?: string;
+  // D-041: real IFC `IsExternal` (whichever Pset carries it) -- `true` for
+  // an exterior wall, `false` for an interior one, `null`/absent when the
+  // source IFC never set it (the tiny synthetic demo fixture, most non-wall
+  // types). Never guessed from geometry.
+  is_external?: boolean | null;
 };
 
 // D-039: owner-requested, 2026-09-15 -- the palette itself (per-type base
@@ -50,14 +55,38 @@ type ViewerElement = {
 // window a real cut opening in its wall -- that is still the underlying
 // bounding-box simplification, unchanged here.
 const MATERIAL_BY_TYPE: Record<string, { opacity: number; roughness: number; metalness: number; transparent: boolean }> = {
-  IfcWindow: { opacity: 0.45, roughness: 0.12, metalness: 0.1, transparent: true },
+  // D-041: owner-reported, 2026-09-15 -- opaque walls (D-040's own fix)
+  // made the interior genuinely legible, but looking at the whole
+  // building from outside now hides the interior layout entirely behind
+  // a solid shell. Window contrast was also reported as too low to read
+  // clearly in an exterior overview. Window opacity/metalness bumped up
+  // (a more definite glassy sheen, still clearly translucent) and its
+  // base color deepened server-side (apps/api/app/tools/ifc/repository.py).
+  IfcWindow: { opacity: 0.58, roughness: 0.08, metalness: 0.25, transparent: true },
   IfcDoor: { opacity: 1, roughness: 0.75, metalness: 0, transparent: false },
   IfcWall: { opacity: 1, roughness: 0.9, metalness: 0, transparent: false },
   IfcSlab: { opacity: 1, roughness: 0.92, metalness: 0, transparent: false },
   IfcStair: { opacity: 1, roughness: 0.85, metalness: 0, transparent: false },
   IfcRoof: { opacity: 1, roughness: 0.8, metalness: 0, transparent: false },
 };
+// D-041: only a real, IFC-sourced `is_external === true` (never a guessed
+// heuristic -- confirmed present on every wall in both real Dataset Pack
+// buildings) switches a wall to this see-through "shell" look, so an
+// exterior overview can show the interior layout through the building's
+// own envelope. An interior partition wall (`is_external === false`) keeps
+// D-040's fully-opaque material -- the shell view is specifically about
+// the outermost ring the owner asked for, not every wall.
+const EXTERIOR_WALL_MATERIAL = { opacity: 0.3, roughness: 0.85, metalness: 0, transparent: true };
 const DEFAULT_MATERIAL = { opacity: 1, roughness: 0.78, metalness: 0, transparent: false };
+
+function materialPropsFor(element: ViewerElement): { opacity: number; roughness: number; metalness: number; transparent: boolean } {
+  const isWall = element.entity_type === "IfcWall" || element.entity_type === "IfcWallStandardCase";
+  if (isWall && element.is_external === true) return EXTERIOR_WALL_MATERIAL;
+  const byType = element.entity_type && MATERIAL_BY_TYPE[element.entity_type];
+  if (byType) return byType;
+  if (isWall) return MATERIAL_BY_TYPE.IfcWall;
+  return DEFAULT_MATERIAL;
+}
 
 type Props = {
   onSelection: (element: SelectedElement | null) => void;
@@ -159,8 +188,7 @@ export function IfcViewer({ onSelection, onSnapshot, onStatus, focusGlobalId, pr
           const [ifcWidth, ifcDepth, ifcHeight] = element.dimensions;
           const [ifcX, ifcY, ifcZ] = element.center;
           const geometry = new THREE.BoxGeometry(ifcWidth, ifcHeight, ifcDepth);
-          const materialProps = (element.entity_type && MATERIAL_BY_TYPE[element.entity_type]) || DEFAULT_MATERIAL;
-          const material = new THREE.MeshStandardMaterial({ color: element.color, ...materialProps });
+          const material = new THREE.MeshStandardMaterial({ color: element.color, ...materialPropsFor(element) });
           const mesh = new THREE.Mesh(geometry, material);
           mesh.position.set(ifcX, ifcZ, -ifcY);
           mesh.userData = element;
