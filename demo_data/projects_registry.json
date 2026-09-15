@@ -98,5 +98,16 @@
       "westgate_schedule.pdf"
     ],
     "source_set_id": "westgate-v1"
+  },
+  "digitalhub": {
+    "display_name": "RWTH DigitalHub (real building)",
+    "files": {
+      "DigitalHub_FM-ARC_v2.ifc": {
+        "content_sha256": "19d7d02d53c2b88e86890ee236297b12bbb0f7748030cd32ff6a22762e9966bb"
+      }
+    },
+    "ifc_file": "DigitalHub_FM-ARC_v2.ifc",
+    "pdf_files": [],
+    "source_set_id": "digitalhub-v1"
   }
 }

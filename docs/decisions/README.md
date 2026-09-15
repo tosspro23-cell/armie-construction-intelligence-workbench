@@ -1646,3 +1646,51 @@ answers correctly end-to-end), pointing to the isolated unit test for the specif
 tests pass (323 + 2 new: the isolated `validate_multi_plan` exemption test in
 `tests/test_plan_validation_contract.py`, and the end-to-end semantic-path integration test in
 `tests/test_reconciliation.py`); `ruff` clean; `npm run build` clean (backend-only change).
+
+## D-035 — First real Dataset Pack candidate added: RWTH DigitalHub
+
+Owner-directed follow-on from the Dataset Pack go/no-go spike
+(`docs/reports/2026-09-15-dataset-pack-go-no-go-spike.md`): of the three real, multi-discipline
+IFC building candidates checked there (WBDG Office, RWTH DigitalHub, Sixty5), DigitalHub had both
+the cleanest primary-source license (a plain MIT `LICENSE` at the root of
+[RWTH-E3D's own GitHub repository](https://github.com/RWTH-E3D/DigitalHub), not a third-party
+re-host) and the best technical fit -- its `Qto_DoorBaseQuantities` sets are already in the exact
+standard shape (meters, correctly populated) `AgentService._reconciliation_ifc_items` expects, so
+**no application code changes were needed** to add it, unlike the other two candidates.
+
+**What was added.** `demo_data/projects/digitalhub/DigitalHub_FM-ARC_v2.ifc` (the architecture
+discipline only, ~9 MB, downloaded unmodified from the source repository) plus
+`ATTRIBUTION.md` (a verbatim copy of the source LICENSE, satisfying MIT's own inclusion
+requirement, plus provenance/fetch-date notes) and a `digitalhub` entry in
+`demo_data/projects_registry.json` (`source_set_id: digitalhub-v1`), following the exact
+`westgate` precedent from SPEC-M9. The other three published disciplines (heating, ventilation,
+sanitary, ~59 MB combined) were deliberately not added this pass -- not needed for door/window
+reconciliation, and there is no reason to carry data this project does not yet use.
+
+**Confirmed live, not assumed: no real drawings exist for this building.** The source
+repository's complete file tree (`gh api repos/RWTH-E3D/DigitalHub/git/trees/master?recursive=true`)
+contains only `.ifc`/`.stl` model files, one Excel export, and PNG renders -- no PDF, no
+door/window schedule. Any companion schedule for this project will be ARMIE-generated, not a
+real document; that generator is not built yet (a comparable scope to the original
+`armie_demo_schedule.pdf` generator), tracked as the next step, not started this pass.
+
+**Verified live, locally, before reporting done.** Ran the real API/web stack against this file
+(`DATA_DIR`/`IFC_FILE` pointed at it directly, the same local-override technique used throughout
+this session's own live debugging) and drove it through a real browser: the IFC viewer loads and
+renders the real building geometry (a modular/elongated structure, consistent with "Digital Hub"
+research-building construction), element selection surfaces real German-language IFC data
+(`IfcDoor: TU DF 1 - Fluchttüre Endausgang...`, `IfcSlab: Sohle:Sohle 1 mm...`), and a real
+natural-language question ("How many doors and windows are in this project, grouped by
+storey?") returned correct, zero-model-call, verified results (26/25/13 doors per storey =
+64 total; 21/26 windows per storey = 47 total) exactly matching the ground truth independently
+computed via a direct `ifcopenshell` inspection during the spike -- the existing deterministic
+IFC query pipeline handles a real ~1,000-element building it was never built or tested against,
+completely unmodified.
+
+**Not yet done, explicitly out of scope for this pass:** registering this project for the ADLS
+multi-project mode (it exists today only as a local registry/fixture entry, reachable in local
+dev via the single-project settings override, not yet selectable through the deployed app's
+project switcher, which requires `ServiceContainer.get_project` to be reachable via
+`adls_account_url` per SPEC-M9's own design -- a real, separate infra step, not attempted here);
+generating the synthetic companion schedule; and any reconciliation test against this building
+(there is nothing to reconcile against yet).
