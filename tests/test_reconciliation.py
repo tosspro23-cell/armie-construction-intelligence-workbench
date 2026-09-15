@@ -57,6 +57,16 @@ def _service(settings: Settings, fake: FakeModelProvider) -> tuple[ServiceContai
     "Can you verify the doors against the PDF schedule?",
     "Compare the window dimensions in the IFC model with the drawing schedule.",
     "核对一下门窗数量和图纸是否一致。",
+    # D-033: found live, 2026-09-15 -- a real user asked almost exactly
+    # this question against the deployed app and it missed, because
+    # "mismatch" does not satisfy \bmatch\b (no word boundary between
+    # "mis" and "match"). Fell through to the general multi-source
+    # heuristic/semantic planner instead of the deterministic
+    # reconciliation path -- a real model call, ~10x slower, and a raw
+    # per-source dict dump instead of a synthesized comparison.
+    "Is there any mismatch for the doors and the windows between the BiM model and the PDF?",
+    "Are there any mismatches between the door schedule and the model?",
+    "门窗和图纸明细表有不匹配的地方吗？",
 ])
 def test_reconciliation_detector_positive_examples(question: str) -> None:
     assert cross_source_reconciliation_requested(question) is True

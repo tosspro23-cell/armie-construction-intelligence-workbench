@@ -1552,3 +1552,41 @@ the actual comparison/outcome logic under test runs for real, unmocked. All four
 and the full acknowledge -> start_action -> resolve -> re-check flow were also walked end-to-end
 in a real browser against the real demo fixture before being reported as done (not only
 `pytest`/`tsc`). 320 tests pass (295 + 25 new); `ruff` clean; `npm run build` clean.
+
+## D-033 — The reconciliation detector missed "mismatch," the single most natural word for it
+
+Found live, 2026-09-15, by the owner testing the newly-deployed M11 Findings feature: after
+confirming reconciliation correctly auto-creates findings when asked with the established phrasing
+(`RECONCILIATION_QUESTION`), the owner naturally rephrased it as "Is there any mismatch for the
+doors and the windows between the BiM model and the PDF?" -- a real end-to-end regression, not a
+hypothetical. The answer took ~29 seconds (a real model call) and returned a raw dump of two
+separate per-source dict lists instead of a synthesized comparison, and correctly created zero new
+findings (there was genuinely nothing to promote -- the request never went through the
+reconciliation path at all).
+
+**Root cause.** `cross_source_reconciliation_requested` (`apps/api/app/agent/router.py`) requires
+an entity term, a reconciliation verb, and a drawing/schedule term, all three, by design (SPEC-M2
+§4A) -- conservative on purpose, so it never fires on an ordinary single-source question. The verb
+check is `\b(compare|verify|reconcile|check|match|...)\b`: "mismatch" does not satisfy `\bmatch\b`,
+because there is no word boundary between "mis" and "match" -- they are the same word, not two
+tokens. "mismatch" is arguably the single most natural English word for exactly what this detector
+exists to recognize, and it silently missed every time. The question fell through to the general
+multi-source heuristic/semantic planner instead (a real, ~10x-slower model call producing a raw,
+unsynthesized answer) -- not a crash, not a wrong answer, but a materially worse and slower
+experience for phrasing that means exactly the same thing as the phrasing that does work. The
+Chinese branch had an analogous, distinct gap: "不匹配" (mismatch) was entirely absent from
+`核对|比对|一致` (which happens to catch "不一致" only because "一致" substring-matches inside it,
+with no `\b` semantics on the Chinese branch to trip on).
+
+**Fix.** Added `mismatch`/`mismatches` as explicit verb-marker alternatives (not folded into
+`\bmatch\b`, since "mismatch" is not a boundary-safe superset of "match") and `不匹配` to the
+Chinese branch. Scoped narrowly: this is the same conservative three-marker detector, unchanged in
+structure, gaining exactly the one missing token family a real user's real question needed.
+
+**Verification.** Reproduced the exact defect first (`cross_source_reconciliation_requested`
+returns `False` on the owner's own question, on the pre-fix code) before changing anything, then
+confirmed the fix flips it `True` while every existing positive and negative example (including the
+fire-rating false-positive and cross-source-join carve-out tests) is unaffected. Three new cases
+added to `tests/test_reconciliation.py`'s positive-example table: the owner's exact question, a
+close paraphrase ("Are there any mismatches..."), and a Chinese equivalent using `不匹配`. 323 tests
+pass (320 + 3 new); `ruff` clean; `npm run build` clean (backend-only change).

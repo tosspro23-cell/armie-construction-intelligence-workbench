@@ -31,7 +31,16 @@ def cross_source_reconciliation_requested(question: str) -> bool:
     """
     lowered = " ".join(question.lower().split())
     entity_marker = re.search(r"\b(door|doors|window|windows)\b|门|窗", lowered)
-    verb_marker = re.search(r"\b(compare|verify|reconcile|check|match|cross-check|cross check|consistent)\b|核对|比对|一致", lowered)
+    # D-033: found live -- "mismatch"/"mismatches" does not satisfy \bmatch\b
+    # (no word boundary between "mis" and "match"), so a very natural
+    # phrasing of this exact intent ("is there a mismatch...") missed every
+    # verb token here and fell through to the general multi-source
+    # heuristic/semantic planner instead of the deterministic reconciliation
+    # path -- a real model call, ~10x slower, and a raw per-source dict dump
+    # instead of a synthesized comparison. Listed as its own alternative
+    # rather than folded into \bmatch\b, since "mismatch" is not a
+    # substring-superset of "match" under \b semantics.
+    verb_marker = re.search(r"\b(compare|verify|reconcile|check|match|mismatch|mismatches|cross-check|cross check|consistent)\b|核对|比对|一致|不匹配", lowered)
     drawing_marker = re.search(r"\b(pdf|drawing|schedule)\b|图纸|排程|明细表", lowered)
     return bool(entity_marker and verb_marker and drawing_marker)
 
