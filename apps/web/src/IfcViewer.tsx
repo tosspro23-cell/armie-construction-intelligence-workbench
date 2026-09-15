@@ -54,7 +54,35 @@ type ViewerElement = {
 // clutter instead of blending it. This does not by itself give a door/
 // window a real cut opening in its wall -- that is still the underlying
 // bounding-box simplification, unchanged here.
-const MATERIAL_BY_TYPE: Record<string, { opacity: number; roughness: number; metalness: number; transparent: boolean }> = {
+type MaterialProps = {
+  opacity: number; roughness: number; metalness: number; transparent: boolean;
+  polygonOffset?: boolean; polygonOffsetFactor?: number; polygonOffsetUnits?: number;
+};
+
+// D-042: owner-reported, 2026-09-15 -- doors and windows flickered
+// noticeably while rotating/zooming, worse than other element types.
+// Root cause, confirmed with `gl.readPixels` sampled every animation
+// frame during a real rotation (not eyeballed): viewer_elements' door/
+// window boxes are, by the bounding-box simplification's own nature (see
+// the picking-logic comment below), embedded in or flush against their
+// host wall's box -- their faces are exactly or nearly coincident in
+// world space. With finite GPU depth-buffer precision, which of two
+// coincident faces wins the per-fragment depth test is not stable frame
+// to frame as the camera moves even slightly -- classic z-fighting.
+// Reproduced objectively: sampling a 24x16 pixel grid every frame across
+// 50 frames of a small rotation, several pixels toggled between the same
+// 2-3 colors up to 35 times (i.e. on nearly every single frame), a
+// signature no legitimate one-time silhouette-edge crossing produces.
+// `polygonOffset` biases a coincident surface's effective depth by a
+// small, fixed amount so the depth test has a deterministic winner
+// instead of one decided by floating-point noise -- door/window get a
+// small negative offset (pulled toward the camera, so they reliably read
+// as "sitting in" their host wall) while wall/slab get a small positive
+// one (pushed back). This does not, by itself, give a door/window a real
+// cut opening -- it only makes today's overlapping-box rendering stable;
+// see the real-mesh-geometry plan for the actual fix to the opening
+// itself.
+const MATERIAL_BY_TYPE: Record<string, MaterialProps> = {
   // D-041: owner-reported, 2026-09-15 -- opaque walls (D-040's own fix)
   // made the interior genuinely legible, but looking at the whole
   // building from outside now hides the interior layout entirely behind
@@ -62,10 +90,10 @@ const MATERIAL_BY_TYPE: Record<string, { opacity: number; roughness: number; met
   // clearly in an exterior overview. Window opacity/metalness bumped up
   // (a more definite glassy sheen, still clearly translucent) and its
   // base color deepened server-side (apps/api/app/tools/ifc/repository.py).
-  IfcWindow: { opacity: 0.58, roughness: 0.08, metalness: 0.25, transparent: true },
-  IfcDoor: { opacity: 1, roughness: 0.75, metalness: 0, transparent: false },
-  IfcWall: { opacity: 1, roughness: 0.9, metalness: 0, transparent: false },
-  IfcSlab: { opacity: 1, roughness: 0.92, metalness: 0, transparent: false },
+  IfcWindow: { opacity: 0.58, roughness: 0.08, metalness: 0.25, transparent: true, polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4 },
+  IfcDoor: { opacity: 1, roughness: 0.75, metalness: 0, transparent: false, polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4 },
+  IfcWall: { opacity: 1, roughness: 0.9, metalness: 0, transparent: false, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 },
+  IfcSlab: { opacity: 1, roughness: 0.92, metalness: 0, transparent: false, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 },
   IfcStair: { opacity: 1, roughness: 0.85, metalness: 0, transparent: false },
   IfcRoof: { opacity: 1, roughness: 0.8, metalness: 0, transparent: false },
 };
@@ -76,10 +104,10 @@ const MATERIAL_BY_TYPE: Record<string, { opacity: number; roughness: number; met
 // own envelope. An interior partition wall (`is_external === false`) keeps
 // D-040's fully-opaque material -- the shell view is specifically about
 // the outermost ring the owner asked for, not every wall.
-const EXTERIOR_WALL_MATERIAL = { opacity: 0.3, roughness: 0.85, metalness: 0, transparent: true };
-const DEFAULT_MATERIAL = { opacity: 1, roughness: 0.78, metalness: 0, transparent: false };
+const EXTERIOR_WALL_MATERIAL: MaterialProps = { opacity: 0.3, roughness: 0.85, metalness: 0, transparent: true, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 };
+const DEFAULT_MATERIAL: MaterialProps = { opacity: 1, roughness: 0.78, metalness: 0, transparent: false };
 
-function materialPropsFor(element: ViewerElement): { opacity: number; roughness: number; metalness: number; transparent: boolean } {
+function materialPropsFor(element: ViewerElement): MaterialProps {
   const isWall = element.entity_type === "IfcWall" || element.entity_type === "IfcWallStandardCase";
   if (isWall && element.is_external === true) return EXTERIOR_WALL_MATERIAL;
   const byType = element.entity_type && MATERIAL_BY_TYPE[element.entity_type];
@@ -125,7 +153,13 @@ export function IfcViewer({ onSelection, onSnapshot, onStatus, focusGlobalId, pr
     scene.background = new THREE.Color("#111a30");
     const camera = new THREE.PerspectiveCamera(55, 1, 0.1, 5000);
     camera.position.set(25, 20, 25);
-    const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+    // D-042: `logarithmicDepthBuffer` spreads depth-buffer precision more
+    // evenly across the camera's near/far range (0.1-5000 by default, then
+    // re-set per-model below) instead of concentrating almost all of it
+    // near the near plane -- the standard fix for depth-precision-driven
+    // z-fighting, complementing the per-material polygonOffset bias below
+    // for surfaces that are exactly coincident rather than merely close.
+    const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true, logarithmicDepthBuffer: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     // D-040: owner-reported, 2026-09-15 -- pale materials (the new D-039
     // palette's warm plaster walls especially) read as washed-out

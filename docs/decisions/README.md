@@ -1955,3 +1955,61 @@ view (D-040's fix) is unaffected since `EXTERIOR_WALL_MATERIAL` only ever applie
 its walls report `is_external: null` (not a guessed `false`) and keep D-040's normal opaque
 material and `#cdc6b8` color unchanged. Full backend suite: 327 passed, 5 skipped; `ruff check
 --select F,E9,I,F401 apps/api tests scripts` clean; `npm run build` clean.
+
+## D-042 — Doors and windows flickered while rotating/zooming, especially on real buildings
+
+Owner-reported, 2026-09-15, immediately after D-041 shipped: rotating or zooming the camera made
+some elements -- doors and windows especially -- flicker noticeably, worse on the real Duplex/
+DigitalHub buildings than the tiny synthetic fixture.
+
+**Reproduced objectively before touching any code, not just eyeballed.** The picking-logic comment
+already on this file (`select()`, above) documents the underlying geometric fact: a door/window's
+bounding box is embedded in or flush against its host wall's box, since `viewer_elements` keeps only
+axis-aligned bounding boxes, not real cut geometry. Two opaque, exactly or nearly coincident
+surfaces racing for the same screen pixel is the textbook precondition for GPU z-fighting -- which
+of the two wins the per-fragment depth test is decided by floating-point noise, not anything
+meaningful, and can flip from one frame to the next as the camera moves even slightly. Confirmed
+this was really happening, not assumed: sampled a 24x16 grid of canvas pixels via `gl.readPixels`
+on every animation frame for 50 frames while running a real (synthetic, scripted) camera rotation
+against the live Duplex building. Several pixels toggled between the same 2-3 colors up to 35 times
+across 50 frames -- a signature no legitimate one-time silhouette edge crossing produces, since a
+real edge sweeping through a pixel changes its color once (or gradually, across many distinct
+in-between colors from anti-aliasing), not by flipping back and forth between the same couple of
+values dozens of times.
+
+**Fix.** Two complementary changes in `IfcViewer.tsx`, neither of which requires giving doors/
+windows real cut geometry (that's the separate, larger real-mesh-geometry plan): (1)
+`logarithmicDepthBuffer: true` on the `WebGLRenderer`, which spreads the depth buffer's finite
+precision more evenly across the camera's near/far range instead of concentrating almost all of it
+near the near plane -- the standard fix for depth-precision-driven z-fighting in general; (2) a
+small `polygonOffset` bias added to each material -- door/window get a small negative offset
+(pulled slightly toward the camera, so they reliably win the depth test against their host wall)
+and wall/slab get a small positive one (pushed slightly back) -- so two coincident surfaces have a
+deterministic winner instead of one decided by noise.
+
+**Verification.** Re-ran the identical 50-frame `gl.readPixels` grid-sampling script against the
+same live Duplex rotation after the fix: 0 pixels showed the flip-between-2-3-colors signature (down
+from 9 before), and the highest-churn pixels now cycle through 11-20 distinct colors across the same
+50 frames -- consistent with smooth, continuous rotation, not flicker. Spot-checked DigitalHub the
+same way: the door/window-vs-wall flicker signature is likewise gone; a much smaller number of
+sample points still occasionally toggle between colors matching the scene background/`GridHelper`
+line colors specifically (not any building material color), a separate, pre-existing, minor
+grid-floor-line aliasing artifact at glancing angles -- distinct from, and not what, the owner
+reported, and left as-is. Full backend suite unaffected (frontend-only change): 327 passed, 5
+skipped; `ruff` clean; `npm run build` clean.
+
+## D-043 — 3D viewer panel was too small to actually inspect a real building
+
+Owner-requested, 2026-09-15: the IFC Viewer column read as too small on screen; asked for at least
+1/3 of the workspace row, a bit more if reasonable.
+
+**What shipped.** `.workspace`'s `grid-template-columns` (`apps/web/src/styles.css`) widened the
+viewer column from `1fr` of a `3.2fr` total (31.25%) to `1.4fr` of a new `3.4fr` total (41.2%). The
+Conversation column absorbs the shrink (`1.1fr` -> `0.9fr`, 34.4% -> 26.5%) rather than Decision
+Trace, which keeps its own prior "at least 1/3, it's the point of the demo" sizing intact (`1.1fr`
+of `3.4fr` = 32.4%, effectively unchanged from before). Minimum widths (`minmax(...)`) were adjusted
+alongside so the layout still degrades sensibly on a narrow window.
+
+**Verification.** `npm run build` clean; confirmed live in the browser that the viewer column now
+renders visibly wider than Conversation and close to Decision Trace's own width. CSS-only change,
+327 backend tests unaffected.
