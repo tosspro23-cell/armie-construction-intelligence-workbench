@@ -299,12 +299,6 @@ class ConversationDelta(BaseModel):
     rationale: str = ""
 
 
-class AnswerSynthesis(BaseModel):
-    """Natural-language rendering of verified facts only; no new claims."""
-
-    answer_markdown: str = Field(min_length=1, max_length=2400)
-
-
 class Evidence(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid4()))
     source_type: SourceType

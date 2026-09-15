@@ -2067,3 +2067,115 @@ clean; `npm run build` clean.
 and still serve their original bounding-box representation to any other consumer. Binary transport,
 precompute-at-ingest caching, and reading the IFC's own real material/texture data remain explicitly
 out of scope (SPEC-M12's own "Explicitly excluded scope"), named as deliberate, not overlooked.
+
+## D-045 — Evidence was silently capped at 10 items regardless of how many actually matched
+
+Owner-reported, 2026-09-15: asking a question against the real DigitalHub building (47 real
+`IfcWindow` elements) showed only 10 items of evidence, not all 47.
+
+**Root cause.** `IfcRepository._make_evidence` (`apps/api/app/tools/ifc/repository.py`)
+hard-capped its evidence sample to `elements[:10]` unconditionally -- a second, undocumented
+number with no connection to `IfcQueryInput.limit` (already validated 1-200, and the exact bound
+every other operation's own `value` payload already respects). Every `execute()` code path passes
+its full matched-elements list into this method, so a `count` of 47 real windows correctly reported
+`matched_count = 47` while only ever citing 10 of them as evidence -- the other 37 silently dropped
+before citations were ever constructed. No comment explained the `10`; looked accidental, not a
+deliberate bound, confirmed by an independent codebase sweep finding no other place with a similar
+cap.
+
+**Fix.** Reuse `query.limit` instead of the disconnected constant: `elements[: min(query.limit,
+len(elements))]`. For the reported case (47 windows, default `limit=50`), every match now becomes
+evidence; a caller-specified smaller limit still bounds the sample, so this is not "always
+unbounded," it is "bounded by the one limit the query itself already carries."
+
+**Verification.** Reproduced against the real Duplex fixture (57 real walls, well past the old
+hardcoded 10), not a synthetic case: a `count` query's evidence length is now `> 10` (was exactly
+`10` before the fix); a caller-specified `limit=20` still yields exactly 20 evidence items even
+though 57 matched, proving the fix bounds rather than removes bounding; and Duplex's real window
+count (under the default limit of 50, the same shape as the owner-reported DigitalHub case) now
+gets evidence covering every single match. 3 new tests
+(`tests/test_ifc_evidence_sampling.py`); full suite and `ruff` clean.
+
+## D-046 — 3D viewer highlights accumulated instead of replacing each other
+
+Owner-reported, 2026-09-15: clicking an element (or jumping to one from an Evidence citation)
+highlighted it correctly, but clicking a second element left the first one lit too, and clicking
+the same citation again did nothing -- no way to "cancel" a highlight short of the separate "Clear
+selection" button.
+
+**Root cause.** `IfcViewer.tsx` had two independent, uncoordinated highlight mechanisms: the canvas
+click handler (`select()`) tracked "the highlighted mesh" in its own local closure variable, and the
+`focusGlobalId` effect (fed by Evidence-citation clicks) kept no state at all -- it only ever *set*
+emissive on a newly focused mesh, with an early return whenever `focusGlobalId` was falsy that
+skipped clearing anything. Neither path could see or clear a highlight the other had set, and
+`focusGlobalId` going to `undefined` (e.g. "Clear selection") never reset the mesh's own emissive at
+all.
+
+**Fix.** A single `highlightedMeshRef`, shared by both paths, with one `applyHighlight(mesh | null)`
+helper that always clears the previous mesh's emissive before setting the new one (or clearing it
+entirely for `null`). The canvas click handler and the `focusGlobalId` effect both now call this one
+function instead of managing emissive state independently; the effect no longer early-returns on a
+falsy `focusGlobalId`, so losing focus correctly un-highlights. Separately, `main.tsx`'s
+`openCitation` now toggles `selected` to `null` when the same citation's `global_id` is clicked
+again (previously re-setting an identical value, which React's dependency array treated as no
+change at all -- nothing happened on a second click).
+
+**Verification.** `npm run build` clean; code-reviewed against the exact reported sequence (select
+A, select B, re-select B, clear) tracing through `applyHighlight`'s logic by hand -- no backend
+surface changed, and this UI interaction has no existing automated test harness in this repo to
+extend (frontend tests here are `tsc`/`npm run build` type-checking only, not component/interaction
+tests); the owner is best positioned to confirm the fixed sequence live.
+
+## D-047 — Latency labels didn't distinguish a per-step approximation from the real total
+
+Owner-reported, 2026-09-15: each Decision Trace step (Question/Plan/Execution/Verification) shows a
+latency number, and the Result step shows one too, all formatted identically -- no way to tell that
+Result's number is the real, backend-measured total request latency, not one more per-step
+approximation, leading to a reasonable guess that Result's number might just be the sum of the
+others (which, structurally, it approximately is, since all five numbers are slices of the same
+overall timeline).
+
+**Fix.** `DecisionStory.tsx` gained two labeled wrappers around the existing `formatMs`: `stepMs`
+(used by the five per-step subtitles, appends "this step") and `totalMs` (used only by Result,
+appends "Total ... (all steps)"). The Result step also gained a compact breakdown line spelling out
+each stage's approximate share summing to the real total, e.g. "Question ~10 ms + Plan ~500 ms +
+Execution ~1.2 s + Verification ~50 ms = **Total ~1.8 s** (backend-measured)" -- explicitly labeling
+the breakdown as the client-side approximation it already was (`stageTimingsMs`'s own pre-existing
+comment) and the total as the one real, server-measured number.
+
+**Verification.** `npm run build` clean; frontend-only, no backend surface changed.
+
+## D-048 — Answer-polish (SPEC-M10, D-025) removed: real measured cost far exceeded its value
+
+Owner asked directly, 2026-09-15, having tried it: how much of total latency does the polish pass
+actually spend, and is a purely cosmetic reword worth that cost -- remove it if not.
+
+**Measured, not guessed.** The feature was off by default in every deployment this session (`az
+containerapp show` confirmed `ENABLE_ANSWER_POLISH` was unset on the live app), so the honest way to
+answer "how expensive is it" was to actually call it: timed three real calls against the same live
+Azure OpenAI resource and deployment (`armie-m3-openai`, `gpt-5-mini`) production already uses, with
+a representative real-answer-shaped rewrite prompt (`AgentService._polish_answer`'s own exact
+prompt template). Result: **7.1-9.3 seconds per call**, purely to reword an answer whose every
+number, unit, name, and identifier is required to stay byte-identical -- for a project whose
+deterministic answers (the vast majority of this system's answers) otherwise complete in a small
+fraction of that time. This is not a marginal cost sitting alongside a real accuracy benefit; it is
+a serial multi-second tax added after an answer is already fully computed and verified, purchasing
+wording changes only, which the owner's own live experience of it already read as "sometimes no
+noticeable difference."
+
+**Removed entirely**, per the owner's own explicit instruction to remove it if the cost didn't
+justify the value: `AgentService._polish_answer`/`_polish_preserves_facts` and the now-fully-unused
+`AnswerSynthesis` schema (`apps/api/app/schemas/models.py`) from `graph.py`; `Settings.
+enable_answer_polish` (`config.py`); the `answer_polished`/`pre_polish_answer` `execution_metadata`
+fields and `_finalize`'s polish branch; the frontend's "Answer was reworded..." detail block
+(`DecisionStory.tsx`); `enable_answer_polish`/`ENABLE_ANSWER_POLISH`/`enableAnswerPolish` from
+`azure-deploy.yml` and `infra/bicep/apps.bicep`; `tests/test_answer_polish.py` (10 tests) deleted
+outright rather than left disabled. `docs/specs/SPEC-M10-answer-polish-v1.md` and its `PROJECT_STATE.md`
+milestone entry are left as the historical record of what was built and why, per this project's own
+practice of layering fix/removal entries rather than rewriting prior history -- this entry is that
+layer.
+
+**Verification.** 325 tests pass (335 - 10 removed); `ruff clean`; `npm run build` clean; `az bicep
+build` on `apps.bicep` still validates after removing the parameter/variable/array-entry. No
+remaining reference to `polish`/`AnswerSynthesis` anywhere in `apps/`, `tests/`, `.github/`, or
+`infra/` (swept explicitly, not assumed).

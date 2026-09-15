@@ -254,7 +254,16 @@ function App() {
   }
 
   function openCitation(citation: Citation) {
-    if (citation.source_type === "ifc") { setTab("bim"); setSelected({ globalId: citation.locator.global_id, expressId: citation.locator.express_id, type: citation.locator.entity_type, name: citation.label }); }
+    // D-046: owner-reported, 2026-09-15 -- clicking the same evidence
+    // citation a second time did nothing (no way to "cancel" the
+    // highlight short of the separate "Clear selection" button). Since
+    // `focusGlobalId` in IfcViewer.tsx is fed by this same `selected`
+    // state, re-clicking the citation that's already selected now clears
+    // it instead of re-setting the identical value.
+    if (citation.source_type === "ifc") {
+      setTab("bim");
+      setSelected((current) => (current?.globalId && current.globalId === citation.locator.global_id ? null : { globalId: citation.locator.global_id, expressId: citation.locator.express_id, type: citation.locator.entity_type, name: citation.label }));
+    }
     if (citation.source_type === "pdf") {
       setTab("drawing");
       setDrawingEvidence({ bbox: citation.locator.bbox, board: citation.locator.board, field: citation.locator.field, page: citation.locator.page, document: citation.source_file, localized: citation.locator.localized });

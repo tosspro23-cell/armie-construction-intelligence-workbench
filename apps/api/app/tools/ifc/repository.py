@@ -562,7 +562,18 @@ class IfcRepository:
         }
 
     def _make_evidence(self, elements: list[Any], query: IfcQueryInput, value: Any) -> list[Evidence]:
-        sample = elements[: min(10, len(elements))]
+        # D-045: owner-reported, 2026-09-15 -- a "how many windows" question
+        # against the real DigitalHub building (47 real IfcWindow matches)
+        # only ever showed 10 items of evidence. Root cause: this sample was
+        # hard-capped to 10 regardless of how many elements actually
+        # matched or what the query's own `limit` already said, an
+        # unrelated, undocumented number with no connection to
+        # `IfcQueryInput.limit` (already validated 1-200, and the exact
+        # knob every other operation's own `value` payload is already
+        # bounded by). Reusing that existing limit here instead of a second,
+        # disconnected constant means evidence stops silently under-citing
+        # a match count well within what the query itself already allowed.
+        sample = elements[: min(query.limit, len(elements))]
         evidence: list[Evidence] = []
         for element in sample:
             locator = {

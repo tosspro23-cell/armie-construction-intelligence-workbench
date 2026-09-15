@@ -143,11 +143,29 @@ export function IfcViewer({ onSelection, onSnapshot, onStatus, focusGlobalId, pr
   const [status, setStatus] = useState<ViewerStatus>({ phase: "initializing", message: "Preparing IFC viewer…" });
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const elementMeshesRef = useRef<Map<string, THREE.Mesh>>(new Map());
+  // D-046: owner-reported, 2026-09-15 -- highlighting one element (either
+  // by clicking it directly, or by jumping to it from an Evidence
+  // citation) left it lit permanently: clicking a different element (or
+  // citation) highlighted the new one but never cleared the old one's
+  // emissive, so highlights accumulated across the scene. Root cause: the
+  // canvas click handler and the `focusGlobalId` effect below each kept
+  // their own, independent notion of "the highlighted mesh" (a local
+  // closure variable in one, nothing at all in the other), so neither
+  // could clear a highlight the other had set. A single ref, shared by
+  // both, is the one source of truth for "what is currently lit."
+  const highlightedMeshRef = useRef<THREE.Mesh | null>(null);
 
   const publishStatus = (next: ViewerStatus) => {
     setStatus(next);
     onStatus(next);
   };
+
+  function applyHighlight(mesh: THREE.Mesh | null) {
+    const previous = highlightedMeshRef.current;
+    if (previous && previous !== mesh) (previous.material as THREE.MeshStandardMaterial).emissive.set(0x000000);
+    if (mesh) (mesh.material as THREE.MeshStandardMaterial).emissive.set(0x4f9df5);
+    highlightedMeshRef.current = mesh;
+  }
 
   useEffect(() => {
     const host = hostRef.current;
@@ -264,16 +282,14 @@ export function IfcViewer({ onSelection, onSnapshot, onStatus, focusGlobalId, pr
 
     const raycaster = new THREE.Raycaster();
     const pointer = new THREE.Vector2();
-    let selectedMesh: THREE.Mesh | null = null;
     const select = (event: MouseEvent) => {
       const bounds = renderer.domElement.getBoundingClientRect();
       pointer.x = ((event.clientX - bounds.left) / bounds.width) * 2 - 1;
       pointer.y = -((event.clientY - bounds.top) / bounds.height) * 2 + 1;
       raycaster.setFromCamera(pointer, camera);
       const hits = raycaster.intersectObjects(pickables, false);
-      if (selectedMesh) (selectedMesh.material as THREE.MeshStandardMaterial).emissive.set(0x000000);
       if (hits.length === 0) {
-        selectedMesh = null;
+        applyHighlight(null);
         onSelection(null);
         return;
       }
@@ -296,9 +312,9 @@ export function IfcViewer({ onSelection, onSnapshot, onStatus, focusGlobalId, pr
         const entityType = (candidate.object.userData as ViewerElement).entity_type;
         return entityType !== "IfcWall" && candidate.distance <= nearestDistance + WALL_OCCLUSION_MARGIN;
       }) || hits[0];
-      selectedMesh = preferredHit.object as THREE.Mesh;
-      (selectedMesh.material as THREE.MeshStandardMaterial).emissive.set(0x4f9df5);
-      const element = selectedMesh.userData as ViewerElement;
+      const mesh = preferredHit.object as THREE.Mesh;
+      applyHighlight(mesh);
+      const element = mesh.userData as ViewerElement;
       onSelection({ globalId: element.global_id, expressId: element.express_id, type: element.entity_type, name: element.name });
     };
 
@@ -327,6 +343,11 @@ export function IfcViewer({ onSelection, onSnapshot, onStatus, focusGlobalId, pr
       });
       renderer.dispose();
       host.replaceChildren();
+      // The scene's own meshes are being disposed above -- any stale
+      // reference to one of them is no longer valid, so the highlight ref
+      // is reset alongside them rather than left pointing at disposed
+      // geometry for whatever project loads next.
+      highlightedMeshRef.current = null;
     };
     // projectId is in this effect's dependency array on purpose: switching
     // projects tears down the whole scene (the existing cleanup below
@@ -336,9 +357,12 @@ export function IfcViewer({ onSelection, onSnapshot, onStatus, focusGlobalId, pr
   }, [onSelection, onStatus, projectId]);
 
   useEffect(() => {
-    if (!focusGlobalId) return;
-    const mesh = elementMeshesRef.current.get(focusGlobalId);
-    if (mesh) (mesh.material as THREE.MeshStandardMaterial).emissive.set(0x4f9df5);
+    // D-046: `focusGlobalId` going away (e.g. the owner's own "Clear
+    // selection" button) must clear the highlight too, not just skip
+    // setting a new one -- the old early return here left whatever was lit
+    // lit forever once its citation stopped being the current selection.
+    const mesh = focusGlobalId ? elementMeshesRef.current.get(focusGlobalId) ?? null : null;
+    applyHighlight(mesh);
   }, [focusGlobalId]);
 
   function captureSnapshot() {

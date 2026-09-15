@@ -65,11 +65,6 @@ on:
         description: "D-023 addendum: identity-independent, deployment-wide cap, checked in addition to rate_limit_requests_per_minute above. 0 (the default) keeps RATE_LIMIT_GLOBAL_REQUESTS_PER_MINUTE unset. Independent-review finding, confirmed live 2026-09-13: the per-caller cap alone is bypassable for free by minting a fresh X-Session-Id per request, since nothing validates it was actually issued by this server."
         required: false
         default: "0"
-      enable_answer_polish:
-        description: "SPEC-M10/D-025: optional final rewording pass over an already-computed, already-verified deterministic answer -- see AgentService._polish_answer's own number-preservation guard for why this cannot change what an answer says, only how it reads. false (the default) keeps ENABLE_ANSWER_POLISH unset, matching config.py's own default. Costs one additional real model call per answered/partially_answered response when true."
-        required: false
-        default: false
-        type: boolean
       app_insights_resource_id:
         description: "D-028: the Application Insights component's full ARM resource ID (az monitor app-insights component show --app <name> --resource-group <rg> --query id), not its instrumentation key/connection string. Paired with the existing AZURE_TENANT_ID repository secret (already used for OIDC login) to build a chat response's Cloud Provenance -> Application Insights deep link -- no separate tenant input needed. Blank (the default) keeps APP_INSIGHTS_RESOURCE_ID unset, and the banner stays plain text."
         required: false
@@ -130,7 +125,6 @@ jobs:
       ADLS_ACCOUNT_URL: ${{ inputs.adls_account_url }}
       RATE_LIMIT_REQUESTS_PER_MINUTE: ${{ inputs.rate_limit_requests_per_minute }}
       RATE_LIMIT_GLOBAL_REQUESTS_PER_MINUTE: ${{ inputs.rate_limit_global_requests_per_minute }}
-      ENABLE_ANSWER_POLISH: ${{ inputs.enable_answer_polish }}
       # Reuses the same repository secret already used for OIDC login
       # below (azure/login@v2's tenant-id) -- no separate input needed for
       # a value this workflow already has, securely, from before D-028.
@@ -316,7 +310,6 @@ jobs:
                          adlsAccountUrl="$ADLS_ACCOUNT_URL" \
                          rateLimitRequestsPerMinute="$RATE_LIMIT_REQUESTS_PER_MINUTE" \
                          rateLimitGlobalRequestsPerMinute="$RATE_LIMIT_GLOBAL_REQUESTS_PER_MINUTE" \
-                         enableAnswerPolish="$ENABLE_ANSWER_POLISH" \
                          azureTenantId="$AZURE_TENANT_ID_FOR_CLOUD_LINK" \
                          appInsightsResourceId="$APP_INSIGHTS_RESOURCE_ID" \
             --query properties.outputs -o json > apps-outputs.json

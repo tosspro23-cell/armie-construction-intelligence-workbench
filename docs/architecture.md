@@ -65,7 +65,7 @@ real cloud-native slice, opt-in per setting in `apps/api/app/config.py`:
 ```text
 React (Azure Container App: web, public)
   -> FastAPI + LangGraph (Azure Container App: api, internal-only)
-       -> Azure OpenAI (Managed Identity)                 -- interpretation/planning/vision/polish
+       -> Azure OpenAI (Managed Identity)                 -- interpretation/planning/vision
        -> Azure AI Search (Managed Identity)               -- retrieval-directed miss, opt-in
        -> Azure Database for PostgreSQL (Managed Identity) -- conversation + audit persistence
        -> Azure Blob Storage (Managed Identity)            -- evidence crop persistence

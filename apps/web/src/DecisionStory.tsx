@@ -75,6 +75,24 @@ function formatMs(ms: number | undefined): string | null {
   return ms < 1000 ? `~${Math.round(ms)} ms` : `~${(ms / 1000).toFixed(1)} s`;
 }
 
+// D-047: owner-reported, 2026-09-15 -- every step's latency was formatted
+// identically ("~120 ms"), including the Result step's, which is not a
+// per-step approximation like the other five but the real, backend-
+// measured, whole-request latency -- indistinguishable from the others by
+// look alone, so it read as if it might be one more per-step number
+// rather than the total they add up to. `stepMs` labels the five
+// per-stage approximations explicitly; `totalMs` labels Result's number
+// explicitly as the total, never sharing formatMs's bare output with them.
+function stepMs(ms: number | undefined): string | null {
+  const formatted = formatMs(ms);
+  return formatted ? `${formatted} this step` : null;
+}
+
+function totalMs(ms: number | undefined): string | null {
+  const formatted = formatMs(ms);
+  return formatted ? `Total ${formatted} (all steps)` : null;
+}
+
 function citationFacts(citation: Citation): Array<[string, string]> {
   return Object.entries(citation.locator || {})
     .filter(([key, value]) => key !== "evidence_crop" && key !== "localized" && value !== null && value !== undefined && value !== "")
@@ -196,22 +214,22 @@ export function DecisionStory({ latest, trace, projectId, onOpenCitation }: {
 
     <ol className="story-steps">
       <li className="story-step">
-        <StepHeader number={1} icon="❓" title="Question" subtitle={[meta.normalized_request ? null : "as asked", formatMs(stageTimings["Intent Understanding"])].filter(Boolean).join(" · ") || undefined} />
+        <StepHeader number={1} icon="❓" title="Question" subtitle={[meta.normalized_request ? null : "as asked", stepMs(stageTimings["Intent Understanding"])].filter(Boolean).join(" · ") || undefined} />
         <p className="story-step-body">{meta.normalized_request || "—"}</p>
         <StepTrace events={byStage("Intent Understanding")} />
       </li>
 
       <li className="story-step">
         {/* model_call_count is a whole-request total (it also counts calls
-            made during Execution, e.g. AI Search retrieval, or a later
-            answer-polish pass) -- showing it here implied those calls
-            happened during planning even when planning_mode was
+            made during Execution, e.g. AI Search retrieval) -- showing it
+            here implied those calls happened during planning even when
+            planning_mode was
             "heuristic" (zero model calls). Found live, 2026-09-13: a user
             went looking for "the model call the Plan step claims" inside
             this step's own trace and, correctly, couldn't find one. The
             total now lives on the Result step below, which is the one
             step that actually summarizes the whole request. */}
-        <StepHeader number={2} icon="🧭" title="Plan" subtitle={[`${meta.planning_mode || "—"} planning`, formatMs(planLatencyMs)].filter(Boolean).join(" · ")} />
+        <StepHeader number={2} icon="🧭" title="Plan" subtitle={[`${meta.planning_mode || "—"} planning`, stepMs(planLatencyMs)].filter(Boolean).join(" · ")} />
         {subplans.length === 0 ? <p className="story-step-body empty">No plan recorded.</p> : <ul className="plan-list">
           {subplans.map((plan, index) => <li key={plan.subtask_id || index}>
             <span className="plan-op">{plan.operation || plan.intent || "—"}{plan.entity_type ? ` · ${plan.entity_type}` : ""}</span>
@@ -222,7 +240,7 @@ export function DecisionStory({ latest, trace, projectId, onOpenCitation }: {
       </li>
 
       <li className="story-step">
-        <StepHeader number={3} icon="⚙️" title="Execution" subtitle={[`source: ${meta.source || "—"}`, `${meta.tool_call_count || 0} tool call(s)`, formatMs(stageTimings["Execution"])].filter(Boolean).join(" · ")} />
+        <StepHeader number={3} icon="⚙️" title="Execution" subtitle={[`source: ${meta.source || "—"}`, `${meta.tool_call_count || 0} tool call(s)`, stepMs(stageTimings["Execution"])].filter(Boolean).join(" · ")} />
         {retrievalEvent ? <div className="retrieval-evidence">
           <p className="retrieval-summary">
             <strong>Azure AI Search retrieval considered</strong> — {retrievalEvent.payload.documents_evaluated?.length || 0} document(s) scored,
@@ -283,19 +301,31 @@ export function DecisionStory({ latest, trace, projectId, onOpenCitation }: {
       </li>
 
       <li className="story-step">
-        <StepHeader number={5} icon="✅" title="Verification" subtitle={[latest.verification.status, formatMs(stageTimings["Verification"])].filter(Boolean).join(" · ")} />
+        <StepHeader number={5} icon="✅" title="Verification" subtitle={[latest.verification.status, stepMs(stageTimings["Verification"])].filter(Boolean).join(" · ")} />
         <p className={`story-step-body verification-reason ${latest.verification.status}`}>{latest.verification.reason || (latest.verification.status === "passed" ? "Every value was independently checked against its own source before being presented." : "—")}</p>
         <StepTrace events={byStage("Verification")} />
       </li>
 
       <li className="story-step">
-        <StepHeader number={6} icon="🏁" title="Result" subtitle={[meta.latency_ms ? `${meta.latency_ms} ms` : null, `${meta.model_call_count || 0} model call(s) total`].filter(Boolean).join(" · ")} />
+        <StepHeader number={6} icon="🏁" title="Result" subtitle={[meta.latency_ms ? totalMs(meta.latency_ms) : null, `${meta.model_call_count || 0} model call(s) total`].filter(Boolean).join(" · ")} />
         <p className="story-step-body">Disposition: <strong>{latest.disposition.replace(/_/g, " ")}</strong></p>
-        {meta.answer_polished && <details className="step-trace">
-          <summary>Answer was reworded by a model for tone — numbers unchanged</summary>
-          <p className="story-step-body empty">Deterministic answer before rewording:</p>
-          <pre>{meta.pre_polish_answer}</pre>
-        </details>}
+        {/* D-047: owner-requested breakdown showing the per-step numbers
+            actually add up to the total above -- the five per-step
+            timings are a client-side approximation (see stageTimingsMs's
+            own comment), the total is the real, backend-measured request
+            latency; both are labeled as such here rather than left to
+            look like the same kind of number. */}
+        {meta.latency_ms && <p className="story-step-body latency-breakdown">
+          Breakdown (approximate): {[
+            ["Question", stageTimings["Intent Understanding"]],
+            ["Plan", planLatencyMs],
+            ["Execution", stageTimings["Execution"]],
+            ["Verification", stageTimings["Verification"]],
+          ].map(([label, ms]) => [label, formatMs(ms as number | undefined)] as const)
+            .filter(([, formatted]) => formatted)
+            .map(([label, formatted]) => `${label} ${formatted}`)
+            .join(" + ")} = <strong>Total {formatMs(meta.latency_ms)}</strong> (backend-measured)
+        </p>}
         <StepTrace events={byStage("Final Response")} />
       </li>
     </ol>
