@@ -15,8 +15,12 @@ type ViewerElement = {
   express_id?: number;
   entity_type?: string;
   name?: string;
-  center: [number, number, number];
-  dimensions: [number, number, number];
+  // SPEC-M12: `/api/v1/project/viewer-mesh`'s real triangulated geometry --
+  // flat IFC world-space coordinates (`vertices`, 3 floats per vertex) and
+  // triangle indices into them (`faces`, 3 indices per triangle), in place
+  // of the old bounding-box `center`/`dimensions` pair.
+  vertices: number[];
+  faces: number[];
   color: string;
   storey?: string;
   // D-041: real IFC `IsExternal` (whichever Pset carries it) -- `true` for
@@ -195,43 +199,52 @@ export function IfcViewer({ onSelection, onSnapshot, onStatus, focusGlobalId, pr
       try {
         publishStatus({ phase: "loading", message: "Loading the ARMIE synthetic IFC demo through the local adapter…" });
         const query = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
-        const response = await fetch(`/api/v1/project/viewer-elements${query}`, withAuthHeader());
+        // SPEC-M12: real ifcopenshell-triangulated geometry (including a
+        // real boolean-subtracted wall opening where the source model has
+        // one) in place of the old per-element bounding box -- fixes the
+        // "no real doorway cutout" limitation D-039/D-040/D-042 each named
+        // but declined to fix.
+        const response = await fetch(`/api/v1/project/viewer-mesh${query}`, withAuthHeader());
         if (!response.ok) throw new Error(`Viewer source request failed (${response.status}).`);
-        publishStatus({ phase: "parsing", message: "Building browser geometry from synthetic IFC elements…", progress: 20 });
+        publishStatus({ phase: "parsing", message: "Building browser geometry from real IFC mesh data…", progress: 20 });
         const payload = await response.json() as { elements: ViewerElement[] };
         const total = Math.max(payload.elements.length, 1);
         const bounds = new THREE.Box3();
         payload.elements.forEach((element, index) => {
-          // D-038: `/api/v1/project/viewer-elements` returns real IFC world
-          // coordinates as ifcopenshell computed them -- IFC's own
-          // convention is Z-up (a storey's real elevation is its Z
-          // component; confirmed directly, e.g. Level 1 ~0, Level 2 ~3.1,
-          // Roof ~6.2 on the Duplex fixture). Three.js's camera/lighting/
-          // OrbitControls here all assume Y-up (the scene was never told
-          // otherwise). Passed straight through with no conversion, a
-          // slab's real height ended up in Three.js's *depth* axis instead
-          // of its height axis, and the slab's arbitrary IFC north/south
-          // position ended up controlling how high it rendered -- found
-          // live, 2026-09-15, when a real multi-storey building's ground
-          // floor rendered above other geometry instead of below it (the
-          // tiny synthetic demo fixture's simple geometry never made this
-          // visible). Standard Z-up -> Y-up conversion (a -90 degree
-          // rotation about X, preserving right-handedness): three.y =
-          // ifc.z (real height), three.z = -ifc.y. Dimensions only need
-          // the Y/Z extents swapped, never negated (a size has no sign).
-          const [ifcWidth, ifcDepth, ifcHeight] = element.dimensions;
-          const [ifcX, ifcY, ifcZ] = element.center;
-          const geometry = new THREE.BoxGeometry(ifcWidth, ifcHeight, ifcDepth);
+          // D-038: IFC's own convention is Z-up (a storey's real elevation
+          // is its Z component); Three.js's camera/lighting/OrbitControls
+          // here all assume Y-up. Standard Z-up -> Y-up conversion (a -90
+          // degree rotation about X, preserving right-handedness):
+          // three.y = ifc.z (real height), three.z = -ifc.y. Applied per
+          // vertex here (SPEC-M12's real mesh has no single per-element
+          // center/dimensions to transform instead) rather than via
+          // `mesh.position`/`BoxGeometry` dimensions the way the old
+          // bounding-box path did -- the vertices are already absolute
+          // IFC world coordinates, so the mesh itself stays at the scene
+          // origin.
+          const positions = new Float32Array(element.vertices.length);
+          for (let i = 0; i < element.vertices.length; i += 3) {
+            const ifcX = element.vertices[i];
+            const ifcY = element.vertices[i + 1];
+            const ifcZ = element.vertices[i + 2];
+            positions[i] = ifcX;
+            positions[i + 1] = ifcZ;
+            positions[i + 2] = -ifcY;
+          }
+          const geometry = new THREE.BufferGeometry();
+          geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+          geometry.setIndex(element.faces);
+          geometry.computeVertexNormals();
+          geometry.computeBoundingBox();
           const material = new THREE.MeshStandardMaterial({ color: element.color, ...materialPropsFor(element) });
           const mesh = new THREE.Mesh(geometry, material);
-          mesh.position.set(ifcX, ifcZ, -ifcY);
           mesh.userData = element;
           if (element.global_id) elementMeshesRef.current.set(element.global_id, mesh);
           scene.add(mesh);
           bounds.expandByObject(mesh);
           pickables.push(mesh);
           if (index % 40 === 0) {
-            publishStatus({ phase: "parsing", message: `Building browser geometry from synthetic IFC elements: ${Math.round(((index + 1) / total) * 100)}%`, progress: Math.round(((index + 1) / total) * 100) });
+            publishStatus({ phase: "parsing", message: `Building browser geometry from real IFC mesh data: ${Math.round(((index + 1) / total) * 100)}%`, progress: Math.round(((index + 1) / total) * 100) });
           }
         });
         const center = bounds.getCenter(new THREE.Vector3());
@@ -242,7 +255,7 @@ export function IfcViewer({ onSelection, onSnapshot, onStatus, focusGlobalId, pr
         camera.far = Math.max(size * 10, 1000);
         camera.updateProjectionMatrix();
         controls.update();
-        publishStatus({ phase: "ready", message: `Viewer ready — ${payload.elements.length} synthetic IFC elements available for selection.`, progress: 100 });
+        publishStatus({ phase: "ready", message: `Viewer ready — ${payload.elements.length} IFC elements available for selection.`, progress: 100 });
       } catch (error) {
         console.error("IFC browser projection failed", error);
         if (!disposed) publishStatus({ phase: "failed", message: "IFC parsing failed. Confirm that the local API and IFC source are available." });
