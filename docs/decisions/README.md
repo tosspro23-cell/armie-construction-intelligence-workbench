@@ -2013,3 +2013,57 @@ alongside so the layout still degrades sensibly on a narrow window.
 **Verification.** `npm run build` clean; confirmed live in the browser that the viewer column now
 renders visibly wider than Conversation and close to Decision Trace's own width. CSS-only change,
 327 backend tests unaffected.
+
+## D-044 — SPEC-M12: real triangulated mesh geometry replaces the viewer's bounding boxes
+
+Owner-approved plan (`docs/specs/SPEC-M12-real-mesh-viewer-geometry-v1.md`), implemented and
+verified the same day, 2026-09-15. Closes the door/window overlapping-box limitation D-039,
+D-040, and D-042 each named but explicitly declined to fix, by giving the 3D viewer real
+`ifcopenshell`-triangulated geometry instead of an axis-aligned bounding box per element.
+
+**What shipped.** `IfcRepository.mesh_elements` (`apps/api/app/tools/ifc/repository.py`), a new
+`@cached_property` alongside `viewer_elements` (unchanged, still serves its own endpoint
+unmodified), keeps the real `verts`/`faces` `ifcopenshell.geom.create_shape` already computes
+instead of collapsing them to a bounding box; elements without real triangulatable geometry (some
+of the synthetic `demo` fixture's elements) fall back to an explicit 8-vertex/12-triangle box built
+from the same placement-origin logic `viewer_elements`'s own fallback already used. A new `GET
+/api/v1/project/viewer-mesh` endpoint mirrors the existing `viewer-elements` route exactly,
+including the `asyncio.to_thread` deferral for the real, seconds-long first compute on a large
+building. `IfcViewer.tsx` fetches this new endpoint and builds a `THREE.BufferGeometry` per element
+from its real vertices/faces (the same Z-up -> Y-up conversion D-038 established, applied per
+vertex instead of to a single bounding-box center) instead of a `BoxGeometry`. All prior material
+work (D-039/D-040/D-041/D-042 palette, opacity, exterior-shell transparency, polygon-offset bias)
+carries over unchanged, since materials are orthogonal to geometry source.
+
+**No new cache infrastructure -- reused what already existed, verified by reading the code before
+building anything new.** `ServiceContainer.get_project` (SPEC-M9 §C) already keeps one
+`IfcRepository` instance alive per `(project_id, source_set_id)` for the life of the process; a
+`@cached_property` on that same instance gets "compute once, serve from memory after" for free.
+
+**Verification, with real measurements superseding the spec's own estimates where they differed.**
+Against the real Duplex fixture: `mesh_elements`' vertex/triangle counts match an independent direct
+`ifcopenshell` check for every element with real geometry (`checked_real_geometry > 50`, not
+vacuously true); face indices are valid triangle indices into the vertex array; `is_external`/color
+agree exactly with `viewer_elements` for every element. Exterior walls carry 24-48 vertices each
+(vs. 8 for a plain box) -- consistent with a real boolean-subtracted opening in the triangulated
+geometry, not merely "no worse than before." **The actual, falsifiable visual claim, confirmed live
+in a real browser, not only asserted from the payload:** clicking directly on a window from an
+exterior overview resolves immediately to that `IfcWindow` (`M_Fixed:2800mm x 2410mm`, ExpressID
+7795) with no wall-occlusion deflection needed -- the ray passes through a real opening rather than
+hitting a solid wall first -- and a correctly-placed, correctly-sized window pane is visibly flush
+in the wall from outside; the roof renders as real sloped geometry, not a flat box. Against the real
+DigitalHub building (303 elements, 73k+ vertices): first request 10.9s (cold `ifcopenshell` compute,
+matching the spec's 11.2s estimate almost exactly), second request 22ms (the caching claim verified
+live, not just the geometry claim) -- payload measured at 5.6 MB, meaningfully above the spec's 4.3
+MB estimate (the estimate's ~30 bytes/vertex assumption undercounted real JSON float-repr overhead),
+noted honestly here rather than silently revised away; still the same order of magnitude and not a
+reason to revisit OD-46's JSON-for-now decision on its own. Rendered and interacted with correctly
+in the browser at this payload size with no crash or hang. 332 backend tests pass (327 + 5 new:
+`tests/test_ifc_mesh_geometry.py`'s independent-geometry-check, valid-triangle-indices,
+synthetic-fixture-fallback, and cross-property-agreement suite, plus one new endpoint test); `ruff`
+clean; `npm run build` clean.
+
+**What this does not change.** `viewer_elements`/`/api/v1/project/viewer-elements` are unmodified
+and still serve their original bounding-box representation to any other consumer. Binary transport,
+precompute-at-ingest caching, and reading the IFC's own real material/texture data remain explicitly
+out of scope (SPEC-M12's own "Explicitly excluded scope"), named as deliberate, not overlooked.
