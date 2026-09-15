@@ -114,5 +114,21 @@
       "digitalhub_schedule.pdf"
     ],
     "source_set_id": "digitalhub-v2"
+  },
+  "duplex": {
+    "display_name": "Duplex Apartment (real building)",
+    "files": {
+      "Duplex_A_20110907.ifc": {
+        "content_sha256": "b347a2c8aa8fff6db896a4417a9c50c22ac0ccd7c5cfc22b99b8d29336c606ed"
+      },
+      "duplex_schedule.pdf": {
+        "content_sha256": "276f925025817a12929e6f4e73484796d13322ff316097314ced08ea9533242d"
+      }
+    },
+    "ifc_file": "Duplex_A_20110907.ifc",
+    "pdf_files": [
+      "duplex_schedule.pdf"
+    ],
+    "source_set_id": "duplex-v1"
   }
 }

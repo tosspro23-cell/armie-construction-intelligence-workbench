@@ -1739,3 +1739,60 @@ anything: ran the actual reconciliation question against the real IFC and the ne
 mismatch, 1 missing from the PDF, 1 missing from the IFC model**, zero model calls -- matching the
 plant exactly, not approximately. 326 tests pass (325 + 1 new); `ruff` clean (including
 `scripts/`); `npm run build` clean.
+
+## D-037 — Second real Dataset Pack candidate: Duplex Apartment, and the Qto-empty fallback fix
+
+Owner follow-on, 2026-09-15: DigitalHub's own shape read as abstract/modular, not recognizably
+residential (its own architecture reads more like a research/lab building than "a house"). The
+owner asked for a second real candidate specifically for a familiar residential layout -- doors,
+windows, walls, kitchen, bathroom, bedroom, living room, and if possible a yard/pool/garage.
+
+**A real, honestly-reported gap: no cleanly-licensed villa-with-pool-and-garage exists in the
+public IFC test-file ecosystem.** Searched directly rather than assumed; every open-licensed IFC
+sample repo (buildingSMART's own, RWTH-E3D's, the ifc-bench re-host) is government/research/
+certification-sourced modest reference buildings, never real-estate-marketing-grade villas. Rather
+than force a weaker candidate, reported this explicitly and asked the owner to choose between
+proceeding without those specific amenities or continuing an open-ended, likely-fruitless search;
+owner chose to proceed.
+
+**Duplex Apartment** (`Duplex_A_20110907.ifc`), added as the second real building. **License, even
+better-documented than D-035's DigitalHub or Sixty5**: the same already-verified
+`buildingsmart-community/Community-Sample-Test-Files` repository (CC BY 4.0 at the repo root), and
+this dataset's own `README.md` states the complete chain of custody in prose -- originally
+published in Germany, given to the US Army Construction Engineering Research Laboratory, hosted by
+the US National Institute of Building Sciences 2009-2020, taken down, and re-published by
+buildingSMART itself under an explicit CC BY 4.0 grant with a stated attribution line. Verified
+byte-identical against the repository's own recorded Git LFS content hash, not only a local
+download-and-compare. **Confirmed genuinely, visibly residential by reading the model's own data,
+not assumed from the name**: `IfcSpace` long names are literally `Bedroom 1`, `Bedroom 2`,
+`Bathroom 1`, `Bathroom 2`, `Kitchen`, `Living Room`, `Foyer`, `Hallway`, `Utility`, `Stair` --
+exactly the familiar residential layout requested. Small and tractable: 2.38 MB, 295 elements, 14
+doors + 24 windows, 38/38 tagged, 4 storeys. Confirmed directly (not assumed) that it has no
+garage, pool, yard, or deck.
+
+**A real technical gap, the same one WBDG Office had in D-035's original spike, now actually
+fixed.** This file's doors/windows carry no `IfcElementQuantity` at all -- `_reconciliation_ifc_items`
+would have read `width_m=None, height_m=None` for every one of its 38 real elements, and
+`_compare_reconciliation_item`'s null-coalescing (`... or 0.0`) would have reported every one as a
+fabricated `dimension_mismatch` against a zero. Fixed with the fallback D-035's own report already
+scoped but never built: `IfcDoor`/`IfcWindow` both carry `OverallWidth`/`OverallHeight` as standard
+schema attributes regardless of whether a Qto set was ever attached; used only when the Qto lookup
+finds nothing, never overriding a real Qto value.
+
+**The schedule.** `scripts/generate_duplex_schedule.py` (same pattern as D-036's DigitalHub
+generator) reads all 38 real tagged doors/windows via `ifcopenshell` -- with the same
+Qto-then-`OverallWidth`/`OverallHeight` fallback the application code now uses, so the schedule's
+"real" values are the same values the app itself would compute -- and plants three documented
+discrepancies: one real door omitted (`missing_in_pdf`), one fabricated row (`missing_in_ifc`), one
+altered height (`dimension_mismatch`).
+
+**Verification.** The `OverallWidth`/`OverallHeight` fallback is proven directly against this real
+file: a new test loads the actual Duplex IFC and asserts all 38 real elements now read non-null
+dimensions (independently confirmed to fail on the pre-fix code, reading every one as `None`, and
+pass after). The full reconciliation pipeline was then run end-to-end, locally, before deploying
+anything: **36 matched, 1 dimension mismatch, 1 missing from the PDF, 1 missing from the IFC
+model**, zero model calls -- matching the plant exactly. 327 tests pass (326 + 1 new); `ruff` clean
+(including `scripts/`); `npm run build` clean. Both files were then uploaded to the real Azure Data
+Lake account and verified byte-identical after download, and the app was redeployed and confirmed
+live (`GET /api/v1/project/metadata?project_id=duplex` returns `401`, not `404`) before being
+reported as done.

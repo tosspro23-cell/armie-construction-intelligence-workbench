@@ -710,6 +710,20 @@ Return only a corrected MultiQueryPlan JSON object."""
         `IfcRepository` operation: no existing operation covers "both
         IfcDoor and IfcWindow, joined on the Tag attribute", and generalizing
         one for this single narrow pilot is out of SPEC-M2's scope (§5).
+
+        D-037: SPEC-M2's original synthetic fixture always carries a real
+        `Qto_*BaseQuantities` set, but a real Revit-2011-vintage export
+        (confirmed on both the WBDG Office and Duplex Apartment Dataset Pack
+        candidates) attaches no `IfcElementQuantity` to its doors/windows at
+        all -- every one of them would otherwise read as a fabricated-looking
+        `width_m=None, height_m=None` here, which `_compare_reconciliation_item`
+        already null-coalesces to `0.0`, reporting a false dimension_mismatch
+        against a zero for every real item. `IfcDoor`/`IfcWindow` both carry
+        `OverallWidth`/`OverallHeight` as standard schema attributes
+        regardless of whether a Qto set was ever attached; used only when the
+        Qto lookup found nothing, never overriding a real Qto value, and
+        relies on the same "the model's own units are SI/metres" assumption
+        this project already makes everywhere else it reads an IFC quantity.
         """
         import ifcopenshell.util.element as ifc_element_util
 
@@ -721,14 +735,20 @@ Return only a corrected MultiQueryPlan JSON object."""
                 continue
             psets = ifc_element_util.get_psets(element, qtos_only=True)
             quantities = next(iter(psets.values()), {}) if psets else {}
+            width = quantities.get("Width")
+            height = quantities.get("Height")
+            if width is None:
+                width = getattr(element, "OverallWidth", None)
+            if height is None:
+                height = getattr(element, "OverallHeight", None)
             containment = getattr(element, "ContainedInStructure", []) or []
             storey = getattr(containment[0].RelatingStructure, "Name", None) if containment else None
             items[str(tag)] = {
                 "tag": str(tag),
                 "entity_type": element.is_a(),
                 "storey": storey,
-                "width_m": quantities.get("Width"),
-                "height_m": quantities.get("Height"),
+                "width_m": width,
+                "height_m": height,
                 "global_id": element.GlobalId,
                 "express_id": element.id(),
             }

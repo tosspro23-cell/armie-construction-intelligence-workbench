@@ -310,6 +310,37 @@ def test_reconciliation_pdf_items_spans_multiple_schedule_pages(tmp_path: Path, 
     assert items["W03"] == {"tag": "W03", "width_m": pytest.approx(1.20), "height_m": pytest.approx(1.50)}
 
 
+# --- D-037: OverallWidth/OverallHeight fallback for a Qto-empty real IFC ----
+
+def test_reconciliation_ifc_items_falls_back_to_overall_dimensions_when_no_qto_is_attached(tmp_path: Path) -> None:
+    """D-037: found live, 2026-09-15, adding the Duplex Apartment real
+    building as a second Dataset Pack candidate (the same gap the WBDG
+    Office candidate had during the original go/no-go spike). This real
+    2011-vintage Revit export attaches no `IfcElementQuantity` to any of
+    its doors/windows at all -- before this fix, `_reconciliation_ifc_items`
+    would have read `width_m=None, height_m=None` for every one of its 38
+    real tagged elements, and `_compare_reconciliation_item`'s
+    `(ifc_item["width_m"] or 0.0)` null-coalescing would have reported
+    every one as a fabricated dimension_mismatch against a zero.
+    `IfcDoor`/`IfcWindow` both carry `OverallWidth`/`OverallHeight` as
+    standard schema attributes regardless of whether a Qto set was ever
+    attached; this proves the real file's real elements now read real,
+    non-null dimensions.
+    """
+    settings = _settings(tmp_path, data_dir=ROOT / "demo_data" / "projects" / "duplex", ifc_file="Duplex_A_20110907.ifc", pdf_files=["duplex_schedule.pdf"])
+    fake = FakeModelProvider()
+    container, service = _service(settings, fake)
+
+    items = service._reconciliation_ifc_items(_demo(container))
+
+    assert len(items) == 38
+    assert all(item["width_m"] is not None and item["height_m"] is not None for item in items.values())
+    # A specific, independently-known-real value (confirmed directly via
+    # ifcopenshell during the Dataset Pack spike), not just "not None".
+    assert items["146596"]["width_m"] == pytest.approx(1.25)
+    assert items["146596"]["height_m"] == pytest.approx(2.01, abs=0.01)
+
+
 def test_pdf_read_failure_is_reported_as_error_not_answered(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Codex P1 finding on PR #6: this reproduces the exact failure shape
     described -- `_read_table` returns `None` (the PDF is unavailable, or
