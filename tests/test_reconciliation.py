@@ -21,6 +21,7 @@ from app.agent.router import (
     cross_source_reconciliation_requested,
 )
 from app.config import Settings
+from app.schemas.models import MultiQueryPlan, QueryPlan, ResponseLanguage
 from app.services import ProjectResources, ServiceContainer
 from fakes.fake_provider import FakeModelProvider
 
@@ -200,6 +201,69 @@ def test_non_reconciliation_cross_source_question_still_refused_end_to_end(tmp_p
     assert response.execution_metadata.get("tool_call_count") == 0
     assert response.execution_metadata.get("model_call_count") == 0
     assert response.reconciliation_items == []
+
+
+# --- D-034: the semantic planner can also recognize reconciliation intent ---
+
+def test_semantic_planner_recognizing_reconciliation_intent_routes_to_the_same_deterministic_join(tmp_path: Path) -> None:
+    """D-033 fixed one keyword-gate miss ("mismatch"); this proves the
+    general fix. The keyword gate (`cross_source_reconciliation_requested`)
+    is deliberately conservative and will always miss some future
+    phrasing -- found live, 2026-09-15, when a very natural rephrasing fell
+    through to the general semantic planner and returned a raw, unsynthesized
+    dump of two separate IfcDoor/IfcWindow lists instead of a comparison.
+
+    The planner prompt (`router.planner_prompt`) now teaches the semantic
+    planner about this already-authorized intent directly, so even when the
+    keyword gate misses, the semantic planner's own model call (which was
+    always going to happen on a miss -- this adds no *additional* model
+    call) can still produce `MultiQueryPlan.intent="reconciliation"` and
+    reach the identical dedicated join `_synthesize_reconciliation_response`
+    as the heuristic keyword path, rather than defaulting to two
+    disconnected list subplans.
+    """
+    # Avoids both the reconciliation gate's own verb tokens ("discrepancy" is
+    # not one of them) AND the separate, unrelated "schedule"/"load"/etc.
+    # PDF-domain heuristic (router.py's heuristic_plan/heuristic_multi_plan)
+    # that would otherwise swallow the question before it ever reaches
+    # semantic planning.
+    question = "Do the doors and windows in the IFC model line up with what's shown on the PDF drawing?"
+    assert cross_source_reconciliation_requested(question) is False
+
+    settings = _settings(tmp_path)
+    fake = FakeModelProvider()
+    semantic_reconciliation_plan = MultiQueryPlan(
+        intent="reconciliation", response_language="en",
+        rationale="Door/window cross-source comparison against the PDF schedule.",
+        raw_user_message=question, normalized_request=question, interpretation_confidence="high",
+        subplans=[
+            QueryPlan(subtask_id="task_1", source="ifc", intent="reconciliation", operation="list", entity_type=None,
+                      filters={}, group_by="none", expected_result_shape="list",
+                      rationale="IFC side of the door/window comparison.", planning_mode="llm", match_status="complete"),
+            QueryPlan(subtask_id="task_2", source="pdf", intent="reconciliation", operation="extract_field",
+                      filters={"page_hint": 2}, group_by="none", expected_result_shape="list",
+                      rationale="PDF schedule side of the door/window comparison.", planning_mode="llm", match_status="complete"),
+        ],
+    )
+    fake.script("multi_query_plan", semantic_reconciliation_plan)
+    fake.script("response_language", ResponseLanguage(code="en"))
+    container, service = _service(settings, fake)
+
+    response = service.invoke(project_resources=_demo(container), thread_id="reconcile-semantic", question=question, viewer_context=None)
+
+    assert response.disposition.value == "answered"
+    # Exactly plan + language-classification -- no repair/escalation round
+    # trip (this fake has no "multi_query_plan_repair" response queued, so a
+    # spurious repair attempt would fail loudly here, not silently pass).
+    # The specific fix this depends on --
+    # validate_multi_plan exempting intent="reconciliation" from the
+    # single-entity-type "missing_entity" check -- is unit-tested directly,
+    # in isolation, by
+    # test_plan_validation_contract.py::test_validate_multi_plan_exempts_reconciliation_intent_from_missing_entity.
+    assert [call.purpose for call in fake.calls] == ["multi_query_plan", "response_language"]
+    actual = {item.tag: item.status.value for item in response.reconciliation_items}
+    assert actual == EXPECTED_STATUSES
+    assert response.execution_metadata.get("source") == "ifc+pdf (reconciliation)"
 
 
 def test_pdf_read_failure_is_reported_as_error_not_answered(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

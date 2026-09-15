@@ -28,6 +28,15 @@ def enforce_grouped_request_contract(multi_plan: MultiQueryPlan, question: str) 
         "each floor", "each storey", "per floor", "per storey", "by floor", "by storey",
         "break down", "按楼层", "按层", "按 storey", "每一层", "每层", "哪一层", "哪层", "分别统计", "分别有多少",
     )
+    if multi_plan.intent == "reconciliation":
+        # D-034: reconciliation's two subplans are a typed, audited record of
+        # intent for a dedicated deterministic join -- they are not the
+        # generic per-entity grouped-count contract this function repairs.
+        # Rewriting multi_plan.intent to "multi_query"/"single_query" here
+        # would strip the very marker AgentService._execute_multi uses to
+        # route to that join, regardless of whether reconciliation was
+        # produced by the heuristic keyword gate or the semantic planner.
+        return multi_plan, []
     if not any(marker in normalized for marker in grouping_markers):
         return multi_plan, []
     argmax_markers = ("most", "maximum", "greatest number", "highest count", "最多")
@@ -128,14 +137,20 @@ def canonicalize_subplan(plan: QueryPlan, context: dict[str, Any] | None = None)
             "after": {"source": "unsupported", "intent": "unsupported"},
         })
     recovered_entity = plan.entity_type
-    if not recovered_entity:
+    # D-034: a reconciliation subplan's IFC side deliberately has no single
+    # entity_type -- it covers both IfcDoor and IfcWindow together (SPEC-M2
+    # §4C). Recovering one from the rationale text (which legitimately
+    # mentions both) would silently narrow it to whichever entity the regex
+    # happens to match first -- harmless to execution (which ignores this
+    # field for this intent) but a misleading audited plan.
+    if plan.intent != "reconciliation" and not recovered_entity:
         match = re.search(r"\b(IfcDoor|IfcWindow|IfcWall|IfcSpace|IfcStair|IfcSlab)\b", rationale)
         recovered_entity = match.group(1) if match else None
     recovered_operation = plan.operation
     if not recovered_operation:
         match = re.search(r"\boperation(?:\s+is|=)\s+(count|list|group_by|get_properties|inspect_relationship)\b", rationale, flags=re.IGNORECASE)
         recovered_operation = match.group(1).lower() if match else None
-    if (recovered_entity != plan.entity_type or recovered_operation != plan.operation) and recovered_entity and recovered_operation:
+    if plan.intent != "reconciliation" and (recovered_entity != plan.entity_type or recovered_operation != plan.operation) and recovered_entity and recovered_operation:
         filters = dict(plan.filters)
         if context and context.get("active_storey") and any(marker in rationale.lower() for marker in ("active storey", "that floor", "that storey", "filter on storey")):
             filters.setdefault("storey", context["active_storey"])
@@ -245,7 +260,14 @@ def _reconcile_model_declared_semantics(plans: list[QueryPlan], multi_plan: Mult
     # words from the explanatory rationale (for example, "rooms") into an
     # executable fallback plan; that would turn an understood unsupported
     # request into an unrelated count operation.
-    if multi_plan.intent == "unsupported" or any(plan.intent == "unsupported" for plan in plans):
+    #
+    # D-034: a reconciliation plan's rationale legitimately mentions both
+    # IfcDoor and IfcWindow -- this function would otherwise "helpfully"
+    # split its one deliberately-entity_type=None IFC subplan into two
+    # single-entity ones, matching neither AgentService._execute_multi's
+    # dedicated join (which ignores subplan fields for this intent anyway)
+    # nor the heuristic keyword path's own clean shape.
+    if multi_plan.intent in {"unsupported", "reconciliation"} or any(plan.intent == "unsupported" for plan in plans):
         return plans, []
     declared_text = " ".join(filter(None, [multi_plan.normalized_request, multi_plan.rationale, *(plan.rationale for plan in plans)]))
     declared_entities = list(dict.fromkeys(re.findall(r"\bIfc(?:Door|Window|Wall|Space|Stair|Slab)\b", declared_text)))
@@ -332,7 +354,12 @@ def validate_multi_plan(multi_plan: MultiQueryPlan) -> list[PlanIssue]:
             issues.append(PlanIssue(plan.subtask_id, "grouped_shape_missing", f"A grouped plan must expect {expected_group_shape}."))
         if plan.postprocess in {"argmax", "argmin"} and not grouped:
             issues.append(PlanIssue(plan.subtask_id, "comparison_requires_grouping", "argmax/argmin requires a grouping dimension."))
-        if plan.source == "ifc" and plan.intent not in {"clarification", "unsupported"} and not plan.entity_type:
+        # D-034: reconciliation's IFC subplan deliberately has no single
+        # entity_type -- it covers both IfcDoor and IfcWindow together,
+        # whether the plan came from the heuristic keyword gate or the
+        # semantic planner recognizing the same intent (see
+        # router.reconciliation_plan's docstring).
+        if plan.source == "ifc" and plan.intent not in {"clarification", "unsupported", "reconciliation"} and not plan.entity_type:
             issues.append(PlanIssue(plan.subtask_id, "missing_entity", "An IFC query requires an entity_type."))
         if plan.source == "ifc" and not plan.operation:
             issues.append(PlanIssue(plan.subtask_id, "missing_operation", "An IFC query requires an operation."))

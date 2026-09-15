@@ -1590,3 +1590,59 @@ fire-rating false-positive and cross-source-join carve-out tests) is unaffected.
 added to `tests/test_reconciliation.py`'s positive-example table: the owner's exact question, a
 close paraphrase ("Are there any mismatches..."), and a Chinese equivalent using `不匹配`. 323 tests
 pass (320 + 3 new); `ruff` clean; `npm run build` clean (backend-only change).
+
+## D-034 — Generalizing D-033: the semantic planner learns the reconciliation intent too
+
+Owner's own follow-up observation after D-033: patching one more keyword is whack-a-mole -- the
+keyword gate (`cross_source_reconciliation_requested`) will always miss some future phrasing, and
+every miss falls through to the general semantic planner, which the owner had just watched produce
+a slow (~29s, a real model call), raw, unsynthesized answer instead of a comparison. The owner
+asked for a fix that generalizes to arbitrary phrasing, not another keyword.
+
+**Root cause, confirmed by reading the actual prompt, not assumed.** `router.planner_prompt` (the
+prompt sent to the semantic/LLM planner on every keyword-gate miss) exhaustively lists supported
+operations ("count, list, group_by, get_properties, inspect_relationship, aggregate_quantity, ...")
+and its own worked example #1 explicitly teaches "a request to count both doors and windows has two
+IFC count subplans: IfcDoor and IfcWindow" -- reconciliation is never mentioned anywhere in this
+prompt. The semantic planner does not fail to recognize reconciliation intent inconsistently; it
+structurally cannot, regardless of phrasing, because it was never told the capability exists. This
+also confirmed a favorable existing fact: `MultiQueryPlan.intent`/`QueryPlan.intent` already include
+`"reconciliation"` as a valid literal, and `AgentService._execute_multi` already routes on
+`multi_plan.intent == "reconciliation"` alone, agnostic to `planning_mode` -- and
+`_synthesize_reconciliation_response` itself never reads any subplan field at all, re-deriving
+everything from `project_resources` directly. No schema change and no execution-path change were
+needed; only the planner needed teaching.
+
+**Fix -- two parts.**
+1. `planner_prompt` gained an explicit instruction plus a numbered example (matching the existing
+   "Semantic examples" list's own style) directly mirroring `router.reconciliation_plan`'s exact
+   two-subplan shape: an IFC subplan with `entity_type=null` (deliberately covering both IfcDoor and
+   IfcWindow together, not split), and a PDF subplan reading the schedule's page 2 -- with
+   `MultiQueryPlan.intent="reconciliation"` set on the whole plan.
+2. `apps/api/app/agent/plan_validation.py` had to be taught the same exemption already implicit in
+   the heuristic path (which never passes through these functions at all, since `reconciliation_plan`
+   returns before reaching the semantic-only pipeline): `validate_multi_plan`'s `missing_entity`
+   check now exempts `intent="reconciliation"` alongside the existing `clarification`/`unsupported`
+   exemptions (an IFC reconciliation subplan's `entity_type=None` is correct by design, not an
+   incomplete plan); `_reconcile_model_declared_semantics` and `canonicalize_subplan`'s
+   rationale-based entity recovery, and `enforce_grouped_request_contract`, all now leave
+   `intent="reconciliation"` plans untouched, so a semantic-path reconciliation plan's audited shape
+   matches the heuristic path's exactly rather than depending on incidental wording of the model's
+   own rationale text to avoid being mangled.
+
+**Verification, and a real self-correction caught along the way.** A first version of the
+integration test claimed its passing was proof the `validate_multi_plan` fix was load-bearing;
+directly reverting only that fix while keeping the test unchanged showed it *still* passed --
+because the test's own scripted rationale text happened to contain the words "door"/"window",
+which `_reconcile_model_declared_semantics`'s *separate*, pre-existing entity-recovery mechanism
+incidentally filled into the subplan's `entity_type` before validation ever ran, sidestepping the
+missing-entity check by accident rather than by the intended guard. Caught before committing, not
+after: this repo's own verification standard (reproduce the defect, not just observe the fix
+passing) applied to the test itself, not only the production fix. Corrected by adding a precise,
+isolated unit test directly against `validate_multi_plan` (no pipeline, no incidental wording) that
+was independently confirmed to fail without the fix and pass with it, and by rewriting the
+integration test's own claim to describe only what it actually demonstrates (the whole pipeline
+answers correctly end-to-end), pointing to the isolated unit test for the specific mechanism. 325
+tests pass (323 + 2 new: the isolated `validate_multi_plan` exemption test in
+`tests/test_plan_validation_contract.py`, and the end-to-end semantic-path integration test in
+`tests/test_reconciliation.py`); `ruff` clean; `npm run build` clean (backend-only change).

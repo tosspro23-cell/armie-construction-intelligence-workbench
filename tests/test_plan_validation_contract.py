@@ -193,6 +193,23 @@ def test_validate_multi_plan_passes_clean_plan() -> None:
     assert issues == []
 
 
+def test_validate_multi_plan_exempts_reconciliation_intent_from_missing_entity() -> None:
+    """D-034: a reconciliation-intent IFC subplan deliberately covers both
+    IfcDoor and IfcWindow together and so has no single entity_type (see
+    router.reconciliation_plan's docstring) -- this must not be flagged as
+    an incomplete plan, whether the subplan came from the heuristic keyword
+    gate (planning_mode="heuristic") or the semantic planner recognizing the
+    same already-authorized intent (planning_mode="llm"). Before this fix,
+    a semantic-path reconciliation plan reaching this check at all (the
+    heuristic path returns before ever calling it) would be wrongly flagged
+    "missing_entity" and sent into a repair round trip for a plan that was
+    already correct.
+    """
+    plan = _plan(intent="reconciliation", entity_type=None, operation="list", planning_mode="llm")
+    issues = validate_multi_plan(_multi([plan], intent="reconciliation"))
+    assert issues == []
+
+
 # --- eligible_scalar_count_batch -----------------------------------------------------
 
 def test_eligible_scalar_count_batch_accepts_equivalent_scalar_counts() -> None:

@@ -469,6 +469,16 @@ def planner_prompt(question: str, context: dict, source_preference: str) -> str:
 Interpret language only; never calculate, invent IFC facts, or use unsupported geometry.
 Return a MultiQueryPlan-compatible JSON object. Use only these IFC entity types: {sorted(SUPPORTED_ENTITY_TYPES)}.
 Supported IFC operations are count, list, group_by, get_properties, inspect_relationship, aggregate_quantity, and a bounded space_distance.
+If the question asks whether the doors/windows in the IFC model match, are consistent with, or have any
+discrepancy/mismatch against the PDF drawing or schedule (a door/window cross-source comparison, not an
+ordinary single-source question), use intent="reconciliation" with exactly two subplans instead of
+per-entity count/list subplans: task_1 source="ifc" intent="reconciliation" operation="list"
+entity_type=null expected_result_shape="list" (this one subplan represents both IfcDoor and IfcWindow
+together -- do not split it into two, and do not fill in a single entity_type), task_2 source="pdf"
+intent="reconciliation" operation="extract_field" filters={{"page_hint": 2}} expected_result_shape="list".
+Set MultiQueryPlan.intent="reconciliation" too.
+Execution for this intent is handled by a dedicated deterministic join, not by these subplans' own
+generic fields -- do not add filters, group_by, or an entity_type to either subplan.
 Identify every requested task, including compound tasks, and create one independent subplan per task.
 Do not omit requested entities, operations, filters, comparisons, sources, or contextual references.
 Populate raw_user_message, normalized_request, interpretation_confidence, corrections, and requires_clarification.
@@ -493,6 +503,9 @@ Semantic examples (illustrations, not keyword rules):
 9. Obvious speech-to-text substitutions should be interpreted from the construction ontology when high confidence, recorded in corrections, and not handled by keyword/typo tables. If two supported meanings are similarly plausible, set requires_clarification=true.
 10. For controlled quantity extrema use source=ifc, operation=aggregate_quantity, entity_type from the supported IFC ontology, measure in {{height,width,length,area}}, aggregation in {{min,max}}, and expected_result_shape=scalar_measurement.
 11. For room-to-room distance use source=ifc, entity_type=IfcSpace, operation=space_distance and filters.from_space / filters.to_space. It is horizontal centroid distance only. If a generic room name resolves to multiple spaces, request clarification rather than choosing one.
+12. "Is there a mismatch/discrepancy between the doors and windows and the PDF drawing?" is a reconciliation
+    comparison, not a count/list request -- use MultiQueryPlan.intent="reconciliation" with the two
+    reconciliation subplans described above, never two separate IfcDoor/IfcWindow list subplans.
 
 Return actual typed subplans, never an explanation of what the system could do.
 Question: {question}
