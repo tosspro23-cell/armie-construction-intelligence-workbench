@@ -16,6 +16,51 @@ class IfcRepositoryError(RuntimeError):
 class IfcRepository:
     """Deterministic, constrained query adapter around IfcOpenShell."""
 
+    # SPEC-M12: shared between `viewer_elements` (bounding-box) and
+    # `mesh_elements` (real triangulated geometry) so the two
+    # representations can never silently drift apart on which types/counts/
+    # colors they cover -- factored out here rather than duplicated inline
+    # the way they were before this milestone.
+    _SUPPORTED_TYPES = ("IfcWall", "IfcSlab", "IfcDoor", "IfcWindow", "IfcStair", "IfcRoof")
+    # The source has hundreds of walls. A bounded representative geometry set
+    # keeps the browser responsive while including every door, window, stair,
+    # slab and roof for demonstrable element selection.
+    _PER_TYPE_LIMITS = {"IfcWall": 160, "IfcSlab": 50, "IfcDoor": 100, "IfcWindow": 120, "IfcStair": 30, "IfcRoof": 10}
+    # D-039: owner-requested palette tuning, 2026-09-15 -- the original
+    # colors were a schematic "tell the types apart" scheme (fairly
+    # saturated blues/purples), not chosen to suggest any real material.
+    # This palette instead nods at each type's typical real material
+    # (warm plaster walls, concrete floors, wood doors, pale glass
+    # windows, stone stairs, a weathered roof) without claiming to read
+    # the IFC's own actual material/colour data (IfcStyledItem/
+    # IfcSurfaceStyle) -- this project's viewer still assigns one fixed
+    # color per entity *type*, not per real material; genuinely reading a
+    # file's own material colors is a larger, separate change. See
+    # apps/web/src/IfcViewer.tsx for the matching per-type
+    # opacity/roughness tuning (glass vs. matte) applied at render time.
+    #
+    # D-041: owner-reported, 2026-09-15 -- windows read as too washed
+    # out to identify clearly in an exterior overview. Deepened from a
+    # very pale glass blue to a more saturated one; the frontend also
+    # raised window opacity/metalness to give it a more definite
+    # glassy sheen while staying clearly translucent.
+    _PALETTE = {
+        "IfcWall": "#cdc6b8",
+        "IfcSlab": "#a49c8f",
+        "IfcDoor": "#8a5d3b",
+        "IfcWindow": "#6fb4d6",
+        "IfcStair": "#b3a89d",
+        "IfcRoof": "#6f5b48",
+    }
+    _FALLBACK_DIMENSIONS = {
+        "IfcWall": [0.2, 3.0, 3.0],
+        "IfcDoor": [0.9, 0.12, 2.1],
+        "IfcWindow": [1.2, 0.12, 1.5],
+        "IfcSlab": [4.0, 4.0, 0.2],
+        "IfcStair": [2.0, 3.0, 2.5],
+        "IfcRoof": [4.0, 4.0, 0.3],
+    }
+
     def __init__(self, path: Path) -> None:
         self.path = path
         self._model = None
@@ -93,40 +138,9 @@ class IfcRepository:
 
         settings = ifcopenshell.geom.settings()
         settings.set(settings.USE_WORLD_COORDS, True)
-        supported_types = ("IfcWall", "IfcSlab", "IfcDoor", "IfcWindow", "IfcStair", "IfcRoof")
-        # D-039: owner-requested palette tuning, 2026-09-15 -- the original
-        # colors were a schematic "tell the types apart" scheme (fairly
-        # saturated blues/purples), not chosen to suggest any real material.
-        # This palette instead nods at each type's typical real material
-        # (warm plaster walls, concrete floors, wood doors, pale glass
-        # windows, stone stairs, a weathered roof) without claiming to read
-        # the IFC's own actual material/colour data (IfcStyledItem/
-        # IfcSurfaceStyle) -- this project's viewer_elements still assigns
-        # one fixed color per entity *type*, not per real material; genuinely
-        # reading a file's own material colors is a larger, separate change.
-        # See apps/web/src/IfcViewer.tsx for the matching per-type
-        # opacity/roughness tuning (glass vs. matte) applied at render time.
-        #
-        # D-041: owner-reported, 2026-09-15 -- windows read as too washed
-        # out to identify clearly in an exterior overview. Deepened from a
-        # very pale glass blue to a more saturated one; the frontend also
-        # raised window opacity/metalness to give it a more definite
-        # glassy sheen while staying clearly translucent.
-        palette = {
-            "IfcWall": "#cdc6b8",
-            "IfcSlab": "#a49c8f",
-            "IfcDoor": "#8a5d3b",
-            "IfcWindow": "#6fb4d6",
-            "IfcStair": "#b3a89d",
-            "IfcRoof": "#6f5b48",
-        }
         output: list[dict[str, Any]] = []
-        # The source has hundreds of walls. A bounded representative geometry set
-        # keeps the browser responsive while including every door, window, stair,
-        # slab and roof for demonstrable element selection.
-        per_type_limits = {"IfcWall": 160, "IfcSlab": 50, "IfcDoor": 100, "IfcWindow": 120, "IfcStair": 30, "IfcRoof": 10}
-        for entity_type in supported_types:
-            for element in self.model.by_type(entity_type)[: per_type_limits[entity_type]]:
+        for entity_type in self._SUPPORTED_TYPES:
+            for element in self.model.by_type(entity_type)[: self._PER_TYPE_LIMITS[entity_type]]:
                 try:
                     shape = ifcopenshell.geom.create_shape(settings, element)
                     vertices = list(shape.geometry.verts)
@@ -139,27 +153,13 @@ class IfcRepository:
                     # Public synthetic fixtures may intentionally carry
                     # lightweight semantic geometry. Keep those elements
                     # selectable in the browser with a bounded proxy box.
-                    placement = getattr(element, "ObjectPlacement", None)
-                    try:
-                        from ifcopenshell.util.placement import get_local_placement
-                        matrix = get_local_placement(placement)
-                        origin = [float(matrix[index, 3]) for index in range(3)]
-                    except Exception:
-                        origin = [0.0, 0.0, 0.0]
-                    fallback_dimensions = {
-                        "IfcWall": [0.2, 3.0, 3.0],
-                        "IfcDoor": [0.9, 0.12, 2.1],
-                        "IfcWindow": [1.2, 0.12, 1.5],
-                        "IfcSlab": [4.0, 4.0, 0.2],
-                        "IfcStair": [2.0, 3.0, 2.5],
-                        "IfcRoof": [4.0, 4.0, 0.3],
-                    }
-                    dimensions = fallback_dimensions.get(element.is_a(), [0.5, 0.5, 0.5])
+                    origin = self._placement_origin(element)
+                    dimensions = self._FALLBACK_DIMENSIONS.get(element.is_a(), [0.5, 0.5, 0.5])
                     output.append({
                         "express_id": element.id(), "global_id": getattr(element, "GlobalId", None),
                         "entity_type": element.is_a(), "name": self._name_of(element),
                         "storey": self._storey_name(element), "center": origin,
-                        "dimensions": dimensions, "color": palette.get(element.is_a(), "#cdc6b8"),
+                        "dimensions": dimensions, "color": self._PALETTE.get(element.is_a(), "#cdc6b8"),
                         "is_external": self._is_external(element),
                     })
                     continue
@@ -172,10 +172,106 @@ class IfcRepository:
                     "storey": self._storey_name(element),
                     "center": [(minimum[index] + maximum[index]) / 2 for index in range(3)],
                     "dimensions": dimensions,
-                    "color": palette.get(entity_type, "#cdc6b8"),
+                    "color": self._PALETTE.get(entity_type, "#cdc6b8"),
                     "is_external": self._is_external(element),
                 })
         return output
+
+    @staticmethod
+    def _placement_origin(element: Any) -> list[float]:
+        placement = getattr(element, "ObjectPlacement", None)
+        try:
+            from ifcopenshell.util.placement import get_local_placement
+            matrix = get_local_placement(placement)
+            return [float(matrix[index, 3]) for index in range(3)]
+        except Exception:
+            return [0.0, 0.0, 0.0]
+
+    @cached_property
+    def mesh_elements(self) -> list[dict[str, Any]]:
+        """SPEC-M12: the real, `ifcopenshell`-triangulated geometry
+        `viewer_elements` deliberately discards down to a bounding box.
+        Gives a door/window its real shape, including a real
+        boolean-subtracted wall opening where the source model has one --
+        the fix for the overlapping-box limitation D-039/D-040/D-042 each
+        named but declined to fix. `viewer_elements` and its endpoint are
+        unchanged; this is a second, additive representation on the same
+        cached `IfcRepository` instance, so it inherits the exact same
+        "computed once per process per project" caching ServiceContainer
+        already provides (SPEC-M9 §C) -- no new cache store.
+        """
+        if not self.available:
+            return []
+        try:
+            import ifcopenshell.geom
+        except ImportError as error:
+            raise IfcRepositoryError("IfcOpenShell geometry support is not installed") from error
+
+        settings = ifcopenshell.geom.settings()
+        settings.set(settings.USE_WORLD_COORDS, True)
+        output: list[dict[str, Any]] = []
+        for entity_type in self._SUPPORTED_TYPES:
+            for element in self.model.by_type(entity_type)[: self._PER_TYPE_LIMITS[entity_type]]:
+                try:
+                    shape = ifcopenshell.geom.create_shape(settings, element)
+                    vertices = list(shape.geometry.verts)
+                    faces = list(shape.geometry.faces)
+                    if not vertices or not faces:
+                        raise ValueError("empty geometry")
+                except Exception:
+                    # Same fallback population as viewer_elements (public
+                    # synthetic fixtures with lightweight semantic
+                    # geometry) -- an 8-vertex/12-triangle box built from
+                    # the same placement origin and fallback dimensions,
+                    # so every project returns a valid mesh with no
+                    # exception and no project-specific special-casing.
+                    origin = self._placement_origin(element)
+                    width, depth, height = self._FALLBACK_DIMENSIONS.get(element.is_a(), [0.5, 0.5, 0.5])
+                    vertices, faces = self._fallback_box_mesh(origin, width, depth, height)
+                    output.append({
+                        "express_id": element.id(), "global_id": getattr(element, "GlobalId", None),
+                        "entity_type": element.is_a(), "name": self._name_of(element),
+                        "storey": self._storey_name(element), "color": self._PALETTE.get(element.is_a(), "#cdc6b8"),
+                        "is_external": self._is_external(element), "vertices": vertices, "faces": faces,
+                    })
+                    continue
+                output.append({
+                    "express_id": element.id(),
+                    "global_id": getattr(element, "GlobalId", None),
+                    "entity_type": element.is_a(),
+                    "name": self._name_of(element),
+                    "storey": self._storey_name(element),
+                    "color": self._PALETTE.get(entity_type, "#cdc6b8"),
+                    "is_external": self._is_external(element),
+                    "vertices": vertices,
+                    "faces": faces,
+                })
+        return output
+
+    @staticmethod
+    def _fallback_box_mesh(origin: list[float], width: float, depth: float, height: float) -> tuple[list[float], list[int]]:
+        """An 8-vertex/12-triangle box centered on `origin`, matching the
+        bounding box `viewer_elements`'s own fallback path already
+        represents as a `center`+`dimensions` pair -- the same shape,
+        expressed as explicit triangle geometry instead.
+        """
+        hx, hy, hz = width / 2, depth / 2, height / 2
+        ox, oy, oz = origin
+        corners = [
+            [ox + sx * hx, oy + sy * hy, oz + sz * hz]
+            for sz in (-1, 1) for sy in (-1, 1) for sx in (-1, 1)
+        ]
+        vertices = [coordinate for corner in corners for coordinate in corner]
+        # Corner indices: 0-3 bottom face (z-), 4-7 top face (z+), each as (--,-+,+-,++) in (x,y).
+        faces = [
+            0, 1, 2, 1, 3, 2,  # bottom
+            4, 6, 5, 6, 7, 5,  # top
+            0, 4, 1, 1, 4, 5,  # y- side
+            2, 3, 6, 3, 7, 6,  # y+ side
+            0, 2, 4, 2, 6, 4,  # x- side
+            1, 5, 3, 5, 7, 3,  # x+ side
+        ]
+        return vertices, faces
 
     def execute(self, query: IfcQueryInput) -> IfcQueryResult:
         entity_type = self._normalize_entity_type(query.entity_type)
