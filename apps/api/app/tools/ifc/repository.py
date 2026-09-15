@@ -94,13 +94,25 @@ class IfcRepository:
         settings = ifcopenshell.geom.settings()
         settings.set(settings.USE_WORLD_COORDS, True)
         supported_types = ("IfcWall", "IfcSlab", "IfcDoor", "IfcWindow", "IfcStair", "IfcRoof")
+        # D-039: owner-requested palette tuning, 2026-09-15 -- the original
+        # colors were a schematic "tell the types apart" scheme (fairly
+        # saturated blues/purples), not chosen to suggest any real material.
+        # This palette instead nods at each type's typical real material
+        # (warm plaster walls, concrete floors, wood doors, pale glass
+        # windows, stone stairs, a weathered roof) without claiming to read
+        # the IFC's own actual material/colour data (IfcStyledItem/
+        # IfcSurfaceStyle) -- this project's viewer_elements still assigns
+        # one fixed color per entity *type*, not per real material; genuinely
+        # reading a file's own material colors is a larger, separate change.
+        # See apps/web/src/IfcViewer.tsx for the matching per-type
+        # opacity/roughness tuning (glass vs. matte) applied at render time.
         palette = {
-            "IfcWall": "#8aa4c8",
-            "IfcSlab": "#54708d",
-            "IfcDoor": "#d89c58",
-            "IfcWindow": "#69b9dd",
-            "IfcStair": "#c5a4db",
-            "IfcRoof": "#7cae7b",
+            "IfcWall": "#cdc6b8",
+            "IfcSlab": "#a49c8f",
+            "IfcDoor": "#8a5d3b",
+            "IfcWindow": "#bfe0ee",
+            "IfcStair": "#b3a89d",
+            "IfcRoof": "#6f5b48",
         }
         output: list[dict[str, Any]] = []
         # The source has hundreds of walls. A bounded representative geometry set
@@ -141,7 +153,7 @@ class IfcRepository:
                         "express_id": element.id(), "global_id": getattr(element, "GlobalId", None),
                         "entity_type": element.is_a(), "name": self._name_of(element),
                         "storey": self._storey_name(element), "center": origin,
-                        "dimensions": dimensions, "color": palette.get(element.is_a(), "#8aa4c8"),
+                        "dimensions": dimensions, "color": palette.get(element.is_a(), "#cdc6b8"),
                     })
                     continue
                 dimensions = [max(maximum[index] - minimum[index], 0.05) for index in range(3)]
@@ -153,7 +165,7 @@ class IfcRepository:
                     "storey": self._storey_name(element),
                     "center": [(minimum[index] + maximum[index]) / 2 for index in range(3)],
                     "dimensions": dimensions,
-                    "color": palette.get(entity_type, "#8aa4c8"),
+                    "color": palette.get(entity_type, "#cdc6b8"),
                 })
         return output
 

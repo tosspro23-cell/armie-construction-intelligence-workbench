@@ -21,6 +21,26 @@ type ViewerElement = {
   storey?: string;
 };
 
+// D-039: owner-requested, 2026-09-15 -- the palette itself (per-type base
+// color, apps/api/app/tools/ifc/repository.py) was tuned to suggest each
+// type's typical real material, but every element still shared one flat
+// opacity/roughness regardless of type, so a window looked exactly as
+// matte and opaque as a concrete slab. This gives glass a genuinely
+// glass-like feel (more transparent, smoother/shinier) and keeps solid
+// building fabric (walls/slabs/stairs/roof) matte and mostly opaque,
+// with doors in between (opaque but slightly less uniformly matte than
+// bare concrete). Not a claim of reading the IFC's own real material
+// data -- still one fixed look per entity *type*.
+const MATERIAL_BY_TYPE: Record<string, { opacity: number; roughness: number; metalness: number }> = {
+  IfcWindow: { opacity: 0.45, roughness: 0.12, metalness: 0.1 },
+  IfcDoor: { opacity: 0.97, roughness: 0.75, metalness: 0 },
+  IfcWall: { opacity: 0.97, roughness: 0.9, metalness: 0 },
+  IfcSlab: { opacity: 0.98, roughness: 0.92, metalness: 0 },
+  IfcStair: { opacity: 0.96, roughness: 0.85, metalness: 0 },
+  IfcRoof: { opacity: 0.96, roughness: 0.8, metalness: 0 },
+};
+const DEFAULT_MATERIAL = { opacity: 0.85, roughness: 0.78, metalness: 0 };
+
 type Props = {
   onSelection: (element: SelectedElement | null) => void;
   onSnapshot: (base64: string | null) => void;
@@ -111,7 +131,8 @@ export function IfcViewer({ onSelection, onSnapshot, onStatus, focusGlobalId, pr
           const [ifcWidth, ifcDepth, ifcHeight] = element.dimensions;
           const [ifcX, ifcY, ifcZ] = element.center;
           const geometry = new THREE.BoxGeometry(ifcWidth, ifcHeight, ifcDepth);
-          const material = new THREE.MeshStandardMaterial({ color: element.color, transparent: true, opacity: 0.82, roughness: 0.78 });
+          const materialProps = (element.entity_type && MATERIAL_BY_TYPE[element.entity_type]) || DEFAULT_MATERIAL;
+          const material = new THREE.MeshStandardMaterial({ color: element.color, transparent: true, ...materialProps });
           const mesh = new THREE.Mesh(geometry, material);
           mesh.position.set(ifcX, ifcZ, -ifcY);
           mesh.userData = element;

@@ -1834,3 +1834,36 @@ Confirmed live in a real browser against both the real Duplex building (the fix'
 and the original tiny synthetic demo fixture (no regression -- it already looked "roughly right" by
 coincidence of its simple, near-cubic geometry, and still does). `npm run build` clean; this is a
 frontend-only change, 327 backend tests unaffected, `ruff` clean.
+
+## D-039 — Viewer palette/material tuning, and honestly scoping what this project's 3D view is
+
+Owner-requested, 2026-09-15, after looking at the real Duplex building: are the viewer's colors
+and "realism" fixed, and can they be improved to look more like real building materials with
+better contrast?
+
+**Answered honestly first, not just implemented.** Both were confirmed fixed by design, not an
+accident: `IfcRepository.viewer_elements` (`apps/api/app/tools/ifc/repository.py`) assigns one flat
+color per entity *type* (never reading a file's own real material/colour data), and -- more
+significantly -- it discards each element's real triangulated geometry entirely and keeps only its
+axis-aligned bounding box, rendered as a plain `THREE.BoxGeometry`. This is a deliberate,
+documented tradeoff (the method's own docstring: "avoids freezing the UI while a legacy browser
+parser reconstructs the complete 11 MB source model"), not a bug -- a door renders as a box, never
+its real panel/frame silhouette. Real per-material geometry/color would be a materially larger
+change (rendering real ifcopenshell-computed meshes instead of bounding boxes, and/or reading
+`IfcStyledItem`/`IfcSurfaceStyle` where present); explicitly out of scope for this pass, which the
+owner scoped to palette/material tuning only.
+
+**What shipped.** `viewer_elements`'s palette moved from a schematic, fairly-saturated
+type-distinguishing scheme (blues/purples) to colors that nod at each type's typical real material
+-- warm plaster walls, concrete floors/stairs, a wood-brown door, pale glass-blue windows, a
+weathered roof brown. `IfcViewer.tsx` gained a per-type material table (`MATERIAL_BY_TYPE`) so
+windows now actually read as glass (more transparent, smoother/shinier) instead of sharing one
+flat opacity/roughness with solid building fabric, which stays matte and mostly opaque. Still one
+fixed look per entity *type*, not per real material -- stated plainly in both files' own comments,
+not implied to be more than it is.
+
+**Verification.** Confirmed live in a real browser against the real Duplex building: fetched the
+same `viewer-elements` payload after the change and verified every entity type resolves to its new
+intended color; visually confirmed the warmer, more material-suggestive palette renders correctly
+alongside D-038's now-correct vertical orientation. `npm run build` clean; frontend-plus-one-file
+backend change, 327 backend tests unaffected (no test asserts exact color values), `ruff` clean.
