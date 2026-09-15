@@ -124,7 +124,16 @@ type Props = {
   onSelection: (element: SelectedElement | null) => void;
   onSnapshot: (base64: string | null) => void;
   onStatus: (status: ViewerStatus) => void;
-  focusGlobalId?: string;
+  // D-049: owner-reported, 2026-09-15 -- a single `focusGlobalId` replaced
+  // by another (D-046) fixed accumulation, but the owner wants several
+  // evidence citations lit at once, each independently toggled, and
+  // wants a highlight to survive rotating/looking around the model, not
+  // just clicking a different citation. Ownership of *which* elements are
+  // lit now lives in the parent (main.tsx), shared with the Evidence
+  // citation list -- this component only renders whatever set it's given
+  // and reports toggle requests back up via `onToggleHighlight`.
+  highlightedGlobalIds?: Set<string>;
+  onToggleHighlight: (globalId: string) => void;
   // SPEC-M9: found live by independent review -- this component fetches
   // its own viewer-elements independently of main.tsx's request logic, so
   // a project selector added only there would leave the 3D viewer itself
@@ -138,34 +147,42 @@ export type ViewerStatus = {
   progress?: number;
 };
 
-export function IfcViewer({ onSelection, onSnapshot, onStatus, focusGlobalId, projectId }: Props) {
+export function IfcViewer({ onSelection, onSnapshot, onStatus, highlightedGlobalIds, onToggleHighlight, projectId }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const [status, setStatus] = useState<ViewerStatus>({ phase: "initializing", message: "Preparing IFC viewer…" });
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const elementMeshesRef = useRef<Map<string, THREE.Mesh>>(new Map());
-  // D-046: owner-reported, 2026-09-15 -- highlighting one element (either
-  // by clicking it directly, or by jumping to it from an Evidence
-  // citation) left it lit permanently: clicking a different element (or
-  // citation) highlighted the new one but never cleared the old one's
-  // emissive, so highlights accumulated across the scene. Root cause: the
-  // canvas click handler and the `focusGlobalId` effect below each kept
-  // their own, independent notion of "the highlighted mesh" (a local
-  // closure variable in one, nothing at all in the other), so neither
-  // could clear a highlight the other had set. A single ref, shared by
-  // both, is the one source of truth for "what is currently lit."
-  const highlightedMeshRef = useRef<THREE.Mesh | null>(null);
 
   const publishStatus = (next: ViewerStatus) => {
     setStatus(next);
     onStatus(next);
   };
 
-  function applyHighlight(mesh: THREE.Mesh | null) {
-    const previous = highlightedMeshRef.current;
-    if (previous && previous !== mesh) (previous.material as THREE.MeshStandardMaterial).emissive.set(0x000000);
-    if (mesh) (mesh.material as THREE.MeshStandardMaterial).emissive.set(0x4f9df5);
-    highlightedMeshRef.current = mesh;
+  // D-049: recomputes every mesh's emissive state from the given set of
+  // globally-lit ids rather than tracking a single "currently highlighted
+  // mesh" (D-046) -- several evidence citations can be lit at once now,
+  // each independently added/removed by the owner. Called whenever the
+  // parent's `highlightedGlobalIds` prop changes; cheap enough to
+  // recompute in full every time given this viewer's element counts
+  // (hundreds, not thousands), and avoids incremental-diff bookkeeping
+  // for a set that changes rarely (a citation click, not every frame).
+  function applyHighlightSet(ids: Set<string> | undefined) {
+    elementMeshesRef.current.forEach((mesh, globalId) => {
+      const lit = !!ids && ids.has(globalId);
+      (mesh.material as THREE.MeshStandardMaterial).emissive.set(lit ? 0x4f9df5 : 0x000000);
+    });
   }
+  // Kept in sync below so `loadProjection` (inside the scene-setup effect,
+  // which intentionally does not depend on `highlightedGlobalIds` --
+  // rebuilding the whole Three.js scene on every highlight toggle would
+  // be wasteful) can still re-apply the current highlight set to newly
+  // built meshes once loading finishes, e.g. re-entering a project whose
+  // citations were already toggled on before switching away.
+  const highlightedGlobalIdsRef = useRef<Set<string> | undefined>(highlightedGlobalIds);
+  useEffect(() => {
+    highlightedGlobalIdsRef.current = highlightedGlobalIds;
+    applyHighlightSet(highlightedGlobalIds);
+  }, [highlightedGlobalIds]);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -274,6 +291,13 @@ export function IfcViewer({ onSelection, onSnapshot, onStatus, focusGlobalId, pr
         camera.updateProjectionMatrix();
         controls.update();
         publishStatus({ phase: "ready", message: `Viewer ready — ${payload.elements.length} IFC elements available for selection.`, progress: 100 });
+        // D-049: re-applies whatever the parent already considers "lit" to
+        // this freshly built mesh set -- otherwise a highlight toggled on
+        // before a project switch (or reload) would silently vanish for
+        // no visible reason once the new scene's meshes came in, since the
+        // effect below only fires when `highlightedGlobalIds` itself
+        // changes, not when this async load finishes.
+        applyHighlightSet(highlightedGlobalIdsRef.current);
       } catch (error) {
         console.error("IFC browser projection failed", error);
         if (!disposed) publishStatus({ phase: "failed", message: "IFC parsing failed. Confirm that the local API and IFC source are available." });
@@ -282,14 +306,41 @@ export function IfcViewer({ onSelection, onSnapshot, onStatus, focusGlobalId, pr
 
     const raycaster = new THREE.Raycaster();
     const pointer = new THREE.Vector2();
+    // D-049: owner-reported, 2026-09-15 -- rotating the camera (a
+    // click-and-drag on the canvas) sometimes cleared whatever evidence
+    // highlight was showing. Root cause: the browser's native `click`
+    // event still fires at the end of a drag whenever the total pointer
+    // movement stays under its own small built-in threshold, and this
+    // component's only listener was a plain `click` with no way to tell
+    // "the user actually clicked" apart from "the user just finished a
+    // short drag." Tracked explicitly here instead: `pointerdown` records
+    // the start position, and `click` only runs the selection/highlight
+    // logic below if the pointer never moved more than a few pixels from
+    // it -- anything more is treated as a rotate gesture and ignored
+    // entirely, leaving whatever was lit exactly as it was.
+    const DRAG_THRESHOLD_PX = 5;
+    let pointerDownPosition: { x: number; y: number } | null = null;
+    const recordPointerDown = (event: PointerEvent) => {
+      pointerDownPosition = { x: event.clientX, y: event.clientY };
+    };
     const select = (event: MouseEvent) => {
+      const start = pointerDownPosition;
+      pointerDownPosition = null;
+      if (start) {
+        const moved = Math.hypot(event.clientX - start.x, event.clientY - start.y);
+        if (moved > DRAG_THRESHOLD_PX) return;
+      }
       const bounds = renderer.domElement.getBoundingClientRect();
       pointer.x = ((event.clientX - bounds.left) / bounds.width) * 2 - 1;
       pointer.y = -((event.clientY - bounds.top) / bounds.height) * 2 + 1;
       raycaster.setFromCamera(pointer, camera);
       const hits = raycaster.intersectObjects(pickables, false);
       if (hits.length === 0) {
-        applyHighlight(null);
+        // D-049: a genuine click on empty space only clears the
+        // identification panel below -- it does not touch any highlight,
+        // since highlights are now owned by the parent and only ever
+        // change via an explicit toggle (a citation, or clicking the same
+        // element again), never as a side effect of clicking elsewhere.
         onSelection(null);
         return;
       }
@@ -313,11 +364,12 @@ export function IfcViewer({ onSelection, onSnapshot, onStatus, focusGlobalId, pr
         return entityType !== "IfcWall" && candidate.distance <= nearestDistance + WALL_OCCLUSION_MARGIN;
       }) || hits[0];
       const mesh = preferredHit.object as THREE.Mesh;
-      applyHighlight(mesh);
       const element = mesh.userData as ViewerElement;
       onSelection({ globalId: element.global_id, expressId: element.express_id, type: element.entity_type, name: element.name });
+      if (element.global_id) onToggleHighlight(element.global_id);
     };
 
+    renderer.domElement.addEventListener("pointerdown", recordPointerDown);
     renderer.domElement.addEventListener("click", select);
     window.addEventListener("resize", resize);
     resize();
@@ -334,6 +386,7 @@ export function IfcViewer({ onSelection, onSnapshot, onStatus, focusGlobalId, pr
       disposed = true;
       cancelAnimationFrame(frame);
       window.removeEventListener("resize", resize);
+      renderer.domElement.removeEventListener("pointerdown", recordPointerDown);
       renderer.domElement.removeEventListener("click", select);
       controls.dispose();
       scene.traverse((item) => {
@@ -343,27 +396,23 @@ export function IfcViewer({ onSelection, onSnapshot, onStatus, focusGlobalId, pr
       });
       renderer.dispose();
       host.replaceChildren();
-      // The scene's own meshes are being disposed above -- any stale
-      // reference to one of them is no longer valid, so the highlight ref
-      // is reset alongside them rather than left pointing at disposed
-      // geometry for whatever project loads next.
-      highlightedMeshRef.current = null;
+      // Every mesh this map points to was just disposed above -- clearing
+      // it (rather than leaving stale entries to accumulate across every
+      // project switch) keeps `applyHighlightSet` from ever iterating a
+      // disposed mesh's material.
+      elementMeshesRef.current.clear();
     };
     // projectId is in this effect's dependency array on purpose: switching
     // projects tears down the whole scene (the existing cleanup below
     // already disposes geometry/materials/renderer) and rebuilds it for
     // the newly-selected project's IFC, rather than trying to patch an
-    // existing scene's meshes in place.
-  }, [onSelection, onStatus, projectId]);
-
-  useEffect(() => {
-    // D-046: `focusGlobalId` going away (e.g. the owner's own "Clear
-    // selection" button) must clear the highlight too, not just skip
-    // setting a new one -- the old early return here left whatever was lit
-    // lit forever once its citation stopped being the current selection.
-    const mesh = focusGlobalId ? elementMeshesRef.current.get(focusGlobalId) ?? null : null;
-    applyHighlight(mesh);
-  }, [focusGlobalId]);
+    // existing scene's meshes in place. `onSelection`/`onToggleHighlight`
+    // must be referentially stable across renders (e.g. wrapped in
+    // useCallback by the caller, as main.tsx already does for the former)
+    // -- an unstable one here would rebuild the entire Three.js scene on
+    // every render, which `highlightedGlobalIdsRef` above exists
+    // specifically to let this component avoid for highlight toggles.
+  }, [onSelection, onStatus, onToggleHighlight, projectId]);
 
   function captureSnapshot() {
     const renderer = rendererRef.current;

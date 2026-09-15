@@ -123,6 +123,22 @@ function App() {
   }, [projectId]);
 
   const handleSelection = useCallback((element: Selected | null) => { setSelected(element); setSelectionCleared(false); }, []);
+  // D-049: owner-requested, 2026-09-15 -- several evidence citations (or
+  // directly-clicked elements) should be able to stay highlighted in the
+  // 3D view at once, each turned on/off independently by the owner,
+  // rather than one highlight always replacing whatever was lit before
+  // (D-046) or vanishing the moment the camera rotates. Ownership lives
+  // here, shared between IfcViewer's own canvas clicks and DecisionStory's
+  // citation "Jump to this evidence" buttons, rather than each tracking
+  // its own separate notion of "what's highlighted."
+  const [highlightedIds, setHighlightedIds] = useState<Set<string>>(new Set());
+  const toggleHighlight = useCallback((globalId: string) => {
+    setHighlightedIds((current) => {
+      const next = new Set(current);
+      if (next.has(globalId)) next.delete(globalId); else next.add(globalId);
+      return next;
+    });
+  }, []);
   useEffect(() => { loadMetadata(); }, [loadMetadata]);
 
   function submitApiKey(event: FormEvent) {
@@ -254,15 +270,16 @@ function App() {
   }
 
   function openCitation(citation: Citation) {
-    // D-046: owner-reported, 2026-09-15 -- clicking the same evidence
-    // citation a second time did nothing (no way to "cancel" the
-    // highlight short of the separate "Clear selection" button). Since
-    // `focusGlobalId` in IfcViewer.tsx is fed by this same `selected`
-    // state, re-clicking the citation that's already selected now clears
-    // it instead of re-setting the identical value.
+    // D-049: owner-requested, 2026-09-15 -- each citation's highlight now
+    // toggles independently (via the shared `highlightedIds` set above)
+    // instead of one citation's focus replacing another's (D-046) --
+    // several can be lit in the 3D view at once. The "Element" info panel
+    // below still always describes whichever citation was clicked most
+    // recently, regardless of which direction its highlight just toggled.
     if (citation.source_type === "ifc") {
       setTab("bim");
-      setSelected((current) => (current?.globalId && current.globalId === citation.locator.global_id ? null : { globalId: citation.locator.global_id, expressId: citation.locator.express_id, type: citation.locator.entity_type, name: citation.label }));
+      setSelected({ globalId: citation.locator.global_id, expressId: citation.locator.express_id, type: citation.locator.entity_type, name: citation.label });
+      if (citation.locator.global_id) toggleHighlight(citation.locator.global_id);
     }
     if (citation.source_type === "pdf") {
       setTab("drawing");
@@ -295,11 +312,11 @@ function App() {
     <div className="top-controls">
       {projects.length > 0 && <label>Project <select value={projectId || "demo"} onChange={(e) => switchProject(e.target.value)}>{projects.map((p) => <option key={p.project_id} value={p.project_id}>{p.display_name}</option>)}</select></label>}
       <label>Source <select value={sourcePreference} onChange={(e) => setSourcePreference(e.target.value as SourcePreference)}><option value="auto">Auto</option><option value="ifc">IFC Model</option><option value="pdf">Engineering Drawing</option><option value="viewer_snapshot">Current Viewer Snapshot</option></select></label>
-      <button type="button" onClick={newConversation}>New conversation</button><button type="button" onClick={() => { setSelected(null); setSelectionCleared(true); }}>Clear selection</button><button type="button" onClick={() => { setSnapshot(null); setSnapshotCleared(true); }}>Clear snapshot</button>
+      <button type="button" onClick={newConversation}>New conversation</button><button type="button" onClick={() => { setSelected(null); setSelectionCleared(true); setHighlightedIds(new Set()); }}>Clear selection</button><button type="button" onClick={() => { setSnapshot(null); setSnapshotCleared(true); }}>Clear snapshot</button>
     </div>
     <section className="workspace">
       <aside className="viewer"><div className="tabs"><button className={tab === "bim" ? "active" : ""} onClick={() => setTab("bim")}>BIM Model</button><button className={tab === "drawing" ? "active" : ""} onClick={() => setTab("drawing")}>Drawing</button><button className={tab === "snapshot" ? "active" : ""} onClick={() => setTab("snapshot")}>Viewer Snapshot</button><button className={tab === "findings" ? "active" : ""} onClick={() => setTab("findings")}>Findings</button></div>
-        {tab === "bim" && <><h2>IFC Viewer</h2><IfcViewer projectId={projectId} onSelection={handleSelection} onSnapshot={(value) => { setSnapshot(value); setSnapshotCleared(false); }} onStatus={setViewerStatus} focusGlobalId={selected?.globalId} /><dl className="selection-details"><div><dt>Element</dt><dd>{selected ? `${selected.type}: ${selected.name}` : "No IFC element selected"}</dd></div><div><dt>IFC type</dt><dd>{selected?.type || "—"}</dd></div><div><dt>ExpressID</dt><dd>{selected?.expressId ?? "—"}</dd></div><div><dt>GlobalId</dt><dd>{selected?.globalId || "—"}</dd></div></dl></>}
+        {tab === "bim" && <><h2>IFC Viewer</h2><IfcViewer projectId={projectId} onSelection={handleSelection} onSnapshot={(value) => { setSnapshot(value); setSnapshotCleared(false); }} onStatus={setViewerStatus} highlightedGlobalIds={highlightedIds} onToggleHighlight={toggleHighlight} /><dl className="selection-details"><div><dt>Element</dt><dd>{selected ? `${selected.type}: ${selected.name}` : "No IFC element selected"}</dd></div><div><dt>IFC type</dt><dd>{selected?.type || "—"}</dd></div><div><dt>ExpressID</dt><dd>{selected?.expressId ?? "—"}</dd></div><div><dt>GlobalId</dt><dd>{selected?.globalId || "—"}</dd></div></dl></>}
         {tab === "drawing" && <section className="drawing"><h2>Engineering Drawing</h2>
           <div className="drawing-toolbar">
             {(metadata?.pdf_files?.length || 0) > 1 && <label>Document <select value={drawingDocument || ""} onChange={(e) => changeDrawingDocument(e.target.value)}>{metadata!.pdf_files.map((name: string) => <option key={name} value={name}>{name}</option>)}</select></label>}

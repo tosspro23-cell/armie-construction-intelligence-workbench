@@ -2179,3 +2179,56 @@ layer.
 build` on `apps.bicep` still validates after removing the parameter/variable/array-entry. No
 remaining reference to `polish`/`AnswerSynthesis` anywhere in `apps/`, `tests/`, `.github/`, or
 `infra/` (swept explicitly, not assumed).
+
+## D-049 — 3D highlight vanished on camera rotation; owner wanted several lit at once, manually
+
+Owner-reported, 2026-09-15, immediately after D-046 shipped: jumping to an Evidence citation
+correctly highlighted its element, but rotating the camera to look at it (a click-and-drag) often
+cleared the highlight; switching between citations sometimes failed to show a highlight at all. The
+owner also asked for a genuinely different interaction model: several elements lit simultaneously,
+each turned on and off independently and manually, rather than one highlight always replacing
+another.
+
+**Root cause of the rotation bug.** `IfcViewer.tsx`'s only pointer listener was a plain `click`, and
+a native `click` event still fires at the end of a short drag whenever total pointer movement stays
+under the browser's own small built-in threshold -- there was no code distinguishing "the user
+clicked to select something" from "the user just finished a brief rotate gesture," so D-046's own
+`applyHighlight(hit-or-null)` ran on both, clearing or replacing the highlight as a side effect of
+looking around the model.
+
+**What shipped -- a genuinely different model, not just a bug fix.** `highlightedGlobalIds` (a
+`Set<string>`) now lives in `main.tsx`, shared between the 3D viewer's own canvas clicks and
+Evidence citations' "Jump to this evidence" buttons, replacing D-046's single
+`highlightedMeshRef`. `IfcViewer.tsx` recomputes every mesh's emissive state from this set
+(`applyHighlightSet`) whenever it changes; a canvas click reports a `pointerdown`-to-`click`
+movement distance, and only treats the interaction as a real click (updating the info panel and
+toggling that element's membership in the set) when that distance stays under 5px -- anything more
+is a rotate gesture and changes nothing. A click on empty space now only clears the identification
+panel, never any highlight -- highlights change only through an explicit toggle (clicking a
+citation, or clicking the same element again), never as an accidental side effect. Each citation
+click toggles its own element in the shared set independently, so several can be lit at once; "Clear
+selection" now empties the whole set as the explicit "reset everything" action.
+
+**Verification.** Live in the browser against the real Duplex building: clicking two different
+elements (a wall, then the roof slab) left both simultaneously highlighted; a scripted
+`pointerdown` -> `pointermove` (80px) -> `pointerup` -> `click` sequence -- reproducing exactly what
+a real rotate-drag dispatches, including the trailing `click` -- rotated the camera and left both
+highlights untouched; clicking the same element twice in a row lit it, then cleared it, confirming
+the toggle. `npm run build` clean; frontend-only, 325 backend tests unaffected.
+
+## D-050 — Workspace column gaps read as wasted space
+
+Owner-requested, 2026-09-15: the 16px gaps between the three workspace columns (IFC Viewer,
+Conversation, Decision Trace) looked like wasted empty space rather than an intentional divider;
+asked for a thinner dividing line instead, freeing width for the Conversation column specifically.
+
+**What shipped.** `.workspace`'s `gap` (`apps/web/src/styles.css`) reduced from 16px to 6px -- each
+column already renders its own visible border (`.viewer`/`.chat`/`.inspector`'s existing `border: 1px
+solid #263457`), so a smaller gap reads as a visible seam between two borders rather than a blank
+gutter, with no new CSS needed to draw an actual line. The reclaimed width was directed at
+Conversation by name, per D-043's own established rebalancing pattern: `0.9fr` -> `1.0fr` (26.5% ->
+roughly 28% of the new, smaller total), leaving Decision Trace's own "at least 1/3" sizing
+essentially unchanged (1.1fr of 3.5fr = 31.4%).
+
+**Verification.** `npm run build` clean; confirmed live in the browser that the three columns now
+sit visibly closer together. CSS-only change, 325 backend tests unaffected.

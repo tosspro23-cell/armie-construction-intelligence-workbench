@@ -23,8 +23,18 @@ h1 { margin-bottom: 0; font-size: 1.75rem; }
    column absorbs the shrink (1.1fr -> 0.9fr, 34.4% -> 26.5%) rather than
    Decision Trace, which keeps its own prior "at least 1/3, it's the point
    of the demo" sizing intact (1.1fr of 3.4fr = 32.4%, effectively
-   unchanged). */
-.workspace { display: grid; grid-template-columns: minmax(320px, 1.4fr) minmax(280px, 0.9fr) minmax(340px, 1.1fr); gap: 16px; flex: 1; min-height: 0; overflow: hidden; }
+   unchanged).
+
+   D-050: owner-reported, 2026-09-15 -- the 16px blank gap between the
+   three columns (each already visually bounded by its own border,
+   .viewer/.chat/.inspector below) read as wasted space rather than an
+   intentional divider. Shrunk to 6px -- still a visible seam between the
+   panels' own borders, just not an empty gutter -- and the reclaimed
+   width, plus a further rebalance, goes to Conversation specifically
+   (0.9fr -> 1.0fr) since that was the column asked for by name; Decision
+   Trace's own "at least 1/3" sizing is otherwise left alone (1.1fr of the
+   new 3.5fr total = 31.4%, essentially unchanged). */
+.workspace { display: grid; grid-template-columns: minmax(320px, 1.4fr) minmax(280px, 1.0fr) minmax(340px, 1.1fr); gap: 6px; flex: 1; min-height: 0; overflow: hidden; }
 .viewer, .chat, .inspector, .audit, .citations { background: #121a30; border: 1px solid #263457; border-radius: 14px; padding: 16px; }
 .viewer { display: flex; flex-direction: column; gap: 16px; min-height: 0; overflow: auto; }
 .tabs { display: flex; gap: 6px; flex-wrap: wrap; }
