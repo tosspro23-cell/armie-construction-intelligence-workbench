@@ -1867,3 +1867,51 @@ same `viewer-elements` payload after the change and verified every entity type r
 intended color; visually confirmed the warmer, more material-suggestive palette renders correctly
 alongside D-038's now-correct vertical orientation. `npm run build` clean; frontend-plus-one-file
 backend change, 327 backend tests unaffected (no test asserts exact color values), `ruff` clean.
+
+## D-040 — D-039's colors were washing out to white, and the interior view looked hazy
+
+Owner-reported, 2026-09-15, immediately after D-039 shipped: walls read as washed-out, almost pure
+white on zoom, and rotating the camera inside the building's own volume looked like an indistinct
+haze rather than distinct surfaces. Diagnosed by reading the actual rendered pixels, not by
+eyeballing screenshots.
+
+**Root cause 1, confirmed by reading GPU pixel values directly.** `renderer.toneMapping` was never
+set (Three.js default: `NoToneMapping`), so any lit pixel whose computed radiance exceeded 1.0 in
+linear color space clipped straight to pure white (255,255,255) instead of a softer highlight
+rolloff -- read directly via `gl.readPixels` on the live canvas, most sampled wall pixels were
+exactly `[255,255,255]`. The `HemisphereLight`/`DirectionalLight` intensities (2.2/2.0) were high
+enough that a pale, matte, directly-lit surface routinely exceeded that threshold. Tried
+`ACESFilmicToneMapping` first (the standard filmic curve for `MeshStandardMaterial` scenes) -- this
+stopped the hard clipping but still desaturated the intended warm tint toward gray (ACES's own
+highlight rolloff deliberately desaturates bright areas, and these matte walls under two lights
+were bright enough to fall in that zone). Settled on `NoToneMapping` with both light intensities
+cut much further (Hemisphere 2.2->0.55, Directional 2.0->0.6) -- verified directly afterward:
+sampled wall pixels now read `[211,204,190]`, matching the intended `#cdc6b8` (205,198,184) almost
+exactly, with genuinely darker values on faces not facing the light (real shading depth, not flat
+uniform brightness).
+
+**Root cause 2.** Confirmed at the same time as D-039's own investigation but not yet fixed there:
+every material was constructed with `transparent: true` regardless of its intended opacity. In
+Three.js this puts even a 0.97-0.98-opacity "nearly solid" material on the alpha-blended render
+path (sorted per-triangle, not depth-buffer-occluded the way opaque geometry is) -- most visible
+exactly where the camera sits inside a cluster of intersecting bounding boxes (this viewer's
+wall/door/slab boxes routinely overlap at corners and openings, an inherent consequence of the
+bounding-box simplification, not new). Every genuinely solid type (`transparent: false`, opacity
+`1`) now renders through the normal opaque/depth-buffer path; only glass (`IfcWindow`) stays
+alpha-blended, since it is meant to be translucent.
+
+**What this does not fix, on purpose.** Real doors and windows still have no actual cut opening in
+their wall's own bounding box -- the wall box and the door/window box simply overlap in space. Depth
+buffering now lets the *nearer* surface correctly occlude what is behind it (ending the haze), but
+walking into geometry that has no real opening will still show an abrupt box edge, not a real
+doorway. That is the same underlying tradeoff D-039 and the original spike already named, not
+something a lighting/material fix can resolve.
+
+**Verification.** Read raw pixel colors from the live WebGL canvas via `gl.readPixels` before and
+after each change (not screenshots) -- confirmed the pre-fix clipping to pure white, confirmed
+ACESFilmic's own desaturation as a real but insufficient improvement, and confirmed the final
+NoToneMapping + reduced-intensity combination lands within a few RGB points of the intended base
+color. Re-verified selection highlighting (the emissive overlay used when clicking an element)
+still reads correctly against the new, dimmer lighting. Confirmed live against both the real Duplex
+building and the original synthetic demo fixture (no regression). `npm run build` clean;
+frontend-only, 327 backend tests unaffected, `ruff` clean.

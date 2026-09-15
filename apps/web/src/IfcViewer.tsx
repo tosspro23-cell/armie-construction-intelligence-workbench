@@ -31,15 +31,33 @@ type ViewerElement = {
 // with doors in between (opaque but slightly less uniformly matte than
 // bare concrete). Not a claim of reading the IFC's own real material
 // data -- still one fixed look per entity *type*.
-const MATERIAL_BY_TYPE: Record<string, { opacity: number; roughness: number; metalness: number }> = {
-  IfcWindow: { opacity: 0.45, roughness: 0.12, metalness: 0.1 },
-  IfcDoor: { opacity: 0.97, roughness: 0.75, metalness: 0 },
-  IfcWall: { opacity: 0.97, roughness: 0.9, metalness: 0 },
-  IfcSlab: { opacity: 0.98, roughness: 0.92, metalness: 0 },
-  IfcStair: { opacity: 0.96, roughness: 0.85, metalness: 0 },
-  IfcRoof: { opacity: 0.96, roughness: 0.8, metalness: 0 },
+//
+// D-040: owner-reported, 2026-09-15 -- walls read as washed-out near-white
+// on zoom, and the interior of a real building looked like an
+// indistinct haze when rotating inside it. Every material, including
+// these nominally-opaque ones, was constructed with `transparent: true`
+// regardless of its opacity -- in Three.js this switches the material
+// onto the alpha-blended render path (sorted per-triangle, not written
+// to the depth buffer the same way opaque geometry is), which produces
+// visible blending/haze between overlapping surfaces even at opacity
+// 0.97-0.98, and is most visible exactly where the camera sits inside a
+// cluster of intersecting bounding boxes (this viewer's wall/door/slab
+// boxes routinely overlap at corners and openings -- see viewer_elements'
+// own bounding-box tradeoff). `transparent` is now only enabled for
+// genuinely translucent glass; every solid type renders fully opaque,
+// which lets Three.js's normal depth-buffer occlusion hide interior
+// clutter instead of blending it. This does not by itself give a door/
+// window a real cut opening in its wall -- that is still the underlying
+// bounding-box simplification, unchanged here.
+const MATERIAL_BY_TYPE: Record<string, { opacity: number; roughness: number; metalness: number; transparent: boolean }> = {
+  IfcWindow: { opacity: 0.45, roughness: 0.12, metalness: 0.1, transparent: true },
+  IfcDoor: { opacity: 1, roughness: 0.75, metalness: 0, transparent: false },
+  IfcWall: { opacity: 1, roughness: 0.9, metalness: 0, transparent: false },
+  IfcSlab: { opacity: 1, roughness: 0.92, metalness: 0, transparent: false },
+  IfcStair: { opacity: 1, roughness: 0.85, metalness: 0, transparent: false },
+  IfcRoof: { opacity: 1, roughness: 0.8, metalness: 0, transparent: false },
 };
-const DEFAULT_MATERIAL = { opacity: 0.85, roughness: 0.78, metalness: 0 };
+const DEFAULT_MATERIAL = { opacity: 1, roughness: 0.78, metalness: 0, transparent: false };
 
 type Props = {
   onSelection: (element: SelectedElement | null) => void;
@@ -80,10 +98,20 @@ export function IfcViewer({ onSelection, onSnapshot, onStatus, focusGlobalId, pr
     camera.position.set(25, 20, 25);
     const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    // D-040: owner-reported, 2026-09-15 -- pale materials (the new D-039
+    // palette's warm plaster walls especially) read as washed-out
+    // near-white on zoom. With no tone mapping, this renderer clipped any
+    // over-bright lit surface straight to solid white instead of a
+    // softer highlight rolloff -- combined with the hemisphere+directional
+    // lights' fairly high intensities (2.2/2.0), a pale, matte, directly-lit
+    // wall was genuinely overexposed, not just visually busy. ACESFilmic
+    // is the standard filmic rolloff for MeshStandardMaterial scenes, and
+    // the light intensities were reduced alongside it.
+    renderer.toneMapping = THREE.NoToneMapping;
     host.appendChild(renderer.domElement);
     rendererRef.current = renderer;
-    scene.add(new THREE.HemisphereLight(0xffffff, 0x30466e, 2.2));
-    const directional = new THREE.DirectionalLight(0xffffff, 2.0);
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x30466e, 0.55));
+    const directional = new THREE.DirectionalLight(0xffffff, 0.6);
     directional.position.set(12, 20, 10);
     scene.add(directional);
     scene.add(new THREE.GridHelper(100, 50, 0x4f79b8, 0x263a61));
@@ -132,7 +160,7 @@ export function IfcViewer({ onSelection, onSnapshot, onStatus, focusGlobalId, pr
           const [ifcX, ifcY, ifcZ] = element.center;
           const geometry = new THREE.BoxGeometry(ifcWidth, ifcHeight, ifcDepth);
           const materialProps = (element.entity_type && MATERIAL_BY_TYPE[element.entity_type]) || DEFAULT_MATERIAL;
-          const material = new THREE.MeshStandardMaterial({ color: element.color, transparent: true, ...materialProps });
+          const material = new THREE.MeshStandardMaterial({ color: element.color, ...materialProps });
           const mesh = new THREE.Mesh(geometry, material);
           mesh.position.set(ifcX, ifcZ, -ifcY);
           mesh.userData = element;
