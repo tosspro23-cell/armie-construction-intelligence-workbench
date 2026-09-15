@@ -91,10 +91,29 @@ export function IfcViewer({ onSelection, onSnapshot, onStatus, focusGlobalId, pr
         const total = Math.max(payload.elements.length, 1);
         const bounds = new THREE.Box3();
         payload.elements.forEach((element, index) => {
-          const geometry = new THREE.BoxGeometry(...element.dimensions);
+          // D-038: `/api/v1/project/viewer-elements` returns real IFC world
+          // coordinates as ifcopenshell computed them -- IFC's own
+          // convention is Z-up (a storey's real elevation is its Z
+          // component; confirmed directly, e.g. Level 1 ~0, Level 2 ~3.1,
+          // Roof ~6.2 on the Duplex fixture). Three.js's camera/lighting/
+          // OrbitControls here all assume Y-up (the scene was never told
+          // otherwise). Passed straight through with no conversion, a
+          // slab's real height ended up in Three.js's *depth* axis instead
+          // of its height axis, and the slab's arbitrary IFC north/south
+          // position ended up controlling how high it rendered -- found
+          // live, 2026-09-15, when a real multi-storey building's ground
+          // floor rendered above other geometry instead of below it (the
+          // tiny synthetic demo fixture's simple geometry never made this
+          // visible). Standard Z-up -> Y-up conversion (a -90 degree
+          // rotation about X, preserving right-handedness): three.y =
+          // ifc.z (real height), three.z = -ifc.y. Dimensions only need
+          // the Y/Z extents swapped, never negated (a size has no sign).
+          const [ifcWidth, ifcDepth, ifcHeight] = element.dimensions;
+          const [ifcX, ifcY, ifcZ] = element.center;
+          const geometry = new THREE.BoxGeometry(ifcWidth, ifcHeight, ifcDepth);
           const material = new THREE.MeshStandardMaterial({ color: element.color, transparent: true, opacity: 0.82, roughness: 0.78 });
           const mesh = new THREE.Mesh(geometry, material);
-          mesh.position.set(...element.center);
+          mesh.position.set(ifcX, ifcZ, -ifcY);
           mesh.userData = element;
           if (element.global_id) elementMeshesRef.current.set(element.global_id, mesh);
           scene.add(mesh);

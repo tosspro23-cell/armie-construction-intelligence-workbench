@@ -1796,3 +1796,41 @@ model**, zero model calls -- matching the plant exactly. 327 tests pass (326 + 1
 Lake account and verified byte-identical after download, and the app was redeployed and confirmed
 live (`GET /api/v1/project/metadata?project_id=duplex` returns `401`, not `404`) before being
 reported as done.
+
+## D-038 — The IFC viewer never converted Z-up to Three.js's Y-up, on every project
+
+Owner-reported, 2026-09-15, live: after loading the Duplex Apartment building, "which direction is
+this model's ground floor? Is the grid-like plane the ground floor or the roof? By default it
+looks like the grid plane is on top." Investigated directly rather than guessed.
+
+**Root cause, confirmed by reading the real numbers, not assumed.** `GET /api/v1/project/
+viewer-elements` (`IfcRepository.viewer_elements`, `apps/api/app/tools/ifc/repository.py`) computes
+each element's `center`/`dimensions` straight from `ifcopenshell.geom`'s `USE_WORLD_COORDS` output
+-- IFC's own native convention, which is **Z-up** (a storey's real elevation is literally its Z
+component; confirmed directly on the Duplex fixture: Level 1 slabs' Z ~0, Level 2 slabs' Z ~3.1,
+Roof's Z ~6.2, exactly matching the storeys' own recorded elevations). `apps/web/src/IfcViewer.tsx`
+passed this `[x, y, z]` straight into `mesh.position.set(...)` with no conversion at all, but
+Three.js's camera, lighting, and `OrbitControls` here all assume the untouched default **Y-up**
+convention. The result: a slab's real height (IFC's Z) landed in Three.js's *depth* axis instead of
+its height axis, while the slab's largely arbitrary IFC north/south position (Y) ended up
+controlling how high it rendered. For a simple, small, roughly-cubic synthetic fixture this
+distortion was never visually obvious enough to notice; for a real multi-storey building with a
+long, low footprint, it was immediately visible as this project's own ground floor appearing above
+other geometry instead of below it.
+
+**Fix.** Standard Z-up -> Y-up conversion (a -90 degree rotation about X, the same transform every
+Z-up-to-Y-up BIM/CAD-to-WebGL pipeline uses, preserving right-handedness rather than mirroring the
+model): `three.x = ifc.x`, `three.y = ifc.z` (the real height), `three.z = -ifc.y`. Dimensions only
+need their Y/Z extents swapped, never negated (a size has no sign). Applied at the one place this
+matters -- where `IfcViewer.tsx` actually builds Three.js objects -- rather than in the backend
+API, which stays in IFC's own native coordinate convention (nothing else consumes `center`/
+`dimensions`, confirmed by checking every call site first).
+
+**Verification.** Proven directly and objectively, not by eyeballing a screenshot: refetched the
+same real `viewer-elements` payload and computed what each slab's new Three.js Y (height) value
+would be -- Level 1 slabs cluster at ~-0.06 to 0.01, Level 2 slabs at ~2.95-3.11, the Roof at
+~6.0-6.23, exactly the correct bottom-to-top order matching the storeys' own real elevations.
+Confirmed live in a real browser against both the real Duplex building (the fix's actual trigger)
+and the original tiny synthetic demo fixture (no regression -- it already looked "roughly right" by
+coincidence of its simple, near-cubic geometry, and still does). `npm run build` clean; this is a
+frontend-only change, 327 backend tests unaffected, `ruff` clean.
