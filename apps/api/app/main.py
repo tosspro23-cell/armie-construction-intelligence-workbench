@@ -314,6 +314,30 @@ async def project_viewer_elements(project_id: str = "demo") -> dict:
     }
 
 
+@app.get("/api/v1/project/viewer-mesh")
+async def project_viewer_mesh(project_id: str = "demo") -> dict:
+    """SPEC-M12: the real, `ifcopenshell`-triangulated geometry
+    `project_viewer_elements` above deliberately discards down to a
+    bounding box -- an additive representation, not a replacement;
+    `viewer-elements` is unchanged for any other consumer.
+    """
+    _, resources = await _resolve_project(project_id)
+    repository = resources.ifc_repository
+    if not repository.available:
+        raise HTTPException(status_code=404, detail="Configured IFC source file was not found.")
+    # asyncio.to_thread: see project_viewer_elements's own comment above --
+    # only the first access per loaded IfcRepository instance genuinely
+    # computes geometry (`@cached_property`), but for a real building that
+    # first compute is seconds of real ifcopenshell work, well worth
+    # deferring off the event loop.
+    elements = await asyncio.to_thread(lambda: repository.mesh_elements)
+    return {
+        "source_file": repository.path.name,
+        "representation": "ifcopenshell_triangulated_mesh",
+        "elements": elements,
+    }
+
+
 def _terminal_response(request: ChatRequest, request_id: str, disposition: Disposition, message: str, **extra_metadata) -> AgentResponse:
     thread_id = request.thread_id or request_id
     return AgentResponse(

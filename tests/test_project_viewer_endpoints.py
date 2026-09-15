@@ -137,6 +137,25 @@ def test_project_viewer_elements_returns_real_geometry(monkeypatch, tmp_path):
     assert len(body["elements"]) > 0
 
 
+# SPEC-M12: the real-triangulated-geometry counterpart to viewer-elements
+# above -- an additive endpoint, not a replacement (the assertion above
+# already covers that viewer-elements itself is unchanged).
+def test_project_viewer_mesh_returns_real_triangulated_geometry(monkeypatch, tmp_path):
+    _configure_env(monkeypatch, tmp_path)
+    import app.main as main_module
+
+    with TestClient(main_module.app) as client:
+        response = client.get("/api/v1/project/viewer-mesh")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["representation"] == "ifcopenshell_triangulated_mesh"
+    assert len(body["elements"]) > 0
+    for element in body["elements"]:
+        assert "vertices" in element and "faces" in element
+        assert "center" not in element and "dimensions" not in element
+
+
 def _patch_to_record_event_loop_thread(monkeypatch) -> list[int]:
     """Records the thread `_resolve_project` actually runs on for the
     request about to be made -- straight-line `async def` code with no
