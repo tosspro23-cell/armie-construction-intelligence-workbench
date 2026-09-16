@@ -95,6 +95,15 @@ function App() {
   // period, not only reappear once the answer lands -- otherwise a
   // multi-turn V2 conversation looks like it forgot what was just asked.
   const [v2Streaming, setV2Streaming] = useState<{ question: string; statuses: string[]; answer: string } | null>(null);
+  // Owner-reported, 2026-09-16 (found live: a real Azure 429 mid-stream):
+  // submitV2's own catch block used to call setApiError without setting
+  // apiState, so the top-level banner (gated on apiState === "unavailable",
+  // below) never rendered it -- a failed V2 turn looked like the whole
+  // conversation had silently gone blank. Reusing apiState/apiError would
+  // be misleading here (that state also drives the top-of-page "API
+  // unavailable" status label for the *whole app*, not one turn), so V2
+  // gets its own turn-scoped error surfaced inline in the conversation.
+  const [v2Error, setV2Error] = useState<string | null>(null);
   const [tab, setTab] = useState<WorkspaceTab>("bim");
   const [drawingZoom, setDrawingZoom] = useState(1);
   const [drawingEvidence, setDrawingEvidence] = useState<{ bbox?: number[]; board?: string; field?: string; page?: number; document?: string; localized?: boolean } | null>(null);
@@ -225,6 +234,7 @@ function App() {
     if (!question.trim() || busy) return;
     const askedQuestion = question.trim();
     setBusy(true);
+    setV2Error(null);
     setV2Streaming({ question: askedQuestion, statuses: [], answer: "" });
     setQuestion("");
     try {
@@ -289,7 +299,7 @@ function App() {
       }
     } catch (error) {
       console.error(error);
-      setApiError(`The V2 agent request failed: ${(error as Error).message}`);
+      setV2Error((error as Error).message);
     } finally {
       setBusy(false);
       setV2Streaming(null);
@@ -321,7 +331,7 @@ function App() {
   // the same textarea. newConversation() is the actual "start clean"
   // action (called directly, and by switchProject below), so it -- not
   // submit()'s own success path -- is the right place to guarantee this.
-  function newConversation() { setThreadId(undefined); setTurns([]); setTrace([]); setSelected(null); setSelectionCleared(false); setSnapshot(null); setSnapshotCleared(false); setSourcePreference("auto"); setDrawingEvidence(null); setQuestion(""); }
+  function newConversation() { setThreadId(undefined); setTurns([]); setTrace([]); setSelected(null); setSelectionCleared(false); setSnapshot(null); setSnapshotCleared(false); setSourcePreference("auto"); setDrawingEvidence(null); setQuestion(""); setV2Error(null); }
 
   function switchProject(nextProjectId: string) {
     // OD-40: switching projects implicitly starts a new conversation (the
@@ -442,6 +452,13 @@ function App() {
             immediately instead, from the same `v2Streaming.question`
             captured the instant submitV2 starts. */}
         {v2Streaming && <React.Fragment><div className="message-row user"><article className="message user-message"><div className="message-meta"><span>User</span></div><p>{v2Streaming.question}</p></article></div><div className="message-row assistant"><article className="message assistant-message v2-streaming"><div className="message-meta"><span>Assistant</span><span className="engine-badge">V2 (agent)</span><span>working…</span></div>{v2Streaming.statuses.map((status, index) => <p key={index} className="v2-tool-status">{status}</p>)}{v2Streaming.answer && <p>{renderAnswerMarkdown(v2Streaming.answer)}</p>}</article></div></React.Fragment>}
+        {/* Owner-reported, 2026-09-16: a V2 turn that fails mid-stream (a
+            real Azure 429 during live testing surfaced this) used to leave
+            the conversation panel looking silently empty -- v2Streaming is
+            cleared in submitV2's `finally` before this renders, so the
+            error needs its own turn-scoped slot rather than reusing
+            v2Streaming's block. */}
+        {v2Error && <div className="message-row assistant"><article className="message assistant-message error"><div className="message-meta"><span>Assistant</span><span className="engine-badge">V2 (agent)</span><span>error</span></div><p className="runtime-error" role="alert">{v2Error}</p></article></div>}
       </div><form onSubmit={engine === "v2" ? submitV2 : submit}><textarea value={question} onChange={(e) => setQuestion(e.target.value)} placeholder="e.g. How many doors are in the project?" rows={3} /><div className="submit-row"><button disabled={busy}>{busy ? (engine === "v2" ? "Agent working…" : `Checking evidence… ${requestStage}`) : "Ask with audit trail"}</button>{busy && engine === "v1" && <button type="button" className="stop-button" onClick={stopRequest}>Stop request</button>}</div></form></section>
       <aside className="inspector"><DecisionStory latest={latest} trace={trace} projectId={projectId} onOpenCitation={openCitation} /></aside>
     </section>
