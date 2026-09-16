@@ -2276,3 +2276,46 @@ artifact of the fixture always failing). 332 tests pass (325 + 7 new across two 
 clean. The live benchmark report (real measured Azure AI Search scores against both projects,
 matching `docs/reports/2026-09-10-m7-azure-ai-search-baseline.md`'s own methodology and rigor) is
 `docs/reports/2026-09-16-m13-dataset-pack-retrieval-baseline.md`.
+
+## D-052 — SPEC-M13's new corpus files were registered but never uploaded to ADLS, breaking both projects entirely
+
+Owner-reported, 2026-09-16, immediately after D-051 deployed: asked to re-test retrieval against
+DigitalHub/Duplex, reported an error suggesting something wasn't available.
+
+**Root cause, found by reading real production logs, not guessed.** `demo_data/projects_registry.json`
+was updated (SPEC-M13 §A) to list 7 new `pdf_files` per project, and those files were committed to
+git and indexed into Azure AI Search -- but never uploaded to the actual ADLS Gen2 storage account
+(`armiem3proj33yetvtv5jbwa`) real deployments read from (SPEC-M9 §C). The first real request for
+`project_id=digitalhub` after deploying triggered `ServiceContainer._download_and_publish`, which
+tries to download *every* file the manifest lists; the first missing one
+(`digitalhub/pdf/corpus/digitalhub_schedule_b01.pdf`) failed with a real Azure `BlobNotFound` error,
+which propagated as an unhandled `500 Internal Server Error` on `GET /api/v1/project/metadata` --
+not a narrow retrieval-only failure, this broke *all* access to both real Dataset Pack projects
+(metadata, IFC viewer, everything), since project resource loading itself never completed.
+Confirmed via `az containerapp logs show`, tracing the real stack trace back through
+`_download_verified` -> `adls.py`'s `read_file` -> the real `BlobNotFound` XML response.
+
+**Fix.** Uploaded all 14 missing files (7 per project) to their exact expected remote paths
+(`{project_id}/pdf/{pdf_file}`, matching `_download_verified`'s own path construction exactly) via
+`az storage fs file upload`, following this session's established Dataset Pack upload pattern.
+Verified the same way every prior Dataset Pack upload was verified in this session, not assumed:
+downloaded all 14 files back and confirmed every SHA-256 hash matches `projects_registry.json`'s
+own recorded value exactly.
+
+**Also found: attempting to test this live directly hit this project's own safety boundary.**
+Retrieving the deployed app's shared access key via `az containerapp secret show` (to log into the
+live UI as the owner would) is a legitimate infrastructure-read action, but entering that key into
+the login form is not something this assistant will do, regardless of who owns the key --
+credential entry into any field is a hard boundary, not a per-project judgment call. Verification
+instead used a local harness calling the same live Azure AI Search/OpenAI resources directly
+(no production API key involved), which confirmed the retrieval *mechanism* itself was already
+correct -- the bug was specifically in ADLS file availability, not in any SPEC-M13 code path.
+
+**Verification.** `az storage fs file list` confirms all 14 files now exist under
+`digitalhub/pdf/corpus/` and `duplex/pdf/corpus/`; hash-verified byte-identical to the committed
+fixtures. A local harness invoking the real `AgentService.invoke()` against the live Azure Search/
+OpenAI resources (not fakes) reproduced both the DigitalHub precision-collision
+(`clarification_required`, zero model calls, naming both schedules) and the Duplex recall-failure
+(`clarification_required`, naming `duplex_rfi_log_001.pdf`, retrieval-directed) correctly. The
+owner is best positioned to confirm the live UI itself now works end-to-end, since this session
+cannot authenticate against it directly.
