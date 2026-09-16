@@ -2363,3 +2363,47 @@ clarification_required`, answer now reads *"the most relevant configured documen
 digitalhub_schedule_b01.pdf, digitalhub_schedule_e00.pdf, digitalhub_schedule_e01.pdf"* --
 `model_call_count: 1` -- the exact directed-miss behavior that was silently failing before this
 fix, confirmed live against the same real Azure resources production uses.
+
+## D-054 — the 3D viewer only ever rendered 6 of the real element types present in both buildings
+
+Owner-reported, 2026-09-16: asked a real question naming an IfcSpace, got a real citation back, but
+clicking it never highlighted anything in the 3D view; asked for a full check of which element types
+both real Dataset Pack buildings actually contain and whether the viewer covers all of them.
+
+**Root cause, confirmed by a real inventory, not guessed.** `IfcRepository._SUPPORTED_TYPES`
+(`apps/api/app/tools/ifc/repository.py`) -- what the 3D *viewer* renders -- only ever covered the
+6 types the original synthetic `demo` fixture happens to use (Wall/Slab/Door/Window/Stair/Roof).
+The IFC *query* layer (`execute()`, used for citations/evidence) reads `model.by_type(entity_type)`
+directly and was never limited by this list -- a question about IfcSpace was always answerable, its
+citation's `global_id` simply had no corresponding mesh in the viewer's own `elementMeshesRef` map to
+highlight. A real inventory of both buildings (`model.by_type(t)` counts, cross-checked that every
+single instance of each type has real, non-empty `ifcopenshell.geom` geometry -- 100% coverage, no
+fallback-box gaps) found 10 more real, substantial types: IfcSpace (Duplex 21, DigitalHub 64),
+IfcColumn (DigitalHub 62), IfcBeam (8/14), IfcMember (4/**80**), IfcRailing (4/13), IfcCovering
+(13/38), IfcFurnishingElement (Duplex 61), IfcBuildingElementProxy (DigitalHub's single largest
+uncovered type at **150**), IfcFooting (Duplex 7), IfcPlate (DigitalHub 25, mostly curtain-wall
+glazing infill).
+
+**Fix.** All 10 types added to `_SUPPORTED_TYPES`/`_PALETTE`/`_FALLBACK_DIMENSIONS`/
+`_PER_TYPE_LIMITS` (each limit set comfortably above every real count found, so nothing is silently
+excluded), following D-039's own "typical real material" palette intent -- structural
+(column/beam/member/footing) get concrete/steel-toned grays, IfcRailing a metallic tone,
+IfcFurnishingElement a wood tone, IfcCovering a light finish tone, IfcBuildingElementProxy a neutral
+generic tone. `IfcSpace` is the one semantically different addition: it represents a room *volume*,
+not a solid object, so it renders fully translucent (`opacity: 0.12`) rather than opaque, and is
+**excluded from direct-click picking** (`IfcViewer.tsx`) -- a space's volume typically spans an
+entire room floor-to-ceiling, and being pickable would mean nearly every click inside a room hits
+the space instead of whatever the owner actually meant (a wall, door, piece of furniture). Spaces
+stay in the scene and in `elementMeshesRef` (so an Evidence citation can still find and highlight
+one), just outside the raycaster's own candidate list. `IfcPlate` gets a glass-like translucent
+treatment distinct from `IfcWindow`.
+
+**Verification.** A new test independently inventories each real IFC file (bypassing
+`mesh_elements` entirely) and asserts every element of every one of the 10 new types appears in
+`mesh_elements`'s own output at its real count, for both buildings -- confirmed to genuinely fail
+pre-fix (git-stashed `repository.py`, reran: `AssertionError: expected all 21 real IfcSpace
+element(s) ... found 0`) and pass post-fix. Live-verified via the real `viewer-mesh` endpoint
+against Duplex: all 14 element types now present with counts matching the independent inventory
+exactly (237 total elements, up from 121 before this fix); confirmed in the browser that normal
+element picking (walls, etc.) still works correctly with the new types present in the scene, with
+no crash or interference. 333 tests pass (332 + 1 new); `ruff` clean; `npm run build` clean.

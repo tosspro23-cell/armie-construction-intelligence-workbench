@@ -13,12 +13,14 @@ apart on anything but geometry representation.
 
 from __future__ import annotations
 
+from collections import Counter
 from pathlib import Path
 
 from app.tools.ifc.repository import IfcRepository
 
 ROOT = Path(__file__).resolve().parents[1]
 DUPLEX_IFC = ROOT / "demo_data" / "projects" / "duplex" / "Duplex_A_20110907.ifc"
+DIGITALHUB_IFC = ROOT / "demo_data" / "projects" / "digitalhub" / "DigitalHub_FM-ARC_v2.ifc"
 DEMO_IFC = ROOT / "demo_data" / "armie_demo.ifc"
 
 
@@ -99,3 +101,40 @@ def test_mesh_elements_agrees_with_viewer_elements_on_identity_and_material_fiel
         assert mesh_item["is_external"] == viewer_item["is_external"]
         assert mesh_item["entity_type"] == viewer_item["entity_type"]
         assert mesh_item["global_id"] == viewer_item["global_id"]
+
+
+def test_mesh_elements_covers_every_real_element_type_found_in_both_dataset_pack_buildings():
+    """D-054: owner-reported, 2026-09-16 -- asked a real question naming an
+    IfcSpace and found its citation didn't highlight in the 3D view,
+    because `_SUPPORTED_TYPES` only ever covered the original 6
+    synthetic-fixture types (Wall/Slab/Door/Window/Stair/Roof). A real
+    inventory of both buildings found 10 more real, substantial types
+    this viewer never rendered at all. This test independently inventories
+    each real IFC file (bypassing `mesh_elements` entirely) and asserts
+    every element of every one of the 10 new types appears in
+    `mesh_elements`'s own output -- not merely that the type is
+    *mentioned* in `_SUPPORTED_TYPES`, which could pass even if the
+    per-type limit silently excluded every real instance.
+    """
+    new_types = (
+        "IfcSpace", "IfcColumn", "IfcBeam", "IfcMember", "IfcRailing",
+        "IfcCovering", "IfcFurnishingElement", "IfcBuildingElementProxy",
+        "IfcFooting", "IfcPlate",
+    )
+    for path in (DUPLEX_IFC, DIGITALHUB_IFC):
+        import ifcopenshell
+
+        model = ifcopenshell.open(str(path))
+        repository = IfcRepository(path)
+        mesh_counts = Counter(item["entity_type"] for item in repository.mesh_elements)
+        checked_any = False
+        for entity_type in new_types:
+            real_count = len(model.by_type(entity_type))
+            if real_count == 0:
+                continue
+            checked_any = True
+            assert mesh_counts[entity_type] == real_count, (
+                f"{path.name}: expected all {real_count} real {entity_type} element(s) in mesh_elements, "
+                f"found {mesh_counts[entity_type]}"
+            )
+        assert checked_any, f"{path.name} unexpectedly has none of the D-054 types -- test would be vacuous"

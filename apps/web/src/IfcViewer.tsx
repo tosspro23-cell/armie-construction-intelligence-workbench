@@ -100,6 +100,28 @@ const MATERIAL_BY_TYPE: Record<string, MaterialProps> = {
   IfcSlab: { opacity: 1, roughness: 0.92, metalness: 0, transparent: false, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 },
   IfcStair: { opacity: 1, roughness: 0.85, metalness: 0, transparent: false },
   IfcRoof: { opacity: 1, roughness: 0.8, metalness: 0, transparent: false },
+  // D-054: owner-reported, 2026-09-16 -- 10 real, substantial element
+  // types present in both Dataset Pack buildings (rooms/columns/beams/
+  // members/railings/coverings/furniture/generic proxies/footings/
+  // curtain-wall plates) were never rendered at all, so a citation
+  // naming one of them had nothing to highlight. IfcSpace specifically
+  // represents a room *volume*, not a solid object -- kept translucent
+  // (and excluded from direct-click picking below) so it reads as a
+  // boundary overlay rather than an opaque box obscuring everything
+  // inside it. IfcPlate (DigitalHub's curtain-wall glazing infill) gets
+  // a glass-like translucent treatment distinct from IfcWindow.
+  // Everything else is ordinary opaque matte, matching the structural/
+  // finish materials the palette (repository.py) already suggests.
+  IfcSpace: { opacity: 0.12, roughness: 0.9, metalness: 0, transparent: true },
+  IfcColumn: { opacity: 1, roughness: 0.85, metalness: 0.1, transparent: false },
+  IfcBeam: { opacity: 1, roughness: 0.85, metalness: 0.1, transparent: false },
+  IfcMember: { opacity: 1, roughness: 0.85, metalness: 0.05, transparent: false },
+  IfcRailing: { opacity: 1, roughness: 0.4, metalness: 0.6, transparent: false },
+  IfcCovering: { opacity: 1, roughness: 0.9, metalness: 0, transparent: false },
+  IfcFurnishingElement: { opacity: 1, roughness: 0.8, metalness: 0, transparent: false },
+  IfcBuildingElementProxy: { opacity: 1, roughness: 0.85, metalness: 0, transparent: false },
+  IfcFooting: { opacity: 1, roughness: 0.95, metalness: 0, transparent: false },
+  IfcPlate: { opacity: 0.5, roughness: 0.1, metalness: 0.2, transparent: true },
 };
 // D-041: only a real, IFC-sourced `is_external === true` (never a guessed
 // heuristic -- confirmed present on every wall in both real Dataset Pack
@@ -277,7 +299,16 @@ export function IfcViewer({ onSelection, onSnapshot, onStatus, highlightedGlobal
           if (element.global_id) elementMeshesRef.current.set(element.global_id, mesh);
           scene.add(mesh);
           bounds.expandByObject(mesh);
-          pickables.push(mesh);
+          // D-054: an IfcSpace's volume typically spans an entire room,
+          // floor to ceiling -- if pickable, a click anywhere inside that
+          // room would very likely hit the space itself rather than
+          // whatever the owner actually meant to click (a wall, door,
+          // furniture), since existing hit-preference logic below only
+          // special-cases wall-vs-door/window occlusion, not this. Spaces
+          // stay in the scene (and in `elementMeshesRef`, so an Evidence
+          // citation can still highlight one) but out of direct-click
+          // picking entirely.
+          if (element.entity_type !== "IfcSpace") pickables.push(mesh);
           if (index % 40 === 0) {
             publishStatus({ phase: "parsing", message: `Building browser geometry from real IFC mesh data: ${Math.round(((index + 1) / total) * 100)}%`, progress: Math.round(((index + 1) / total) * 100) });
           }

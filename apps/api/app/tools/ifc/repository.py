@@ -21,11 +21,40 @@ class IfcRepository:
     # representations can never silently drift apart on which types/counts/
     # colors they cover -- factored out here rather than duplicated inline
     # the way they were before this milestone.
-    _SUPPORTED_TYPES = ("IfcWall", "IfcSlab", "IfcDoor", "IfcWindow", "IfcStair", "IfcRoof")
+    # D-054: owner-reported, 2026-09-16 -- asked a real question about
+    # IfcSpace and found its citation didn't highlight in the 3D view.
+    # Root cause: this list only ever covered the original 6 synthetic-
+    # fixture types. A real inventory of both Dataset Pack buildings
+    # (`model.by_type(t)` counts, cross-checked that every single instance
+    # of each new type below actually has real, non-empty
+    # `ifcopenshell.geom` geometry -- no fallback-box gaps) found real,
+    # substantial counts of 10 more types this viewer never rendered at
+    # all: IfcSpace (Duplex 21, DigitalHub 64), IfcColumn (DigitalHub 62),
+    # IfcBeam (8/14), IfcMember (4/80 -- DigitalHub's is not a rounding
+    # error), IfcRailing (4/13), IfcCovering (13/38), IfcFurnishingElement
+    # (Duplex 61), IfcBuildingElementProxy (DigitalHub 150 -- this
+    # building's single largest uncovered type), IfcFooting (Duplex 7),
+    # IfcPlate (DigitalHub 25, largely curtain-wall glazing infill). A
+    # citation naming any of these was always answerable by the query
+    # layer (which reads `model.by_type(...)` directly, unrelated to this
+    # list) but had no corresponding mesh for the 3D view to highlight --
+    # this list is what the *viewer* renders, not what's queryable.
+    _SUPPORTED_TYPES = (
+        "IfcWall", "IfcSlab", "IfcDoor", "IfcWindow", "IfcStair", "IfcRoof",
+        "IfcSpace", "IfcColumn", "IfcBeam", "IfcMember", "IfcRailing", "IfcCovering",
+        "IfcFurnishingElement", "IfcBuildingElementProxy", "IfcFooting", "IfcPlate",
+    )
     # The source has hundreds of walls. A bounded representative geometry set
     # keeps the browser responsive while including every door, window, stair,
-    # slab and roof for demonstrable element selection.
-    _PER_TYPE_LIMITS = {"IfcWall": 160, "IfcSlab": 50, "IfcDoor": 100, "IfcWindow": 120, "IfcStair": 30, "IfcRoof": 10}
+    # slab and roof for demonstrable element selection. D-054's additions are
+    # each capped comfortably above every real count found above, so no real
+    # instance of any of these types in either Dataset Pack building is
+    # currently excluded by this limit.
+    _PER_TYPE_LIMITS = {
+        "IfcWall": 160, "IfcSlab": 50, "IfcDoor": 100, "IfcWindow": 120, "IfcStair": 30, "IfcRoof": 10,
+        "IfcSpace": 70, "IfcColumn": 70, "IfcBeam": 20, "IfcMember": 90, "IfcRailing": 20, "IfcCovering": 45,
+        "IfcFurnishingElement": 70, "IfcBuildingElementProxy": 160, "IfcFooting": 10, "IfcPlate": 30,
+    }
     # D-039: owner-requested palette tuning, 2026-09-15 -- the original
     # colors were a schematic "tell the types apart" scheme (fairly
     # saturated blues/purples), not chosen to suggest any real material.
@@ -44,6 +73,15 @@ class IfcRepository:
     # very pale glass blue to a more saturated one; the frontend also
     # raised window opacity/metalness to give it a more definite
     # glassy sheen while staying clearly translucent.
+    # D-054: new entries follow the same "typical real material" intent as
+    # D-039 above, not new data read from the file -- structural members
+    # (column/beam/member/footing) get concrete/steel-toned grays distinct
+    # from walls/slabs; IfcSpace gets a pale cyan tint since it represents
+    # a room *volume*, not a solid material, and is rendered fully
+    # translucent (see IfcViewer.tsx's matching material entry) so it
+    # reads as a boundary overlay, not another solid object; IfcPlate
+    # (DigitalHub's curtain-wall glazing infill) reuses a glass-like tone
+    # distinct from IfcWindow so the two remain visually told apart.
     _PALETTE = {
         "IfcWall": "#cdc6b8",
         "IfcSlab": "#a49c8f",
@@ -51,6 +89,16 @@ class IfcRepository:
         "IfcWindow": "#6fb4d6",
         "IfcStair": "#b3a89d",
         "IfcRoof": "#6f5b48",
+        "IfcSpace": "#8fd0e8",
+        "IfcColumn": "#8f8b86",
+        "IfcBeam": "#7d7972",
+        "IfcMember": "#95918c",
+        "IfcRailing": "#a8b0b8",
+        "IfcCovering": "#c9c3ba",
+        "IfcFurnishingElement": "#8a6f52",
+        "IfcBuildingElementProxy": "#b0aaa0",
+        "IfcFooting": "#736f68",
+        "IfcPlate": "#a9d4e6",
     }
     _FALLBACK_DIMENSIONS = {
         "IfcWall": [0.2, 3.0, 3.0],
@@ -59,6 +107,16 @@ class IfcRepository:
         "IfcSlab": [4.0, 4.0, 0.2],
         "IfcStair": [2.0, 3.0, 2.5],
         "IfcRoof": [4.0, 4.0, 0.3],
+        "IfcSpace": [3.0, 3.0, 2.7],
+        "IfcColumn": [0.4, 0.4, 3.0],
+        "IfcBeam": [0.3, 3.0, 0.3],
+        "IfcMember": [0.15, 0.15, 2.0],
+        "IfcRailing": [1.0, 0.05, 1.0],
+        "IfcCovering": [2.0, 2.0, 0.05],
+        "IfcFurnishingElement": [0.8, 0.8, 0.9],
+        "IfcBuildingElementProxy": [1.0, 1.0, 1.0],
+        "IfcFooting": [1.0, 1.0, 0.5],
+        "IfcPlate": [1.0, 1.0, 0.02],
     }
 
     def __init__(self, path: Path) -> None:
