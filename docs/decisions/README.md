@@ -2232,3 +2232,47 @@ essentially unchanged (1.1fr of 3.5fr = 31.4%).
 
 **Verification.** `npm run build` clean; confirmed live in the browser that the three columns now
 sit visibly closer together. CSS-only change, 325 backend tests unaffected.
+
+## D-051 — SPEC-M13: multi-document corpus + AI Search retrieval for the real Dataset Pack buildings
+
+Owner-requested, 2026-09-16: enrich DigitalHub and Duplex (D-036 through D-044's real Dataset Pack
+buildings) with a full multi-document corpus and demonstrate Azure AI Search retrieval against
+them, with a real, measured benchmark eval -- "as many business scenarios as possible," not a
+narrow single-question demo.
+
+**OD-48, resolved.** `_retrieve_relevant_documents` (`apps/api/app/agent/graph.py`) carried an
+explicit SPEC-M9 gate, `project_id != "demo": return []` -- a deliberate exclusion, not an
+oversight. The owner's own request (retrieval demonstrated against real Dataset Pack buildings) is
+not achievable without relaxing it, so this milestone does so, flagged explicitly per this repo's
+convention (matching SPEC-M11's OD-44) rather than silently changed. Verified before relaxing it,
+not assumed safe: the shared Azure AI Search index has no `project_id` field at all -- what
+actually prevents cross-project bleed is the caller's own `name in analyzers` filter against the
+*current* project's document set, unaffected by which project string reached this gate. A new
+CI-safe test (`test_retrieval_now_runs_for_a_non_demo_project`) proves the gate is genuinely gone
+via a call-count assertion, confirmed to fail against the pre-fix code (git-stashed and re-run) and
+pass against the fix.
+
+**What shipped.** `generate_duplex_corpus.py`/`generate_digitalhub_corpus.py`: 7 new
+ARMIE-generated synthetic documents per building, reading each real IFC directly for grounding
+(real storeys for the 3 per-storey distribution schedules, real door/window Tags for the hardware
+spec sheets and the RFI recall-failure fixture) rather than inventing a new retrieval-demonstration
+mechanism -- SPEC-M6's own already-proven precision-collision ("Panel-A" repeated across two
+schedules with different values) and recall-failure (a real-Tag-tied value stated only in prose, in
+no table) fixture design is reused verbatim, reskinned per building. Every new filename is
+project-prefixed (`digitalhub_...`/`duplex_...`) to guarantee no basename collision in the shared,
+non-project-scoped Search index -- verified directly across all 35 documents now in
+`projects_registry.json` (demo + westgate + digitalhub + duplex), zero collisions.
+`source_set_id` bumped for both projects (OD-41: a content change gets a new id, never edited
+behind an existing one). `index_document_corpus.py` extended to index all 14 new documents
+alongside the existing 18, into the one shared index.
+
+**Verification.** Every new schedule/spec-sheet table reads correctly via
+`DocumentAnalyzer._read_table` with the exact expected columns/rows; both narrative documents (RFI,
+meeting minutes) per project correctly return no table; the precision-collision question for each
+project produces a zero-model-call `clarification_required` naming both documents, mirroring
+SPEC-M6's own proven collision test exactly -- plus a control test proving the same document set
+answers a non-colliding label cleanly (the collision is a genuine ambiguity finding, not an
+artifact of the fixture always failing). 332 tests pass (325 + 7 new across two files); `ruff`
+clean. The live benchmark report (real measured Azure AI Search scores against both projects,
+matching `docs/reports/2026-09-10-m7-azure-ai-search-baseline.md`'s own methodology and rigor) is
+`docs/reports/2026-09-16-m13-dataset-pack-retrieval-baseline.md`.

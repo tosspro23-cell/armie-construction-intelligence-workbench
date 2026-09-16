@@ -103,6 +103,39 @@ def build_index(index_client, index_name: str, vector_dimensions: int) -> None:
     index_client.create_or_update_index(SearchIndex(name=index_name, fields=fields, vector_search=vector_search))
 
 
+async def _embed_with_retry(embedding_provider, text: str, pdf_file: str, max_attempts: int = 6):
+    """SPEC-M13: found live indexing 35 documents (up from the original 18)
+    against `armiem3-openai`'s `text-embedding-3-small` deployment
+    (S0/GlobalStandard, capacity 1) -- the deployment's own low
+    requests-per-minute ceiling was exceeded partway through the batch,
+    something the original 18-document corpus never triggered. Azure
+    OpenAI's `RateLimitError` reports its own suggested wait via the
+    `Retry-After` header; honored directly here instead of a blind fixed
+    sleep, with an exponential-backoff fallback if that header is absent.
+    A `RateLimitError` immediately followed by an `APITimeoutError` was
+    also observed live (the sustained rate-limited state appears to leave
+    the connection in a bad state for one more call) -- retried the same
+    way, with a fixed short wait since it is not a quota signal.
+    """
+    import openai
+
+    for attempt in range(max_attempts):
+        try:
+            return await embedding_provider.embed(text)
+        except openai.RateLimitError as error:
+            if attempt == max_attempts - 1:
+                raise
+            retry_after = getattr(getattr(error, "response", None), "headers", {}).get("Retry-After")
+            wait_seconds = float(retry_after) if retry_after else 2 ** attempt * 5
+            print(f"  rate limited embedding {pdf_file} -- waiting {wait_seconds:.0f}s (attempt {attempt + 1}/{max_attempts})")
+            await asyncio.sleep(wait_seconds)
+        except openai.APITimeoutError:
+            if attempt == max_attempts - 1:
+                raise
+            print(f"  timed out embedding {pdf_file} -- waiting 15s (attempt {attempt + 1}/{max_attempts})")
+            await asyncio.sleep(15)
+
+
 async def index_corpus(pdf_files: list[str]) -> None:
     from app.config import get_settings
     from app.providers.factory import get_embedding_provider
@@ -122,13 +155,22 @@ async def index_corpus(pdf_files: list[str]) -> None:
     search_client = SearchClient(endpoint=settings.azure_search_endpoint, index_name=settings.azure_search_index_name, credential=credential)
 
     documents = []
-    for pdf_file in pdf_files:
+    for index, pdf_file in enumerate(pdf_files):
         path = settings.data_dir / pdf_file
         if not path.exists():
             print(f"skip (missing): {pdf_file}")
             continue
+        # SPEC-M13: found live -- even with `_embed_with_retry`'s backoff,
+        # firing every embed call back-to-back re-triggered this
+        # deployment's (S0/GlobalStandard, capacity 1) rate limit almost
+        # immediately after each wait, since nothing paced the *successful*
+        # calls, only the failed ones. A fixed gap between every call,
+        # not just after a 429, keeps sustained throughput under whatever
+        # this tier's real ceiling is instead of bursting into it.
+        if index > 0:
+            await asyncio.sleep(20)
         text = _extract_text(path)
-        vector = await embedding_provider.embed(text)
+        vector = await _embed_with_retry(embedding_provider, text, pdf_file)
         # `filename` stores the bare basename, not the pdf_files-relative
         # path (e.g. "schedule_l2_east.pdf", not "corpus/schedule_l2_east.
         # pdf") -- this must match ServiceContainer.document_analyzers'
