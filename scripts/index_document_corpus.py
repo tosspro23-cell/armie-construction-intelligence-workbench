@@ -30,11 +30,23 @@ sys.path.insert(0, str(ROOT / "apps" / "api"))
 
 DOCUMENT_TYPES = {
     "armie_demo_schedule.pdf": "schedule",
+    "digitalhub_schedule.pdf": "schedule",
+    "duplex_schedule.pdf": "schedule",
     "schedule_": "schedule",
+    "digitalhub_schedule_": "schedule",
+    "duplex_schedule_": "schedule",
     "door_spec_sheet": "spec_sheet",
     "window_spec_sheet": "spec_sheet",
+    "digitalhub_door_spec_sheet": "spec_sheet",
+    "digitalhub_window_spec_sheet": "spec_sheet",
+    "duplex_door_spec_sheet": "spec_sheet",
+    "duplex_window_spec_sheet": "spec_sheet",
     "rfi_log": "rfi",
+    "digitalhub_rfi_log": "rfi",
+    "duplex_rfi_log": "rfi",
     "meeting_minutes": "meeting_minutes",
+    "digitalhub_meeting_minutes": "meeting_minutes",
+    "duplex_meeting_minutes": "meeting_minutes",
 }
 
 
@@ -147,10 +159,13 @@ async def index_corpus(pdf_files: list[str]) -> None:
 
 
 if __name__ == "__main__":
-    # The full corpus (SPEC-M6's 18 documents), independent of whatever a
-    # given deployment's PDF_FILES happens to be set to -- indexing is an
-    # operator action against the fixture, not something that should
-    # silently track a runtime setting meant for something else.
+    # The full corpus across every project that has one (SPEC-M6's 18 demo
+    # documents plus SPEC-M13's 7-per-building DigitalHub/Duplex corpora),
+    # independent of whatever a given deployment's PDF_FILES happens to be
+    # set to -- indexing is an operator action against the fixture, not
+    # something that should silently track a runtime setting meant for
+    # something else. One shared index (see this file's own header) means
+    # one shared indexing entry point, not a per-project script.
     full_corpus = [
         "armie_demo_schedule.pdf",
         *[f"corpus/{name}" for name in [
@@ -160,6 +175,18 @@ if __name__ == "__main__":
             "window_spec_sheet_package_a.pdf", "window_spec_sheet_package_b.pdf",
             "rfi_log_047.pdf", "rfi_log_052.pdf", "rfi_log_058.pdf", "rfi_log_061.pdf",
             "meeting_minutes_2026_02_10.pdf", "meeting_minutes_2026_02_24.pdf", "meeting_minutes_2026_03_10.pdf",
+        ]],
+        "projects/digitalhub/digitalhub_schedule.pdf",
+        *[f"projects/digitalhub/corpus/{name}" for name in [
+            "digitalhub_schedule_b01.pdf", "digitalhub_schedule_e00.pdf", "digitalhub_schedule_e01.pdf",
+            "digitalhub_door_spec_sheet.pdf", "digitalhub_window_spec_sheet.pdf",
+            "digitalhub_rfi_log_001.pdf", "digitalhub_meeting_minutes_2026_02_10.pdf",
+        ]],
+        "projects/duplex/duplex_schedule.pdf",
+        *[f"projects/duplex/corpus/{name}" for name in [
+            "duplex_schedule_level1.pdf", "duplex_schedule_level2.pdf", "duplex_schedule_roof.pdf",
+            "duplex_door_spec_sheet.pdf", "duplex_window_spec_sheet.pdf",
+            "duplex_rfi_log_001.pdf", "duplex_meeting_minutes_2026_02_10.pdf",
         ]],
     ]
     asyncio.run(index_corpus(full_corpus))
