@@ -39,8 +39,50 @@ ELEMENT_ALIASES = {
     "furniture": "IfcFurnishingElement", "furnishing": "IfcFurnishingElement", "furnishings": "IfcFurnishingElement",
     "footing": "IfcFooting", "footings": "IfcFooting",
     "plate": "IfcPlate", "plates": "IfcPlate",
+    # SPEC-M14: Simplified Chinese aliases for the count/group-by fast path.
+    # Bare "板" and "面板" are deliberately absent -- both are genuinely
+    # ambiguous with a PDF electrical panel/board elsewhere in this
+    # codebase (AgentService._resolve_context's own "这张图里的板有多少"
+    # clarification exists specifically because of this), so only the
+    # unambiguous compound "楼板" (floor slab) is aliased. "构件" is also
+    # absent: it is this codebase's own generic Chinese fallback noun for
+    # "unknown element type" (graph.py's response-formatting noun maps,
+    # D-055), not a specific word for IfcMember -- aliasing it here would
+    # make a generic "构件有多少" collide with the narrow IfcMember type.
+    "门": "IfcDoor",
+    "窗": "IfcWindow", "窗户": "IfcWindow",
+    "墙": "IfcWall", "墙体": "IfcWall",
+    "空间": "IfcSpace", "房间": "IfcSpace",
+    "楼梯": "IfcStair",
+    "楼板": "IfcSlab",
+    "屋顶": "IfcRoof",
+    "柱": "IfcColumn", "柱子": "IfcColumn",
+    "梁": "IfcBeam",
+    "栏杆": "IfcRailing",
+    "饰面": "IfcCovering",
+    "家具": "IfcFurnishingElement",
+    "基础": "IfcFooting",
 }
 SUPPORTED_ENTITY_TYPES = set(ELEMENT_ALIASES.values())
+
+
+def _alias_search(term: str, text: str) -> re.Match[str] | None:
+    """Find an `ELEMENT_ALIASES` key in already-lowercased/normalized text.
+
+    SPEC-M14: `\\b` word-boundary regex (used here for every ASCII term,
+    unchanged) never matches inside unsegmented Chinese text -- adjacent
+    ideographs are all `\\w` under Python 3's Unicode-aware `re`, so there
+    is never a boundary between two of them. Verified empirically:
+    `re.search(r"\\b门\\b", "这个项目里有多少扇门？")` is `False` even though
+    "门" is genuinely present. A non-ASCII term is matched as a bare
+    substring instead -- the same technique this file's own
+    `cross_source_reconciliation_requested`/`cross_source_join_requested`
+    already use for their own Chinese markers, generalized here rather
+    than reinvented.
+    """
+    escaped = re.escape(term)
+    pattern = escaped if not term.isascii() else rf"\b{escaped}\b"
+    return re.search(pattern, text)
 
 
 def cross_source_reconciliation_requested(question: str) -> bool:
@@ -154,7 +196,7 @@ def fast_path_coverage(question: str, context: dict, has_viewer_context: bool) -
     """
     normalized = " ".join(question.strip().lower().split())
     ascii_only = question.isascii()
-    entities = [key for key in ELEMENT_ALIASES if re.search(rf"\b{re.escape(key)}\b", normalized)]
+    entities = [key for key in ELEMENT_ALIASES if _alias_search(key, normalized)]
     unique_entities = sorted({ELEMENT_ALIASES[key] for key in entities})
     simple_patterns = (
         r"how many (doors|windows|walls|spaces|stairs|slabs|openings|glazed openings) (are )?(there )?(in (the )?project)?\??",
@@ -225,7 +267,7 @@ def heuristic_multi_plan(question: str, context: dict, has_viewer_context: bool,
     count_intent = bool(re.search(r"\b(how many|count|number of|give me the number|there are)\b", normalized))
     entity_types: list[str] = []
     for alias, entity_type in ELEMENT_ALIASES.items():
-        if re.search(rf"\b{re.escape(alias)}\b", normalized) and entity_type not in entity_types:
+        if _alias_search(alias, normalized) and entity_type not in entity_types:
             entity_types.append(entity_type)
     if not entity_types and grouping:
         for item in context.get("previous_subplans", []):
@@ -408,7 +450,7 @@ def heuristic_plan(question: str, context: dict, has_viewer_context: bool, sourc
             match_status="complete" if has_viewer_context else "partial",
         )
 
-    entity_type = next((value for key, value in ELEMENT_ALIASES.items() if re.search(rf"\b{re.escape(key)}\b", lowered)), None)
+    entity_type = next((value for key, value in ELEMENT_ALIASES.items() if _alias_search(key, lowered)), None)
     is_deictic = any(term in lowered for term in DEICTIC_TERMS)
     if is_deictic and context.get("active_entity_type"):
         return QueryPlan(
