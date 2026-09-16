@@ -144,7 +144,14 @@ def canonicalize_subplan(plan: QueryPlan, context: dict[str, Any] | None = None)
     # happens to match first -- harmless to execution (which ignores this
     # field for this intent) but a misleading audited plan.
     if plan.intent != "reconciliation" and not recovered_entity:
-        match = re.search(r"\b(IfcDoor|IfcWindow|IfcWall|IfcSpace|IfcStair|IfcSlab)\b", rationale)
+        # D-055: kept in sync with router.SUPPORTED_ENTITY_TYPES (minus
+        # IfcBuildingElementProxy, which has no query alias there either --
+        # see that file's own comment for why).
+        match = re.search(
+            r"\b(IfcDoor|IfcWindow|IfcWall|IfcSpace|IfcStair|IfcSlab|IfcRoof|IfcColumn|IfcBeam|IfcMember|"
+            r"IfcRailing|IfcCovering|IfcFurnishingElement|IfcFooting|IfcPlate)\b",
+            rationale,
+        )
         recovered_entity = match.group(1) if match else None
     recovered_operation = plan.operation
     if not recovered_operation:
@@ -270,7 +277,11 @@ def _reconcile_model_declared_semantics(plans: list[QueryPlan], multi_plan: Mult
     if multi_plan.intent in {"unsupported", "reconciliation"} or any(plan.intent == "unsupported" for plan in plans):
         return plans, []
     declared_text = " ".join(filter(None, [multi_plan.normalized_request, multi_plan.rationale, *(plan.rationale for plan in plans)]))
-    declared_entities = list(dict.fromkeys(re.findall(r"\bIfc(?:Door|Window|Wall|Space|Stair|Slab)\b", declared_text)))
+    # D-055: kept in sync with router.SUPPORTED_ENTITY_TYPES.
+    declared_entities = list(dict.fromkeys(re.findall(
+        r"\bIfc(?:Door|Window|Wall|Space|Stair|Slab|Roof|Column|Beam|Member|Railing|Covering|FurnishingElement|Footing|Plate)\b",
+        declared_text,
+    )))
     # The planner's normalized request is an internal semantic artefact, not
     # raw end-user language.  Smaller local models sometimes state "doors"
     # there while leaving the enum field empty.  Recover only this finite IFC
@@ -284,6 +295,15 @@ def _reconcile_model_declared_semantics(plans: list[QueryPlan], multi_plan: Mult
             "spaces": "IfcSpace", "space": "IfcSpace", "rooms": "IfcSpace", "room": "IfcSpace",
             "stairs": "IfcStair", "stair": "IfcStair",
             "slabs": "IfcSlab", "slab": "IfcSlab",
+            "roofs": "IfcRoof", "roof": "IfcRoof",
+            "columns": "IfcColumn", "column": "IfcColumn",
+            "beams": "IfcBeam", "beam": "IfcBeam",
+            "members": "IfcMember", "member": "IfcMember",
+            "railings": "IfcRailing", "railing": "IfcRailing",
+            "coverings": "IfcCovering", "covering": "IfcCovering",
+            "furniture": "IfcFurnishingElement", "furnishings": "IfcFurnishingElement", "furnishing": "IfcFurnishingElement",
+            "footings": "IfcFooting", "footing": "IfcFooting",
+            "plates": "IfcPlate", "plate": "IfcPlate",
         }
         semantic_lower = declared_text.lower()
         declared_entities = [entity for word, entity in semantic_entity_words.items() if re.search(rf"\b{word}\b", semantic_lower)]

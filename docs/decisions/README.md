@@ -2407,3 +2407,78 @@ against Duplex: all 14 element types now present with counts matching the indepe
 exactly (237 total elements, up from 121 before this fix); confirmed in the browser that normal
 element picking (walls, etc.) still works correctly with the new types present in the scene, with
 no crash or interference. 333 tests pass (332 + 1 new); `ruff` clean; `npm run build` clean.
+
+## D-055 — D-054's 10 new viewer types were rendered but not queryable; a highlighted IfcSpace was
+real but visually imperceptible
+
+Owner-reported, 2026-09-16, same session as D-054: furniture and the other newly-rendered element
+types "look great" in the 3D view, but asking a natural-language question about any of them (e.g.
+"can these new components be calculated?") behaved as if there were no calculation support at all;
+separately, clicking a space still didn't visibly show anything, even via an Evidence citation.
+Also asked to confirm the newly-rendered elements are genuinely native to the two real Dataset Pack
+IFC files, not fabricated.
+
+**Root cause #1 (the "no calculation" report): a second, independent whitelist, never updated
+alongside D-054.** D-054 only changed what `IfcRepository` renders in the *viewer*
+(`_SUPPORTED_TYPES` et al.). A completely separate gate controls what is *queryable*:
+`router.py`'s `ELEMENT_ALIASES`/`SUPPORTED_ENTITY_TYPES` drives (a) heuristic keyword recognition,
+(b) the exact list the semantic planner's own prompt is told are the only valid entity types, and
+(c) a hard capability-gate check (`capability_gate`) that rejects any plan naming a type outside
+this set. None of D-054's 10 new types (or the pre-existing `IfcRoof` gap) were ever added here, so
+"how many pieces of furniture are there?" fell straight through to `unsupported` even though the
+viewer could already render and highlight furniture -- exactly matching the owner's own test.
+`IfcRepository._normalize_entity_type` and the query-execution layer underneath it were confirmed
+generic already (no whitelist there at all); the whitelist problem is entirely at the planning
+layer, and it turned out to be duplicated in **six** places across `router.py`, `plan_validation.py`
+(two independent entity-recovery heuristics), and `graph.py` (a follow-up-delta recovery dict plus
+two Chinese noun-label maps for response rendering) -- a pre-existing consistency problem this fix
+does not restructure, only extends in every place a real gap was found.
+
+**Fix #1.** All 10 D-054 types plus `IfcRoof` added, by natural English noun, to every one of the
+six lists above. `IfcBuildingElementProxy` is a deliberate, documented exception in every list: it
+renders in the viewer (D-054) because it's IFC's own generic catch-all for elements a source export
+left unclassified, but it has no natural single English or Chinese word a user would name it by, so
+it stays un-queryable by design. The Chinese count-response formatter also hardcoded "扇" (a measure
+word grammatically specific to door/window leaves) for every entity type; it now uses "扇" only for
+door/window and the generic "个" for everything else.
+
+**Root cause #2 (the space still "doesn't show" on click): a real, separate rendering defect,**
+not the deliberate D-054 pickables exclusion the owner had already been told about. `applyHighlightSet`
+(`IfcViewer.tsx`) correctly finds an IfcSpace's mesh via `elementMeshesRef` and sets its emissive
+color -- the code path D-054 fixed does work -- but IfcSpace renders at `opacity: 0.12` (deliberately
+near-invisible, so a room volume doesn't look like a solid box), and an emissive glow on a material
+that translucent is alpha-blended away to almost nothing against the scene background. The highlight
+was real and technically applied; it just wasn't visible. Confirmed directly by reading the live
+Three.js mesh's material out of `elementMeshesRef` through React's fiber tree in a running browser
+session: before the fix, a citation click set `emissive` to the highlight blue but left `opacity`
+at 0.12; after the fix, the same click yields `opacity: 0.65, emissive: 0x4f9df5`, and toggling the
+same citation off restores `opacity: 0.12, emissive: 0x000000` exactly.
+
+**Fix #2.** `applyHighlightSet` now remembers each mesh's original opacity once (`material.userData
+.baseOpacity`) and, while a mesh is lit, raises `opacity` to `max(baseOpacity, 0.65)`; unlit meshes
+are restored to their own original opacity, so opaque materials (opacity 1) are completely
+unaffected and only translucent ones (`IfcSpace` 0.12, `IfcPlate` 0.5) are boosted enough for the
+highlight to actually read as lit.
+
+**Root cause #3 (are these elements real): yes, already established in D-054's own investigation** --
+a direct `ifcopenshell` inventory of both real IFC files found every one of these types with real,
+non-fallback geometry at the exact counts D-054 documents (e.g. DigitalHub: 62 columns, 14 beams,
+64 spaces; Duplex: 61 furnishing elements, 7 footings). Nothing in this fix or D-054 fabricates
+elements; both changes only affect whether pre-existing real elements are rendered and queryable.
+
+**Verification.** New `tests/test_router_contract.py` cases: each of the 8 newly-aliased entity
+words (roof/column/beam/member/railing/covering/footing/plate) resolves through `heuristic_plan` to
+the correct `entity_type` and passes `capability_gate`; a dedicated "furniture"/"furnishings" case
+using the owner's own wording; a negative case asserting `IfcBuildingElementProxy` deliberately has
+no alias. Confirmed to genuinely fail pre-fix: with the six lists reverted (temporary
+`git stash` of only `router.py`/`plan_validation.py`/`graph.py`, keeping the new tests), all 9 new
+cases failed with `AssertionError: assert 'unsupported' == 'ifc'` -- reapplying the fix passed all
+of them. Live end-to-end verification (not just unit tests) against the real DigitalHub and Duplex
+IFC files via a direct `AgentService.invoke()` harness confirmed correct, zero-model-call
+`answered` dispositions with real counts matching the D-054 inventory exactly (e.g. DigitalHub
+columns: 62, beams: 14, railings: 13, coverings: 38, spaces: 64; Duplex furnishing elements: 61,
+footings: 7, members: 4); repeated through the real browser UI end-to-end (local API + web dev
+server, real project data, real click-driven flow), confirming the same answers render correctly
+in the Conversation panel with a real Decision Trace. The opacity fix was verified as described
+above via direct Three.js material inspection, not just visual inspection of a screenshot. 343
+tests pass (333 + 10 new); `ruff` clean; `npm run build` clean.

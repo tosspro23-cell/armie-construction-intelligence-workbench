@@ -191,7 +191,20 @@ export function IfcViewer({ onSelection, onSnapshot, onStatus, highlightedGlobal
   function applyHighlightSet(ids: Set<string> | undefined) {
     elementMeshesRef.current.forEach((mesh, globalId) => {
       const lit = !!ids && ids.has(globalId);
-      (mesh.material as THREE.MeshStandardMaterial).emissive.set(lit ? 0x4f9df5 : 0x000000);
+      const material = mesh.material as THREE.MeshStandardMaterial;
+      material.emissive.set(lit ? 0x4f9df5 : 0x000000);
+      // D-055: owner-reported, 2026-09-16 -- clicking an Evidence citation
+      // for an IfcSpace correctly found and lit its mesh (this function ran
+      // fine), but IfcSpace's base opacity is 0.12 (D-054, deliberately
+      // near-invisible so a room's volume doesn't look like a solid box),
+      // so the emissive glow was blended away to almost nothing -- the
+      // highlight was real but not visible. Any material translucent
+      // enough that a highlight would disappear into it (IfcSpace, and
+      // IfcPlate's glass-like 0.5) is temporarily opaqued up while lit,
+      // then restored to its normal translucency once unlit.
+      const baseOpacity = (material.userData.baseOpacity as number | undefined) ?? material.opacity;
+      material.userData.baseOpacity = baseOpacity;
+      material.opacity = lit ? Math.max(baseOpacity, 0.65) : baseOpacity;
     });
   }
   // Kept in sync below so `loadProjection` (inside the scene-setup effect,

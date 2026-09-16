@@ -408,9 +408,14 @@ Return preserve_active_storey=true only when the latest request refers to the cu
                     delta_entity_type = delta.target_entity_type
                     if not delta_entity_type:
                         normalized_semantics = (multi_plan.normalized_request or "").lower()
+                        # D-055: kept in sync with router.SUPPORTED_ENTITY_TYPES.
                         declared_entities = {
                             "door": "IfcDoor", "window": "IfcWindow", "wall": "IfcWall",
                             "space": "IfcSpace", "room": "IfcSpace", "stair": "IfcStair", "slab": "IfcSlab",
+                            "roof": "IfcRoof", "column": "IfcColumn", "beam": "IfcBeam", "member": "IfcMember",
+                            "railing": "IfcRailing", "covering": "IfcCovering",
+                            "furniture": "IfcFurnishingElement", "furnishing": "IfcFurnishingElement",
+                            "footing": "IfcFooting", "plate": "IfcPlate",
                         }
                         delta_entity_type = next(
                             (entity for term, entity in declared_entities.items() if term in normalized_semantics),
@@ -924,13 +929,27 @@ Return only a corrected MultiQueryPlan JSON object."""
                 if plan.get("source") == "ifc" and plan.get("operation") == "count":
                     import re
                     value = re.search(r"\*\*(\d+)\*\*", answer)
-                    noun = {"IfcDoor": "门", "IfcWindow": "窗", "IfcWall": "墙"}.get(plan.get("entity_type"), "构件")
+                    # D-055: kept in sync with router.SUPPORTED_ENTITY_TYPES.
+                    noun = {
+                        "IfcDoor": "门", "IfcWindow": "窗", "IfcWall": "墙", "IfcSpace": "空间",
+                        "IfcStair": "楼梯", "IfcSlab": "楼板", "IfcRoof": "屋顶", "IfcColumn": "柱",
+                        "IfcBeam": "梁", "IfcMember": "构件", "IfcRailing": "栏杆", "IfcCovering": "饰面",
+                        "IfcFurnishingElement": "家具", "IfcFooting": "基础", "IfcPlate": "面板",
+                    }.get(plan.get("entity_type"), "构件")
+                    # "扇" is grammatically specific to door/window leaves; every
+                    # other entity type uses the generic measure word "个".
+                    measure_word = {"IfcDoor": "扇", "IfcWindow": "扇"}.get(plan.get("entity_type"), "个")
                     if chinese and value:
-                        fragments.append(f"这个项目中共有 **{value.group(1)}** 扇{noun}。")
+                        fragments.append(f"这个项目中共有 **{value.group(1)}** {measure_word}{noun}。")
                     else:
                         fragments.append(answer)
                 elif plan.get("source") == "ifc" and plan.get("operation") == "group_by" and chinese:
-                    noun = {"IfcWindow": "窗户", "IfcDoor": "门"}.get(plan.get("entity_type"), "构件")
+                    noun = {
+                        "IfcWindow": "窗户", "IfcDoor": "门", "IfcWall": "墙", "IfcSpace": "空间",
+                        "IfcStair": "楼梯", "IfcSlab": "楼板", "IfcRoof": "屋顶", "IfcColumn": "柱",
+                        "IfcBeam": "梁", "IfcMember": "构件", "IfcRailing": "栏杆", "IfcCovering": "饰面",
+                        "IfcFurnishingElement": "家具", "IfcFooting": "基础", "IfcPlate": "面板",
+                    }.get(plan.get("entity_type"), "构件")
                     grouped = item.get("result_value")
                     if isinstance(grouped, dict) and plan.get("postprocess") not in {"argmax", "argmin"}:
                         fragments.append("各层" + noun + "数量：" + "；".join(f"**{group}**：**{count}**" for group, count in grouped.items()) + "。")
@@ -944,7 +963,12 @@ Return only a corrected MultiQueryPlan JSON object."""
                     records = item.get("result_value") or []
                     record = records[0] if isinstance(records, list) and records else {}
                     element = record.get("element", {}) if isinstance(record, dict) else {}
-                    label = {"IfcDoor": "门", "IfcWindow": "窗", "IfcWall": "墙", "IfcSpace": "空间", "IfcStair": "楼梯"}.get(element.get("entity_type"), "构件")
+                    label = {
+                        "IfcDoor": "门", "IfcWindow": "窗", "IfcWall": "墙", "IfcSpace": "空间",
+                        "IfcStair": "楼梯", "IfcSlab": "楼板", "IfcRoof": "屋顶", "IfcColumn": "柱",
+                        "IfcBeam": "梁", "IfcMember": "构件", "IfcRailing": "栏杆", "IfcCovering": "饰面",
+                        "IfcFurnishingElement": "家具", "IfcFooting": "基础", "IfcPlate": "面板",
+                    }.get(element.get("entity_type"), "构件")
                     fragments.append(
                         f"当前选中的是一个{label}，IFC 类型为 **{element.get('entity_type', plan.get('entity_type'))}**。"
                         f"所在楼层：**{record.get('storey') or 'Unassigned'}**。"

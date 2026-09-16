@@ -15,6 +15,30 @@ ELEMENT_ALIASES = {
     "slab": "IfcSlab", "slabs": "IfcSlab",
     "opening": "IfcWindow", "openings": "IfcWindow",
     "glazed opening": "IfcWindow", "glazed openings": "IfcWindow",
+    # D-055: owner-reported, 2026-09-16 -- D-054 made these 10 real,
+    # substantial element types (plus IfcRoof, itself a pre-existing gap:
+    # it was one of the original 6 viewer-rendered types but was never
+    # queryable by name either) visible in the 3D viewer, but this router
+    # -- the only place a natural-language mention of an entity actually
+    # gets recognized, and the whitelist the LLM planner's own prompt is
+    # told to use -- was never updated alongside it. A citation could be
+    # highlighted after D-054, but asking "how many pieces of furniture"
+    # still fell through to `unsupported`, since neither the heuristic
+    # keyword match nor the semantic planner ever had "furniture" (or any
+    # of the others) as a valid target. `IfcBuildingElementProxy` is a
+    # deliberate exception, not an oversight: it is IFC's own generic
+    # catch-all for elements the source export left unclassified, with no
+    # natural single English word a user would ask about by name -- it
+    # renders in the viewer (D-054) but is not given a query alias here.
+    "roof": "IfcRoof", "roofs": "IfcRoof",
+    "column": "IfcColumn", "columns": "IfcColumn",
+    "beam": "IfcBeam", "beams": "IfcBeam",
+    "member": "IfcMember", "members": "IfcMember",
+    "railing": "IfcRailing", "railings": "IfcRailing",
+    "covering": "IfcCovering", "coverings": "IfcCovering",
+    "furniture": "IfcFurnishingElement", "furnishing": "IfcFurnishingElement", "furnishings": "IfcFurnishingElement",
+    "footing": "IfcFooting", "footings": "IfcFooting",
+    "plate": "IfcPlate", "plates": "IfcPlate",
 }
 SUPPORTED_ENTITY_TYPES = set(ELEMENT_ALIASES.values())
 

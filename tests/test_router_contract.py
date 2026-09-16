@@ -154,6 +154,49 @@ def test_heuristic_plan_recognises_each_supported_entity_alias(entity_word: str,
     assert plan.match_status == "complete"
 
 
+@pytest.mark.parametrize("entity_word,ifc_type", [
+    ("roof", "IfcRoof"), ("column", "IfcColumn"), ("beam", "IfcBeam"), ("member", "IfcMember"),
+    ("railing", "IfcRailing"), ("covering", "IfcCovering"), ("footing", "IfcFooting"), ("plate", "IfcPlate"),
+])
+def test_heuristic_plan_recognises_each_d054_viewer_entity_alias(entity_word: str, ifc_type: str) -> None:
+    """D-055: D-054 made these types real and renderable in the 3D viewer, but
+    the query-planning whitelist (ELEMENT_ALIASES/SUPPORTED_ENTITY_TYPES) was
+    never updated alongside it, so a natural-language count question for any
+    of them fell through to ``unsupported`` even though the viewer could
+    already render and highlight the element. Confirmed to genuinely fail
+    pre-fix: with this alias absent, heuristic_plan falls back to
+    source="unsupported" and capability_gate rejects it.
+    """
+    plan = heuristic_plan(f"how many {entity_word}s are there?", {}, has_viewer_context=False)
+    assert plan.source == "ifc"
+    assert plan.entity_type == ifc_type
+    assert plan.operation == "count"
+    assert plan.match_status == "complete"
+    supported, reason = capability_gate(plan)
+    assert supported is True
+    assert reason is None
+
+
+def test_heuristic_plan_recognises_furniture_alias() -> None:
+    """D-055: "furniture"/"furnishing" alias to IfcFurnishingElement, the noun
+    the owner actually used when reporting this gap.
+    """
+    for word in ("furniture", "furnishings"):
+        plan = heuristic_plan(f"how many pieces of {word} are there?", {}, has_viewer_context=False)
+        assert plan.source == "ifc"
+        assert plan.entity_type == "IfcFurnishingElement"
+        assert plan.operation == "count"
+
+
+def test_ifc_building_element_proxy_deliberately_has_no_query_alias() -> None:
+    """D-055: IfcBuildingElementProxy renders in the viewer (D-054) but is a
+    generic catch-all with no natural single English word a user would name
+    it by, so it is deliberately excluded from ELEMENT_ALIASES -- not an
+    oversight.
+    """
+    assert "IfcBuildingElementProxy" not in ELEMENT_ALIASES.values()
+
+
 def test_heuristic_plan_pdf_domain_terms_route_to_pdf() -> None:
     plan = heuristic_plan("What is the connected load for Panel-A?", {}, has_viewer_context=False)
     assert plan.source == "pdf"
