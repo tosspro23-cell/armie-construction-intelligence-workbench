@@ -90,7 +90,11 @@ function App() {
   // account for a second response shape (a streamed SSE turn instead of
   // one JSON object).
   const [engine, setEngine] = useState<"v1" | "v2">("v1");
-  const [v2Streaming, setV2Streaming] = useState<{ statuses: string[]; answer: string } | null>(null);
+  // `question` is captured here (owner-reported, 2026-09-16): the user's
+  // own just-asked message must stay visible for the whole "thinking"
+  // period, not only reappear once the answer lands -- otherwise a
+  // multi-turn V2 conversation looks like it forgot what was just asked.
+  const [v2Streaming, setV2Streaming] = useState<{ question: string; statuses: string[]; answer: string } | null>(null);
   const [tab, setTab] = useState<WorkspaceTab>("bim");
   const [drawingZoom, setDrawingZoom] = useState(1);
   const [drawingEvidence, setDrawingEvidence] = useState<{ bbox?: number[]; board?: string; field?: string; page?: number; document?: string; localized?: boolean } | null>(null);
@@ -221,7 +225,7 @@ function App() {
     if (!question.trim() || busy) return;
     const askedQuestion = question.trim();
     setBusy(true);
-    setV2Streaming({ statuses: [], answer: "" });
+    setV2Streaming({ question: askedQuestion, statuses: [], answer: "" });
     setQuestion("");
     try {
       const response = await fetch("/api/v1/chat", withAuthHeader({
@@ -269,10 +273,19 @@ function App() {
       }
       if (finalResponse) {
         setThreadId(newThreadId || undefined);
+        // Owner-reported, 2026-09-16: the Decision Trace panel showed
+        // "No plan recorded"/empty Question/Execution detail for V2 turns
+        // -- V2's own _audit() calls already write into the same audit
+        // store V1's do (AgentService._audit is shared, unchanged), this
+        // was purely a missing fetch on the frontend side. Mirrors
+        // submit()'s own V1 call to the same endpoint exactly.
+        let responseTrace: TraceEvent[] = [];
+        try { responseTrace = await api<TraceEvent[]>(`/api/v1/traces/${finalResponse.trace_id}`); } catch (error) { console.warn("V2 trace fetch failed", error); }
         setTurns((current) => [...current, {
           id: finalResponse!.trace_id, user: askedQuestion, assistant: finalResponse!,
-          timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }), trace: [],
+          timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }), trace: responseTrace,
         }]);
+        setTrace(responseTrace);
       }
     } catch (error) {
       console.error(error);
@@ -422,7 +435,13 @@ function App() {
             clear/tick as calls resolve, then the final answer's tokens
             append as they stream in, verified live in the browser (this
             session's own established standard), not just unit-tested. */}
-        {v2Streaming && <div className="message-row assistant"><article className="message assistant-message v2-streaming"><div className="message-meta"><span>Assistant</span><span className="engine-badge">V2 (agent)</span><span>working…</span></div>{v2Streaming.statuses.map((status, index) => <p key={index} className="v2-tool-status">{status}</p>)}{v2Streaming.answer && <p>{renderAnswerMarkdown(v2Streaming.answer)}</p>}</article></div>}
+        {/* Owner-reported, 2026-09-16: the user's own just-asked message
+            used to disappear for the whole "thinking" period (only
+            re-appearing once the answer arrived, since it was added to
+            `turns` all at once at the very end) -- rendered here
+            immediately instead, from the same `v2Streaming.question`
+            captured the instant submitV2 starts. */}
+        {v2Streaming && <React.Fragment><div className="message-row user"><article className="message user-message"><div className="message-meta"><span>User</span></div><p>{v2Streaming.question}</p></article></div><div className="message-row assistant"><article className="message assistant-message v2-streaming"><div className="message-meta"><span>Assistant</span><span className="engine-badge">V2 (agent)</span><span>working…</span></div>{v2Streaming.statuses.map((status, index) => <p key={index} className="v2-tool-status">{status}</p>)}{v2Streaming.answer && <p>{renderAnswerMarkdown(v2Streaming.answer)}</p>}</article></div></React.Fragment>}
       </div><form onSubmit={engine === "v2" ? submitV2 : submit}><textarea value={question} onChange={(e) => setQuestion(e.target.value)} placeholder="e.g. How many doors are in the project?" rows={3} /><div className="submit-row"><button disabled={busy}>{busy ? (engine === "v2" ? "Agent working…" : `Checking evidence… ${requestStage}`) : "Ask with audit trail"}</button>{busy && engine === "v1" && <button type="button" className="stop-button" onClick={stopRequest}>Stop request</button>}</div></form></section>
       <aside className="inspector"><DecisionStory latest={latest} trace={trace} projectId={projectId} onOpenCitation={openCitation} /></aside>
     </section>

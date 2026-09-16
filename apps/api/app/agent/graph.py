@@ -1922,19 +1922,23 @@ Return only a corrected MultiQueryPlan JSON object."""
                 "tool_result": {"answer": result["answer"], "disposition": result["disposition"], "citations": result["citations"], "verification": result["verification"], "result_value": result.get("reconciliation_items")},
                 "evidence": result.get("evidence", []),
                 "tool_call_count": state.get("tool_call_count", 0) + result.get("tool_call_count_delta", 1),
+                "plan": [sub.model_dump() for sub in multi_plan.subplans],
             }
         plan = build_plan_from_tool_call(tool_call.tool_name, tool_call.arguments)
         allowed, reason = capability_gate(plan)
         if not allowed:
-            return {"tool_result": {"answer": reason or "This request is outside the supported tool capabilities.", "disposition": "unsupported", "citations": [], "verification": VerificationStatus(status="not_applicable", reason="Rejected by the capability gate before execution.").model_dump(), "result_value": None}, "evidence": [], "tool_call_count": state.get("tool_call_count", 0)}
+            return {"tool_result": {"answer": reason or "This request is outside the supported tool capabilities.", "disposition": "unsupported", "citations": [], "verification": VerificationStatus(status="not_applicable", reason="Rejected by the capability gate before execution.").model_dump(), "result_value": None}, "evidence": [], "tool_call_count": state.get("tool_call_count", 0), "plan": [plan.model_dump()]}
         local_state: GraphState = {**state, "plan": plan.model_dump()}
         if plan.source == "ifc":
-            return self._execute_ifc(local_state)
-        if plan.source == "pdf":
-            return self._execute_pdf(local_state)
-        if plan.source == "viewer_snapshot":
-            return self._execute_viewer(local_state)
-        return {"tool_result": self._error_result(f"Unsupported tool source: {plan.source}")}
+            result = self._execute_ifc(local_state)
+        elif plan.source == "pdf":
+            result = self._execute_pdf(local_state)
+        elif plan.source == "viewer_snapshot":
+            result = self._execute_viewer(local_state)
+        else:
+            result = {"tool_result": self._error_result(f"Unsupported tool source: {plan.source}")}
+        result["plan"] = [plan.model_dump()]
+        return result
 
     async def invoke_v2(
         self,
@@ -1986,6 +1990,7 @@ Return only a corrected MultiQueryPlan JSON object."""
 
         all_citations: list[dict[str, Any]] = []
         all_evidence: list[dict[str, Any]] = []
+        all_plans: list[dict[str, Any]] = []
         answer_parts: list[str] = []
         max_iterations = self.settings.tool_calling_max_iterations
         for iteration in range(1, max_iterations + 1):
@@ -2006,7 +2011,17 @@ Return only a corrected MultiQueryPlan JSON object."""
                 response = AgentResponse(
                     thread_id=thread_id, trace_id=trace_id, disposition=Disposition(disposition),
                     answer_markdown="".join(answer_parts), citations=[Citation.model_validate(item) for item in all_citations],
-                    verification=verification, execution_metadata={"engine": "v2", "model_call_count": model_call_count, "tool_call_count": state.get("tool_call_count", 0), "iterations": iteration, "planning_mode": "tool_calling", "actual_provider": provider.name, "actual_model": provider.model},
+                    verification=verification, execution_metadata={
+                        "engine": "v2", "model_call_count": model_call_count, "tool_call_count": state.get("tool_call_count", 0),
+                        "iterations": iteration, "planning_mode": "tool_calling", "actual_provider": provider.name, "actual_model": provider.model,
+                        # Owner-reported, 2026-09-16: DecisionStory.tsx's Question/Plan
+                        # steps read these three keys directly from execution_metadata
+                        # (they were never set for V2 turns, unlike V1's own
+                        # heuristic/LLM planning path -- see _synthesize_reconciliation_response's
+                        # sibling execution_metadata construction above, which sets the same
+                        # "source" convention this mirrors).
+                        "normalized_request": question, "subplans": all_plans, "source": self._v2_source_label(all_plans),
+                    },
                 )
                 yield {"type": "final", "response": response}
                 return
@@ -2018,6 +2033,7 @@ Return only a corrected MultiQueryPlan JSON object."""
                 state["tool_call_count"] = result.get("tool_call_count", state.get("tool_call_count", 0))
                 all_citations.extend(tool_result.get("citations", []))
                 all_evidence.extend(result.get("evidence", []))
+                all_plans.extend(result.get("plan", []))
                 messages.append({
                     "role": "tool", "tool_call_id": tool_call.call_id,
                     "content": json.dumps({"disposition": tool_result.get("disposition"), "answer": tool_result.get("answer"), "result_value": tool_result.get("result_value")}, default=str),
@@ -2029,9 +2045,29 @@ Return only a corrected MultiQueryPlan JSON object."""
             thread_id=thread_id, trace_id=trace_id, disposition=Disposition.ERROR,
             answer_markdown=f"The request failed safely: exceeded the maximum of {max_iterations} tool-call rounds without reaching a final answer.",
             verification=VerificationStatus(status="not_applicable", reason="Iteration limit exceeded before a final answer was reached."),
-            execution_metadata={"engine": "v2", "model_call_count": state.get("model_call_count", 0), "tool_call_count": state.get("tool_call_count", 0), "iterations": max_iterations},
+            execution_metadata={
+                "engine": "v2", "model_call_count": state.get("model_call_count", 0), "tool_call_count": state.get("tool_call_count", 0),
+                "iterations": max_iterations, "planning_mode": "tool_calling",
+                "normalized_request": question, "subplans": all_plans, "source": self._v2_source_label(all_plans),
+            },
         )
         yield {"type": "final", "response": response}
+
+    @staticmethod
+    def _v2_source_label(all_plans: list[dict[str, Any]]) -> str | None:
+        """SPEC-M16 Decision Trace fix (owner-reported, 2026-09-16): mirrors
+        the "source" convention used above for V1's own multi-subplan
+        execution_metadata, so DecisionStory.tsx's Execution step reads the
+        same shape regardless of engine.
+        """
+        if any(plan.get("intent") == "reconciliation" for plan in all_plans):
+            return "ifc+pdf (reconciliation)"
+        distinct_sources = sorted({plan["source"] for plan in all_plans if plan.get("source")})
+        if len(distinct_sources) == 1:
+            return distinct_sources[0]
+        if len(distinct_sources) > 1:
+            return "multi_source"
+        return None
 
     @staticmethod
     def _citations(evidence: list[Evidence], state: GraphState) -> list[dict]:
