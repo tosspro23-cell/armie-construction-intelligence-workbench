@@ -28,8 +28,27 @@ def test_fast_path_coverage_complete_for_each_supported_entity(entity_word: str)
     assert coverage["unresolved_intents"] == []
 
 
-def test_fast_path_coverage_incomplete_for_non_ascii_question() -> None:
+# SPEC-M14, OD-49: this test's own asserted behavior is intentionally
+# flipped from its pre-M14 form (which asserted "incomplete" for this
+# exact question, when fast_path_coverage's own ascii_only gate had no
+# Chinese exemption at all) -- see SPEC-M14's own Invariants section for
+# why this is a deliberate, spec-approved reversal, not a silent
+# regression.
+def test_fast_path_coverage_complete_for_simple_chinese_count_question() -> None:
     coverage = fast_path_coverage("这个项目里有多少扇门？", {}, has_viewer_context=False)
+    assert coverage["coverage_status"] == "complete"
+    assert coverage["covered_intents"] == ["IfcDoor"]
+    assert coverage["unresolved_intents"] == []
+
+
+def test_fast_path_coverage_incomplete_for_non_chinese_non_ascii_question() -> None:
+    """SPEC-M14, OD-49 only narrows the ascii_only gate for Chinese text that
+    also matches this function's own enumerated count/group-by term lists --
+    it is not a general "any non-ASCII script" exemption. A script this
+    function has no term list for (Cyrillic here) still correctly reports
+    "incomplete", since none of its literal terms can match it either way.
+    """
+    coverage = fast_path_coverage("Сколько дверей в проекте?", {}, has_viewer_context=False)
     assert coverage["coverage_status"] == "incomplete"
     assert coverage["unresolved_intents"] == ["semantic_decomposition_required"]
     assert coverage["reason"] == "heuristic_coverage_incomplete"
@@ -152,6 +171,64 @@ def test_heuristic_plan_recognises_each_supported_entity_alias(entity_word: str,
     assert plan.entity_type == ifc_type
     assert plan.operation == "count"
     assert plan.match_status == "complete"
+
+
+# --- SPEC-M14: Chinese count/group-by fast path -----------------------------
+
+@pytest.mark.parametrize("entity_word,ifc_type", [
+    ("门", "IfcDoor"), ("窗", "IfcWindow"), ("墙", "IfcWall"), ("空间", "IfcSpace"),
+    ("房间", "IfcSpace"), ("楼梯", "IfcStair"), ("楼板", "IfcSlab"), ("屋顶", "IfcRoof"),
+    ("柱", "IfcColumn"), ("梁", "IfcBeam"), ("栏杆", "IfcRailing"), ("饰面", "IfcCovering"),
+    ("家具", "IfcFurnishingElement"), ("基础", "IfcFooting"),
+])
+def test_heuristic_plan_recognises_each_chinese_entity_alias(entity_word: str, ifc_type: str) -> None:
+    plan = heuristic_plan(f"这个项目里有多少{entity_word}？", {}, has_viewer_context=False)
+    assert plan.source == "ifc"
+    assert plan.entity_type == ifc_type
+    assert plan.operation == "count"
+    assert plan.match_status == "complete"
+    supported, reason = capability_gate(plan)
+    assert supported is True
+    assert reason is None
+
+
+def test_heuristic_plan_chinese_storey_grouping() -> None:
+    plan = heuristic_plan("按楼层统计窗户数量", {}, has_viewer_context=False)
+    assert plan.entity_type == "IfcWindow"
+    assert plan.operation == "group_by"
+    assert plan.group_by == "storey"
+    assert plan.match_status == "complete"
+
+
+@pytest.mark.parametrize("question,postprocess", [
+    ("哪层的门最多？", "argmax"),
+    ("哪层的窗最少？", "argmin"),
+])
+def test_heuristic_plan_chinese_storey_argmax_argmin(question: str, postprocess: str) -> None:
+    plan = heuristic_plan(question, {}, has_viewer_context=False)
+    assert plan.group_by == "storey"
+    assert plan.postprocess == postprocess
+    assert plan.match_status == "complete"
+
+
+def test_heuristic_multi_plan_chinese_multi_entity_count() -> None:
+    multi_plan = heuristic_multi_plan("这个项目里有多少扇门和窗？", {}, has_viewer_context=False)
+    assert multi_plan is not None
+    entity_types = {plan.entity_type for plan in multi_plan.subplans}
+    assert entity_types == {"IfcDoor", "IfcWindow"}
+    assert all(plan.operation == "count" for plan in multi_plan.subplans)
+    assert multi_plan.response_language == "zh-CN"
+
+
+def test_heuristic_multi_plan_bare_ambiguous_board_stays_unsupported() -> None:
+    """SPEC-M14: bare "板" is deliberately not an alias (ambiguous with a PDF
+    electrical panel/board, see AgentService._resolve_context's own
+    "这张图里的板有多少" clarification) -- this question must keep falling
+    through, unaffected by the Chinese fast path added here.
+    """
+    assert heuristic_multi_plan("这张图里的板有多少", {}, has_viewer_context=False) is None
+    plan = heuristic_plan("这张图里的板有多少", {}, has_viewer_context=False)
+    assert plan.source == "unsupported"
 
 
 @pytest.mark.parametrize("entity_word,ifc_type", [

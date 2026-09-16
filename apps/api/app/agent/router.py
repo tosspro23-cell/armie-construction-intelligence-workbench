@@ -190,12 +190,23 @@ def resolve_reference(question: str, context: dict) -> tuple[str, dict, str | No
 def fast_path_coverage(question: str, context: dict, has_viewer_context: bool) -> dict[str, Any]:
     """Decide whether the deterministic shortcut covers the *whole* request.
 
-    This accepts only deliberately narrow English templates.  Any non-ASCII,
-    compound, elliptical, mixed-language, or contextual request is routed to
-    the typed semantic planner rather than partially executing a keyword hit.
+    This accepts only deliberately narrow English and Simplified Chinese
+    (SPEC-M14, OD-49) templates.  Any other non-ASCII, compound, elliptical,
+    mixed-language, or contextual request is routed to the typed semantic
+    planner rather than partially executing a keyword hit -- Chinese is not
+    a general exemption from that rule, only the specific enumerated
+    count/group-by surface below actually matches anything.
     """
     normalized = " ".join(question.strip().lower().split())
     ascii_only = question.isascii()
+    # SPEC-M14, OD-49: knowingly reverses this function's own prior
+    # "any non-ASCII routes to the semantic planner" invariant, but only
+    # for the narrow Chinese count/group-by surface `generic_count`/
+    # `generic_grouping` below actually recognize -- any other script, or
+    # Chinese text that matches neither, still correctly reports
+    # "incomplete" below, since none of this function's term lists match
+    # it either way.
+    contains_chinese = any("一" <= char <= "鿿" for char in question)
     entities = [key for key in ELEMENT_ALIASES if _alias_search(key, normalized)]
     unique_entities = sorted({ELEMENT_ALIASES[key] for key in entities})
     simple_patterns = (
@@ -208,12 +219,12 @@ def fast_path_coverage(question: str, context: dict, has_viewer_context: bool) -
     )
     selected_element_template = bool(context.get("active_entity_ids")) and normalized in {"what is this?", "what is this", "which floor is it on?", "which floor is it on", "which level is it on?", "which level is it on"}
     clarification_template = bool(context.get("pending_space_distance")) and bool(re.fullmatch(r"(?:use|choose|select)\s+(?:bedroom\s+)?[a-z0-9_-]+\.?", normalized))
-    grouping_markers = ("by floor", "by storey", "each floor", "each storey", "per floor", "per storey", "break them down", "break down", "every floor")
+    grouping_markers = ("by floor", "by storey", "each floor", "each storey", "per floor", "per storey", "break them down", "break down", "every floor", "按楼层", "按层", "每层", "每一层", "各楼层", "分楼层", "楼层分布", "哪层", "哪一层", "哪个楼层")
     prior_entities = {item.get("entity_type") for item in context.get("previous_subplans", []) if item.get("source") == "ifc" and item.get("entity_type")}
     simple_template = any(re.fullmatch(pattern, normalized) for pattern in simple_patterns) or selected_element_template or clarification_template
-    generic_count = bool(re.search(r"\b(how many|count|number of|give me the number|there are)\b", normalized)) and len(unique_entities) == 1
+    generic_count = (bool(re.search(r"\b(how many|count|number of|give me the number|there are)\b", normalized)) or any(marker in normalized for marker in ("有多少", "数量", "共有", "一共有", "统计"))) and len(unique_entities) == 1
     generic_grouping = bool(unique_entities or prior_entities) and any(marker in normalized for marker in grouping_markers)
-    complete = ascii_only and (simple_template or generic_count or generic_grouping)
+    complete = (ascii_only or contains_chinese) and (simple_template or generic_count or generic_grouping)
     covered = unique_entities if complete else []
     unresolved: list[str] = [] if complete else ["semantic_decomposition_required"]
     return {
