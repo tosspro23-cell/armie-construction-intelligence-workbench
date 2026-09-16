@@ -106,7 +106,11 @@ def cross_source_reconciliation_requested(question: str) -> bool:
     # instead of a synthesized comparison. Listed as its own alternative
     # rather than folded into \bmatch\b, since "mismatch" is not a
     # substring-superset of "match" under \b semantics.
-    verb_marker = re.search(r"\b(compare|verify|reconcile|check|match|mismatch|mismatches|cross-check|cross check|consistent)\b|核对|比对|一致|不匹配", lowered)
+    # SPEC-M15 §B: "匹配" (match, positive) was missing alongside the
+    # existing "不匹配" (mismatch) -- found live: "门的数量和图纸是否匹配"
+    # (a very natural way to ask this) went undetected before this fix,
+    # since "匹配" only ever appeared here negated.
+    verb_marker = re.search(r"\b(compare|verify|reconcile|check|match|mismatch|mismatches|cross-check|cross check|consistent)\b|核对|比对|一致|不匹配|匹配", lowered)
     drawing_marker = re.search(r"\b(pdf|drawing|schedule)\b|图纸|排程|明细表", lowered)
     return bool(entity_marker and verb_marker and drawing_marker)
 
