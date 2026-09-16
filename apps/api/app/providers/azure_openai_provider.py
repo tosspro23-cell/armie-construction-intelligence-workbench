@@ -78,6 +78,7 @@ class AzureOpenAIProvider:
         deployment: str,
         timeout_seconds: float = 90.0,
         client_factory: Callable[[], object] | None = None,
+        reasoning_effort: str | None = None,
     ) -> None:
         self.endpoint = endpoint
         self.api_version = api_version
@@ -87,6 +88,13 @@ class AzureOpenAIProvider:
         # system's own request_timeout_seconds (180s, config.py).
         self.timeout_seconds = timeout_seconds
         self._client_factory = client_factory
+        # Owner-requested, 2026-09-16 latency investigation: only used by
+        # `stream_turn` (V2's tool-calling loop) -- `structured`/
+        # `vision_structured` (V1's path) are deliberately unaffected,
+        # matching this spec's own Invariant that V1 stays byte-for-byte
+        # unchanged by V2 work. See config.py's `v2_reasoning_effort` for
+        # why this needs a recent-enough `api_version` to be accepted.
+        self.reasoning_effort = reasoning_effort
 
     def _client(self):
         if not self.endpoint:
@@ -145,8 +153,11 @@ class AzureOpenAIProvider:
         afterwards.
         """
         client = self._client()
+        extra_kwargs: dict[str, Any] = {}
+        if self.reasoning_effort:
+            extra_kwargs["reasoning_effort"] = self.reasoning_effort
         stream = await client.chat.completions.create(
-            model=self.model, messages=messages, tools=tools, stream=True,
+            model=self.model, messages=messages, tools=tools, stream=True, **extra_kwargs,
         )
         # Keyed by the SDK's own per-call tool_call index -- the model can
         # request several tool calls in one turn, and their argument

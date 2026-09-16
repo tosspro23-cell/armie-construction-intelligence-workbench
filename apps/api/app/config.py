@@ -173,6 +173,18 @@ class Settings(BaseSettings):
     # an unbounded transcript. V1 is unaffected; it continues to use only
     # its existing narrow structured conversation_context fields.
     conversation_memory_turns: int = 6
+    # Owner-requested, 2026-09-16: SPEC-M16's own live benchmark
+    # (docs/reports/2026-09-16-m16-v1-vs-v2-benchmark.md) found V2's wall
+    # time is almost entirely the tool-selection model round trip, and
+    # gpt-5-mini is a reasoning-tier deployment that spends hidden
+    # reasoning tokens before any visible output -- proportional to this
+    # effort level -- on every call. `None` (default) omits the parameter
+    # entirely, preserving today's exact behavior; a real deployment can
+    # opt into "minimal"/"low"/"medium"/"high" to trade reasoning depth for
+    # latency once verified live (this parameter needs a recent-enough
+    # `azure_openai_api_version` to be accepted at all -- an older one
+    # simply gets a 400, not silently ignored).
+    v2_reasoning_effort: str | None = None
 
     # Multi-project workspace via Azure Data Lake Storage Gen2 (SPEC-M9,
     # D-023), opt-in like every other Azure setting above: unset means the
