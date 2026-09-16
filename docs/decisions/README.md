@@ -2549,3 +2549,69 @@ gets `Content-Encoding: gzip` and a smaller `Content-Length` than an `identity`-
 decoding to the identical JSON; confirmed to genuinely fail pre-fix (`git stash` of only
 `main.py`/`IfcViewer.tsx`, reran: `AssertionError` on the `content-encoding == "gzip"` line) and
 pass post-fix. 344 tests pass (343 + 1 new); `ruff` clean; `npm run build` clean.
+
+## D-057 — SPEC-M14: a deterministic fast path for Chinese count/group-by IFC questions
+
+Owner-asked, 2026-09-16: is Chinese recognition today done through the LLM, and can a fast path
+like English's be added? Full parity (quantity extrema, space distance, viewer-snapshot phrases,
+PDF/electrical-schedule detection) is real but large scope; the owner chose to start with
+count/group-by, the two operations covering the large majority of real IFC questions asked this
+session. Full spec: `docs/specs/SPEC-M14-chinese-fast-path-count-groupby-v1.md`.
+
+**Confirmed by direct testing, not assumed: yes, nearly every Chinese IFC question reached the LLM
+planner before this fix.** `ELEMENT_ALIASES` (`router.py`), the single table every heuristic
+entity-recognition call site reads, had zero Chinese keys.
+
+**A real, load-bearing technical fact, verified empirically:** Python's `\b` word-boundary regex --
+used at every `ELEMENT_ALIASES` lookup site -- never matches inside unsegmented Chinese text
+(`re.search(r"\b门\b", "这个项目里有多少扇门？")` is `False` even though "门" is genuinely present,
+since adjacent Chinese characters are all `\w` under Python 3's Unicode-aware `re`, so there is
+never a boundary between two ideographs). Simply adding Chinese keys without fixing the matching
+itself would have silently matched nothing.
+
+**A second real fact, verified by tracing the graph: the actual routing decision does not depend on
+`fast_path_coverage`'s own `ascii_only` gate the way its docstring implied.** `AgentService._route`
+computes `generic_multi = heuristic_multi_plan(...)` unconditionally and uses it immediately,
+before `fast_path_coverage`'s `coverage_status` is even consulted -- and `heuristic_multi_plan`
+itself has no `ascii_only` gate at all. The primary, sufficient fix was therefore inside
+`heuristic_multi_plan`/`heuristic_plan`; `fast_path_coverage`'s own gate was a secondary
+audit-honesty fix (its `planning_mode` label would otherwise have kept saying "llm" for a question
+that was already answered deterministically).
+
+**Two real term-collision risks found while drafting the alias list, not discovered later.** Bare
+"板" is already deliberately treated as ambiguous elsewhere in this codebase
+(`AgentService._resolve_context`'s own "这张图里的板有多少" clarification exists specifically
+because it could mean `IfcSlab` or a PDF electrical panel/board) -- only the unambiguous compound
+"楼板" (floor slab) is aliased. "构件" is this codebase's own generic Chinese fallback noun for
+"unknown element type" (`graph.py`'s response-formatting noun maps, D-055), not a specific word for
+`IfcMember` -- aliasing it would make a generic "构件有多少" collide with the narrow `IfcMember`
+type. Both, plus "面板" (the same ambiguity as "板", for `IfcPlate`), are deliberately excluded.
+
+**Fix.** `_alias_search` (new) replaces the three inline `\b`-wrapped `ELEMENT_ALIASES` lookups --
+`\b`-wrapped for an ASCII term (English behavior provably unchanged), bare substring for a
+non-ASCII term (the same technique `cross_source_reconciliation_requested`/
+`cross_source_join_requested` already use for their own Chinese markers, generalized rather than
+reinvented). Chinese aliases added for 13 of the 21 supported entity types (door/window/wall/space
+or room/stair/floor slab/roof/column/beam/railing/covering/furniture/footing). Chinese count-intent
+(有多少/数量/共有/一共有/统计), storey-grouping (按楼层/按层/每层/each variant, plus the "which floor"
+family 哪层/哪一层/哪个楼层, found necessary during implementation), and argmax/argmin (最多/最少) keyword
+alternatives added everywhere the equivalent English substring check already drove
+`heuristic_multi_plan`/`heuristic_plan`. `fast_path_coverage`'s `ascii_only` gate relaxed to
+`ascii_only or contains_chinese` (OD-49), with the same Chinese keywords added to its own
+`generic_count`/`generic_grouping` checks -- any other non-ASCII script still correctly reports
+"incomplete", since none of its term lists match it either way.
+
+**Verification.** New Chinese-parity parametrized tests mirror every existing English
+`heuristic_plan`/`heuristic_multi_plan` case (each of the 13 aliased entity types, multi-entity
+count, storey grouping, argmax/argmin); a negative case proves bare "板" stays unaliased and
+unaffected; a Cyrillic case proves the `ascii_only` relaxation is Chinese-specific, not a general
+non-ASCII exemption.
+`test_fast_path_coverage_incomplete_for_non_ascii_question`'s own asserted behavior is intentionally
+flipped for its one Chinese example question -- renamed, and documented in both the test and this
+spec as a deliberate, spec-approved reversal (OD-49), not a silent regression; confirmed to
+genuinely fail pre-fix (`git stash` of only `router.py`'s `fast_path_coverage` change, reran:
+`AssertionError: 'incomplete' == 'complete'`) and pass post-fix. A live end-to-end test drives the
+real `AgentService.invoke()` graph against a real project with a genuine Chinese count question,
+proving `answered`/`model_call_count == 0`/`planning_mode == "heuristic"` -- the actual dispatch
+order in `AgentService._route`, which the planning-layer-only tests cannot prove by themselves. 365
+tests pass (344 + 21 new); `ruff` clean; `npm run build` clean.

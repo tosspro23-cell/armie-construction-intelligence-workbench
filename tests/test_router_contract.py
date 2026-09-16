@@ -1,11 +1,21 @@
 """Deterministic contract tests for app.agent.router (SPEC-M1 §4.4/13).
 
-Pure functions only; no provider, no network, no fixtures beyond plain dicts.
+Pure functions only; no provider, no network, no fixtures beyond plain dicts
+-- except the one end-to-end SPEC-M14 case at the bottom, which drives the
+real `AgentService.invoke()` path (mirroring `test_failure_path_evals.py`'s
+own `_demo`/`_settings`/`_service` harness) to prove the claim that actually
+matters: a real Chinese count question against a real project returns
+``answered`` with zero model calls, not just that the planning-layer helpers
+return the right shape in isolation.
 """
 
 from __future__ import annotations
 
+import asyncio
+from pathlib import Path
+
 import pytest
+from app.agent.graph import AgentService
 from app.agent.router import (
     ELEMENT_ALIASES,
     capability_gate,
@@ -17,6 +27,11 @@ from app.agent.router import (
     nearest_space_requested,
     selected_element_plan,
 )
+from app.config import Settings
+from app.services import ProjectResources, ServiceContainer
+from fakes.fake_provider import FakeModelProvider
+
+ROOT = Path(__file__).resolve().parents[1]
 
 # --- fast_path_coverage -----------------------------------------------------
 
@@ -28,8 +43,27 @@ def test_fast_path_coverage_complete_for_each_supported_entity(entity_word: str)
     assert coverage["unresolved_intents"] == []
 
 
-def test_fast_path_coverage_incomplete_for_non_ascii_question() -> None:
+# SPEC-M14, OD-49: this test's own asserted behavior is intentionally
+# flipped from its pre-M14 form (which asserted "incomplete" for this
+# exact question, when fast_path_coverage's own ascii_only gate had no
+# Chinese exemption at all) -- see SPEC-M14's own Invariants section for
+# why this is a deliberate, spec-approved reversal, not a silent
+# regression.
+def test_fast_path_coverage_complete_for_simple_chinese_count_question() -> None:
     coverage = fast_path_coverage("这个项目里有多少扇门？", {}, has_viewer_context=False)
+    assert coverage["coverage_status"] == "complete"
+    assert coverage["covered_intents"] == ["IfcDoor"]
+    assert coverage["unresolved_intents"] == []
+
+
+def test_fast_path_coverage_incomplete_for_non_chinese_non_ascii_question() -> None:
+    """SPEC-M14, OD-49 only narrows the ascii_only gate for Chinese text that
+    also matches this function's own enumerated count/group-by term lists --
+    it is not a general "any non-ASCII script" exemption. A script this
+    function has no term list for (Cyrillic here) still correctly reports
+    "incomplete", since none of its literal terms can match it either way.
+    """
+    coverage = fast_path_coverage("Сколько дверей в проекте?", {}, has_viewer_context=False)
     assert coverage["coverage_status"] == "incomplete"
     assert coverage["unresolved_intents"] == ["semantic_decomposition_required"]
     assert coverage["reason"] == "heuristic_coverage_incomplete"
@@ -154,6 +188,64 @@ def test_heuristic_plan_recognises_each_supported_entity_alias(entity_word: str,
     assert plan.match_status == "complete"
 
 
+# --- SPEC-M14: Chinese count/group-by fast path -----------------------------
+
+@pytest.mark.parametrize("entity_word,ifc_type", [
+    ("门", "IfcDoor"), ("窗", "IfcWindow"), ("墙", "IfcWall"), ("空间", "IfcSpace"),
+    ("房间", "IfcSpace"), ("楼梯", "IfcStair"), ("楼板", "IfcSlab"), ("屋顶", "IfcRoof"),
+    ("柱", "IfcColumn"), ("梁", "IfcBeam"), ("栏杆", "IfcRailing"), ("饰面", "IfcCovering"),
+    ("家具", "IfcFurnishingElement"), ("基础", "IfcFooting"),
+])
+def test_heuristic_plan_recognises_each_chinese_entity_alias(entity_word: str, ifc_type: str) -> None:
+    plan = heuristic_plan(f"这个项目里有多少{entity_word}？", {}, has_viewer_context=False)
+    assert plan.source == "ifc"
+    assert plan.entity_type == ifc_type
+    assert plan.operation == "count"
+    assert plan.match_status == "complete"
+    supported, reason = capability_gate(plan)
+    assert supported is True
+    assert reason is None
+
+
+def test_heuristic_plan_chinese_storey_grouping() -> None:
+    plan = heuristic_plan("按楼层统计窗户数量", {}, has_viewer_context=False)
+    assert plan.entity_type == "IfcWindow"
+    assert plan.operation == "group_by"
+    assert plan.group_by == "storey"
+    assert plan.match_status == "complete"
+
+
+@pytest.mark.parametrize("question,postprocess", [
+    ("哪层的门最多？", "argmax"),
+    ("哪层的窗最少？", "argmin"),
+])
+def test_heuristic_plan_chinese_storey_argmax_argmin(question: str, postprocess: str) -> None:
+    plan = heuristic_plan(question, {}, has_viewer_context=False)
+    assert plan.group_by == "storey"
+    assert plan.postprocess == postprocess
+    assert plan.match_status == "complete"
+
+
+def test_heuristic_multi_plan_chinese_multi_entity_count() -> None:
+    multi_plan = heuristic_multi_plan("这个项目里有多少扇门和窗？", {}, has_viewer_context=False)
+    assert multi_plan is not None
+    entity_types = {plan.entity_type for plan in multi_plan.subplans}
+    assert entity_types == {"IfcDoor", "IfcWindow"}
+    assert all(plan.operation == "count" for plan in multi_plan.subplans)
+    assert multi_plan.response_language == "zh-CN"
+
+
+def test_heuristic_multi_plan_bare_ambiguous_board_stays_unsupported() -> None:
+    """SPEC-M14: bare "板" is deliberately not an alias (ambiguous with a PDF
+    electrical panel/board, see AgentService._resolve_context's own
+    "这张图里的板有多少" clarification) -- this question must keep falling
+    through, unaffected by the Chinese fast path added here.
+    """
+    assert heuristic_multi_plan("这张图里的板有多少", {}, has_viewer_context=False) is None
+    plan = heuristic_plan("这张图里的板有多少", {}, has_viewer_context=False)
+    assert plan.source == "unsupported"
+
+
 @pytest.mark.parametrize("entity_word,ifc_type", [
     ("roof", "IfcRoof"), ("column", "IfcColumn"), ("beam", "IfcBeam"), ("member", "IfcMember"),
     ("railing", "IfcRailing"), ("covering", "IfcCovering"), ("footing", "IfcFooting"), ("plate", "IfcPlate"),
@@ -261,3 +353,31 @@ def test_ground_plan_to_selection_leaves_plan_unchanged_without_selection() -> N
     grounded, was_grounded = ground_plan_to_selection(plan, {}, "how many doors are there?")
     assert was_grounded is False
     assert grounded is plan
+
+
+# --- SPEC-M14: live end-to-end proof, not just planning-layer shape ---------
+
+def test_chinese_count_question_is_answered_deterministically_end_to_end(tmp_path: Path) -> None:
+    """The real claim this spec makes: a genuine Chinese count question,
+    driven through the full `AgentService.invoke()` graph against a real
+    project, is `answered` with zero model calls -- `heuristic_multi_plan`
+    returning the right shape in isolation (the tests above) is necessary
+    but not sufficient proof of that; `AgentService._route` has its own
+    dispatch order (`generic_multi is not None` checked before the LLM
+    branch) that only an end-to-end call actually exercises.
+    """
+    settings = Settings(
+        data_dir=ROOT / "demo_data", ifc_file="armie_demo.ifc", pdf_files=["armie_demo_schedule.pdf"],
+        audit_store_path=tmp_path / "audit.jsonl", evidence_dir=tmp_path / "evidence",
+    )
+    settings.ensure_runtime_directories()
+    fake = FakeModelProvider()
+    container = ServiceContainer(settings, text_provider_factory=lambda s: fake, vision_provider_factory=lambda s: fake)
+    service = AgentService(container)
+    resources: ProjectResources = asyncio.run(container.get_project("demo"))
+
+    response = service.invoke(project_resources=resources, thread_id="m14-zh-count", viewer_context=None, question="这个项目里有多少扇门？")
+
+    assert response.disposition.value == "answered"
+    assert response.execution_metadata.get("model_call_count", 0) == 0
+    assert response.execution_metadata.get("planning_mode") == "heuristic"

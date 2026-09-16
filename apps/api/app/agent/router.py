@@ -39,8 +39,50 @@ ELEMENT_ALIASES = {
     "furniture": "IfcFurnishingElement", "furnishing": "IfcFurnishingElement", "furnishings": "IfcFurnishingElement",
     "footing": "IfcFooting", "footings": "IfcFooting",
     "plate": "IfcPlate", "plates": "IfcPlate",
+    # SPEC-M14: Simplified Chinese aliases for the count/group-by fast path.
+    # Bare "板" and "面板" are deliberately absent -- both are genuinely
+    # ambiguous with a PDF electrical panel/board elsewhere in this
+    # codebase (AgentService._resolve_context's own "这张图里的板有多少"
+    # clarification exists specifically because of this), so only the
+    # unambiguous compound "楼板" (floor slab) is aliased. "构件" is also
+    # absent: it is this codebase's own generic Chinese fallback noun for
+    # "unknown element type" (graph.py's response-formatting noun maps,
+    # D-055), not a specific word for IfcMember -- aliasing it here would
+    # make a generic "构件有多少" collide with the narrow IfcMember type.
+    "门": "IfcDoor",
+    "窗": "IfcWindow", "窗户": "IfcWindow",
+    "墙": "IfcWall", "墙体": "IfcWall",
+    "空间": "IfcSpace", "房间": "IfcSpace",
+    "楼梯": "IfcStair",
+    "楼板": "IfcSlab",
+    "屋顶": "IfcRoof",
+    "柱": "IfcColumn", "柱子": "IfcColumn",
+    "梁": "IfcBeam",
+    "栏杆": "IfcRailing",
+    "饰面": "IfcCovering",
+    "家具": "IfcFurnishingElement",
+    "基础": "IfcFooting",
 }
 SUPPORTED_ENTITY_TYPES = set(ELEMENT_ALIASES.values())
+
+
+def _alias_search(term: str, text: str) -> re.Match[str] | None:
+    """Find an `ELEMENT_ALIASES` key in already-lowercased/normalized text.
+
+    SPEC-M14: `\\b` word-boundary regex (used here for every ASCII term,
+    unchanged) never matches inside unsegmented Chinese text -- adjacent
+    ideographs are all `\\w` under Python 3's Unicode-aware `re`, so there
+    is never a boundary between two of them. Verified empirically:
+    `re.search(r"\\b门\\b", "这个项目里有多少扇门？")` is `False` even though
+    "门" is genuinely present. A non-ASCII term is matched as a bare
+    substring instead -- the same technique this file's own
+    `cross_source_reconciliation_requested`/`cross_source_join_requested`
+    already use for their own Chinese markers, generalized here rather
+    than reinvented.
+    """
+    escaped = re.escape(term)
+    pattern = escaped if not term.isascii() else rf"\b{escaped}\b"
+    return re.search(pattern, text)
 
 
 def cross_source_reconciliation_requested(question: str) -> bool:
@@ -148,13 +190,24 @@ def resolve_reference(question: str, context: dict) -> tuple[str, dict, str | No
 def fast_path_coverage(question: str, context: dict, has_viewer_context: bool) -> dict[str, Any]:
     """Decide whether the deterministic shortcut covers the *whole* request.
 
-    This accepts only deliberately narrow English templates.  Any non-ASCII,
-    compound, elliptical, mixed-language, or contextual request is routed to
-    the typed semantic planner rather than partially executing a keyword hit.
+    This accepts only deliberately narrow English and Simplified Chinese
+    (SPEC-M14, OD-49) templates.  Any other non-ASCII, compound, elliptical,
+    mixed-language, or contextual request is routed to the typed semantic
+    planner rather than partially executing a keyword hit -- Chinese is not
+    a general exemption from that rule, only the specific enumerated
+    count/group-by surface below actually matches anything.
     """
     normalized = " ".join(question.strip().lower().split())
     ascii_only = question.isascii()
-    entities = [key for key in ELEMENT_ALIASES if re.search(rf"\b{re.escape(key)}\b", normalized)]
+    # SPEC-M14, OD-49: knowingly reverses this function's own prior
+    # "any non-ASCII routes to the semantic planner" invariant, but only
+    # for the narrow Chinese count/group-by surface `generic_count`/
+    # `generic_grouping` below actually recognize -- any other script, or
+    # Chinese text that matches neither, still correctly reports
+    # "incomplete" below, since none of this function's term lists match
+    # it either way.
+    contains_chinese = any("一" <= char <= "鿿" for char in question)
+    entities = [key for key in ELEMENT_ALIASES if _alias_search(key, normalized)]
     unique_entities = sorted({ELEMENT_ALIASES[key] for key in entities})
     simple_patterns = (
         r"how many (doors|windows|walls|spaces|stairs|slabs|openings|glazed openings) (are )?(there )?(in (the )?project)?\??",
@@ -166,12 +219,12 @@ def fast_path_coverage(question: str, context: dict, has_viewer_context: bool) -
     )
     selected_element_template = bool(context.get("active_entity_ids")) and normalized in {"what is this?", "what is this", "which floor is it on?", "which floor is it on", "which level is it on?", "which level is it on"}
     clarification_template = bool(context.get("pending_space_distance")) and bool(re.fullmatch(r"(?:use|choose|select)\s+(?:bedroom\s+)?[a-z0-9_-]+\.?", normalized))
-    grouping_markers = ("by floor", "by storey", "each floor", "each storey", "per floor", "per storey", "break them down", "break down", "every floor")
+    grouping_markers = ("by floor", "by storey", "each floor", "each storey", "per floor", "per storey", "break them down", "break down", "every floor", "按楼层", "按层", "每层", "每一层", "各楼层", "分楼层", "楼层分布", "哪层", "哪一层", "哪个楼层")
     prior_entities = {item.get("entity_type") for item in context.get("previous_subplans", []) if item.get("source") == "ifc" and item.get("entity_type")}
     simple_template = any(re.fullmatch(pattern, normalized) for pattern in simple_patterns) or selected_element_template or clarification_template
-    generic_count = bool(re.search(r"\b(how many|count|number of|give me the number|there are)\b", normalized)) and len(unique_entities) == 1
+    generic_count = (bool(re.search(r"\b(how many|count|number of|give me the number|there are)\b", normalized)) or any(marker in normalized for marker in ("有多少", "数量", "共有", "一共有", "统计"))) and len(unique_entities) == 1
     generic_grouping = bool(unique_entities or prior_entities) and any(marker in normalized for marker in grouping_markers)
-    complete = ascii_only and (simple_template or generic_count or generic_grouping)
+    complete = (ascii_only or contains_chinese) and (simple_template or generic_count or generic_grouping)
     covered = unique_entities if complete else []
     unresolved: list[str] = [] if complete else ["semantic_decomposition_required"]
     return {
@@ -213,19 +266,24 @@ def heuristic_multi_plan(question: str, context: dict, has_viewer_context: bool,
                 matched_signals=["intent:cross_source_join"], match_status="complete",
             )],
         )
-    argmax = bool(re.search(r"\b(most|greatest number|highest count)\b", normalized))
-    argmin = bool(re.search(r"\b(fewest|lowest count|least)\b", normalized))
+    # SPEC-M14: Chinese keyword alternatives are plain substring checks
+    # (`in`/no `\b`), matching this codebase's own existing Chinese-marker
+    # style (cross_source_reconciliation_requested) rather than regex word
+    # boundaries, which never match inside unsegmented Chinese text (see
+    # _alias_search's own docstring).
+    argmax = bool(re.search(r"\b(most|greatest number|highest count)\b", normalized)) or "最多" in normalized
+    argmin = bool(re.search(r"\b(fewest|lowest count|least)\b", normalized)) or "最少" in normalized
     # Keep the deterministic route deliberately narrow.  Merely mentioning a
     # level in a natural-language comparison (for example, “one level at a
     # time”) is not enough to prove that the heuristic has recovered the
     # complete grouped-argmax contract.  Such requests must fall through to
     # the semantic planner, which can return the same canonical typed plan
     # after interpreting the whole utterance.
-    grouping = any(marker in normalized for marker in ("by floor", "by storey", "by level", "each floor", "each storey", "each level", "per floor", "per storey", "per level", "break them down", "break down", "every floor", "which floor", "which storey", "which level"))
-    count_intent = bool(re.search(r"\b(how many|count|number of|give me the number|there are)\b", normalized))
+    grouping = any(marker in normalized for marker in ("by floor", "by storey", "by level", "each floor", "each storey", "each level", "per floor", "per storey", "per level", "break them down", "break down", "every floor", "which floor", "which storey", "which level", "按楼层", "按层", "每层", "每一层", "各楼层", "分楼层", "楼层分布", "哪层", "哪一层", "哪个楼层"))
+    count_intent = bool(re.search(r"\b(how many|count|number of|give me the number|there are)\b", normalized)) or any(marker in normalized for marker in ("有多少", "数量", "共有", "一共有", "统计"))
     entity_types: list[str] = []
     for alias, entity_type in ELEMENT_ALIASES.items():
-        if re.search(rf"\b{re.escape(alias)}\b", normalized) and entity_type not in entity_types:
+        if _alias_search(alias, normalized) and entity_type not in entity_types:
             entity_types.append(entity_type)
     if not entity_types and grouping:
         for item in context.get("previous_subplans", []):
@@ -408,7 +466,7 @@ def heuristic_plan(question: str, context: dict, has_viewer_context: bool, sourc
             match_status="complete" if has_viewer_context else "partial",
         )
 
-    entity_type = next((value for key, value in ELEMENT_ALIASES.items() if re.search(rf"\b{re.escape(key)}\b", lowered)), None)
+    entity_type = next((value for key, value in ELEMENT_ALIASES.items() if _alias_search(key, lowered)), None)
     is_deictic = any(term in lowered for term in DEICTIC_TERMS)
     if is_deictic and context.get("active_entity_type"):
         return QueryPlan(
@@ -424,8 +482,11 @@ def heuristic_plan(question: str, context: dict, has_viewer_context: bool, sourc
     # treating a valid conversation turn as an unsupported standalone prompt.
     recognises_ifc = bool(entity_type or any(term in lowered for term in ("storey", "floor", "level", "bim", "ifc", "property", "quantity")))
     if recognises_ifc:
-        grouping_language = any(term in lowered for term in ("by floor", "by storey", "by level", "per floor", "per storey", "per level", "each floor", "each storey", "each level"))
-        operation = "group_by" if grouping_language else "count" if any(term in lowered for term in ("how many", "count", "number of", "total number", "total count")) else "group_by"
+        # SPEC-M14: Chinese alternatives are plain substrings, matching
+        # _alias_search's own reasoning -- \b never matches inside
+        # unsegmented Chinese text.
+        grouping_language = any(term in lowered for term in ("by floor", "by storey", "by level", "per floor", "per storey", "per level", "each floor", "each storey", "each level", "按楼层", "按层", "每层", "每一层", "各楼层", "分楼层", "楼层分布", "哪层", "哪一层", "哪个楼层"))
+        operation = "group_by" if grouping_language else "count" if any(term in lowered for term in ("how many", "count", "number of", "total number", "total count", "有多少", "数量", "共有", "一共有", "统计")) else "group_by"
         if any(term in lowered for term in ("maximum", "max ", "highest")):
             operation = "max"
         elif any(term in lowered for term in ("minimum", "min ", "lowest")):
@@ -436,11 +497,11 @@ def heuristic_plan(question: str, context: dict, has_viewer_context: bool, sourc
             operation = "sum"
         elif any(term in lowered for term in ("property", "properties")):
             operation = "get_properties"
-        group_by = "storey" if any(term in lowered for term in ("which floor", "which storey", "which level", "by floor", "by storey", "across levels", "by level", "per floor", "per level", "per storey", "each floor", "each level", "each storey")) else "none"
-        postprocess = "argmax" if group_by == "storey" and any(term in lowered for term in ("most", "maximum", "highest", "greatest number")) else "argmin" if group_by == "storey" and any(term in lowered for term in ("fewest", "least", "minimum", "lowest")) else None
+        group_by = "storey" if any(term in lowered for term in ("which floor", "which storey", "which level", "by floor", "by storey", "across levels", "by level", "per floor", "per level", "per storey", "each floor", "each level", "each storey", "按楼层", "按层", "每层", "每一层", "各楼层", "分楼层", "楼层分布", "哪层", "哪一层", "哪个楼层")) else "none"
+        postprocess = "argmax" if group_by == "storey" and any(term in lowered for term in ("most", "maximum", "highest", "greatest number", "最多")) else "argmin" if group_by == "storey" and any(term in lowered for term in ("fewest", "least", "minimum", "lowest", "最少")) else None
         if context.get("active_group_by") == "space":
             group_by, operation = "space", "group_by"
-        explicit_grouping = any(term in lowered for term in ("most", "greatest number", "highest count", "fewest", "lowest count", "by floor", "by storey", "per floor", "per storey", "each floor", "each storey", "by level", "per level"))
+        explicit_grouping = any(term in lowered for term in ("most", "greatest number", "highest count", "fewest", "lowest count", "by floor", "by storey", "per floor", "per storey", "each floor", "each storey", "by level", "per level", "最多", "最少", "按楼层", "按层", "每层", "每一层", "各楼层", "分楼层", "楼层分布", "哪层", "哪一层", "哪个楼层"))
         complete = bool(entity_type) and (operation == "count" or operation == "get_properties" or (group_by != "none" and explicit_grouping))
         return QueryPlan(
             source="ifc", intent="aggregate" if operation in {"min", "max", "sum", "average", "group_by"} else operation,
