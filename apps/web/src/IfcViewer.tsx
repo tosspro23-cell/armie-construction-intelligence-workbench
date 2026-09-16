@@ -173,6 +173,8 @@ export function IfcViewer({ onSelection, onSnapshot, onStatus, highlightedGlobal
   const hostRef = useRef<HTMLDivElement>(null);
   const [status, setStatus] = useState<ViewerStatus>({ phase: "initializing", message: "Preparing IFC viewer…" });
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
+  const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
+  const controlsRef = useRef<OrbitControls | null>(null);
   const elementMeshesRef = useRef<Map<string, THREE.Mesh>>(new Map());
 
   const publishStatus = (next: ViewerStatus) => {
@@ -215,8 +217,40 @@ export function IfcViewer({ onSelection, onSnapshot, onStatus, highlightedGlobal
   // citations were already toggled on before switching away.
   const highlightedGlobalIdsRef = useRef<Set<string> | undefined>(highlightedGlobalIds);
   useEffect(() => {
+    const previous = highlightedGlobalIdsRef.current;
     highlightedGlobalIdsRef.current = highlightedGlobalIds;
     applyHighlightSet(highlightedGlobalIds);
+    // D-056: owner-reported, 2026-09-16 -- a citation's highlight (D-055)
+    // was confirmed genuinely applied on the mesh (opacity/emissive both
+    // correct), but the camera never moves, so an element buried behind
+    // opaque interior walls/floors -- true of most rooms and most
+    // furniture alike in a real, densely-partitioned building, not just
+    // IfcSpace -- is fully occluded regardless of how bright its highlight
+    // is. There was never any camera-focus-on-highlight behavior in this
+    // viewer (D-046/D-049's own highlight rewrites only ever touched
+    // material state, confirmed by reading their history). Only a genuine
+    // single toggle-ON re-frames the camera -- a toggle-OFF, a multi-id
+    // batch change, or the initial mount are all left alone, so rotating
+    // the model or clearing a highlight never yanks the view around.
+    const previousIds = previous ?? new Set<string>();
+    const nextIds = highlightedGlobalIds ?? new Set<string>();
+    const added = [...nextIds].filter((id) => !previousIds.has(id));
+    if (added.length === 1 && nextIds.size > previousIds.size) {
+      const mesh = elementMeshesRef.current.get(added[0]);
+      const camera = cameraRef.current;
+      const controls = controlsRef.current;
+      if (mesh && camera && controls) {
+        const box = mesh.geometry.boundingBox ?? new THREE.Box3().setFromObject(mesh);
+        const center = box.getCenter(new THREE.Vector3());
+        const size = Math.max(box.getSize(new THREE.Vector3()).length(), 1.5);
+        controls.target.copy(center);
+        const direction = camera.position.clone().sub(center).normalize();
+        if (direction.lengthSq() === 0) direction.set(0.6, 0.5, 0.6).normalize();
+        camera.position.copy(center).add(direction.multiplyScalar(size * 1.8));
+        camera.updateProjectionMatrix();
+        controls.update();
+      }
+    }
   }, [highlightedGlobalIds]);
 
   useEffect(() => {
@@ -254,6 +288,8 @@ export function IfcViewer({ onSelection, onSnapshot, onStatus, highlightedGlobal
     scene.add(new THREE.GridHelper(100, 50, 0x4f79b8, 0x263a61));
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
+    cameraRef.current = camera;
+    controlsRef.current = controls;
     const pickables: THREE.Mesh[] = [];
 
     const resize = () => {
@@ -445,6 +481,8 @@ export function IfcViewer({ onSelection, onSnapshot, onStatus, highlightedGlobal
       // project switch) keeps `applyHighlightSet` from ever iterating a
       // disposed mesh's material.
       elementMeshesRef.current.clear();
+      cameraRef.current = null;
+      controlsRef.current = null;
     };
     // projectId is in this effect's dependency array on purpose: switching
     // projects tears down the whole scene (the existing cleanup below

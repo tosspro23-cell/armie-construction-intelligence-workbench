@@ -2482,3 +2482,70 @@ server, real project data, real click-driven flow), confirming the same answers 
 in the Conversation panel with a real Decision Trace. The opacity fix was verified as described
 above via direct Three.js material inspection, not just visual inspection of a screenshot. 343
 tests pass (333 + 10 new); `ruff` clean; `npm run build` clean.
+
+## D-056 — a citation's highlight had no camera to go with it; DigitalHub's first viewer load had no
+compression
+
+Owner-reported, 2026-09-16, immediately after D-055 shipped: on the real Duplex apartment, clicking
+a Space citation still didn't visibly show anything, while furniture citations did; separately,
+RWTH DigitalHub's first viewer load felt close to two minutes -- asked whether that's normal.
+
+**Root cause #1, confirmed live, not guessed: D-055's opacity fix works correctly; there has simply
+never been any camera movement tied to a highlight, in either buildings' element type.** Direct
+inspection of the running Three.js scene (reading `elementMeshesRef`'s actual mesh out of
+`IfcViewer`'s React fiber state in a live browser) confirmed the exact citation the owner would
+click sets `opacity: 0.65, emissive: 0x4f9df5` correctly -- D-055's fix genuinely applies, on
+Duplex exactly as it does on DigitalHub. The camera, however, never moves: `git log` on D-046/D-049
+(the viewer's own highlight-mechanism rewrites) confirms neither ever touched camera position --
+only material state. In a real, densely-partitioned residential building, most rooms (and most
+furniture inside them) sit behind fully opaque interior walls and floor/ceiling slabs (only
+*exterior* walls are made translucent, D-041) from the camera's existing, unrelated viewing angle,
+so a correctly-lit element is nonetheless invisible unless the camera already happens to be pointed
+at it. Isolating first the highlighted space, then a highlighted furniture piece (temporarily hiding
+every other of the building's 237 meshes, one at a time) showed **both** light up identically and
+correctly when nothing else occludes them -- disproving any real difference between space and
+furniture highlighting. The owner's own furniture citation almost certainly landed on a piece that
+happened to be within the existing view; the space citation did not. This was a real, previously
+unaddressed gap (no citation-driven camera focus ever existed here), not a regression from D-055.
+
+**Fix #1.** `IfcViewer.tsx`'s highlight effect now diffs the previous and next `highlightedGlobalIds`
+sets; when exactly one id is newly toggled *on* (never on a toggle-off, a multi-id batch change, or
+the initial mount, so rotating the model or clearing a highlight never yanks the camera), it
+re-centers `OrbitControls.target` on that element's real world-space bounding-box center and
+repositions the camera along its existing viewing direction at a distance scaled to the element's
+own size. Verified two ways on the real, live Duplex scene: (1) reading `controls.target` after the
+fly-to showed it exactly equal to the target mesh's own bounding-box center (zero distance); (2) a
+manual ray-vs-every-opaque-mesh-AABB test from the new camera position to that center found zero
+opaque elements in between -- a genuinely unobstructed line of sight, not merely a re-centered
+camera that still points at a wall.
+
+**Root cause #2, measured, not guessed: DigitalHub's `viewer-mesh` payload has no compression.**
+D-054 grew DigitalHub from 303 to 748 rendered elements; its real JSON payload for that endpoint
+measures **15.2 MB** uncompressed (up from D-044's own 5.6 MB baseline), and nothing in this app
+compresses any HTTP response -- confirmed by grepping `main.py` for `gzip`/`compress` and finding
+nothing. Cold `mesh_elements` compute itself measured 26.5s locally (vs. D-044's 10.9s for the
+smaller element set, roughly proportional); the production API container is provisioned at only
+0.5 vCPU (`az containerapp show`), well below the dev machine this was measured on, so the real cold
+compute is plausibly slower still. Combined with a real 15.2 MB transfer and client-side parsing of
+748 meshes, "close to two minutes" for a **first, uncached** load (every fresh container replica --
+after a deploy, restart, or scale event) is a real, explainable number, not a bug -- confirmed
+normal in that specific sense, but also a real, previously-undocumented cost of D-054 worth
+addressing rather than just explaining away.
+
+**Fix #2 (partial -- transport only, not compute).** `GZipMiddleware` added app-wide (`minimum_size
+=1000`, so this app's many small JSON responses pay no per-request gzip overhead). Measured on the
+real DigitalHub payload: 15.2 MB -> 3.5 MB (4.3x) for ~0.6s of server CPU -- a clear net win on any
+connection slower than very fast broadband, cutting the network-transfer share of the "two minutes"
+substantially. The cold-compute share (26.5s+, likely worse on 0.5 vCPU) is **not** fixed here --
+pre-warming the cache at container startup or increasing CPU allocation are real options, but both
+carry cost/latency tradeoffs an owner should decide on, not a default this fix assumes.
+
+**Verification.** New `tests/test_router_contract.py`-style regression for the camera fix was not
+attempted -- this project's frontend tests are `tsc`/`npm run build` type-checking only (no
+component/interaction harness, same limitation D-046/D-049 already noted), so the fly-to logic was
+verified live instead, as described above. New `tests/test_project_viewer_endpoints.py::
+test_viewer_mesh_response_is_gzip_compressed_for_a_real_client` asserts a real gzip-declaring client
+gets `Content-Encoding: gzip` and a smaller `Content-Length` than an `identity`-only client, both
+decoding to the identical JSON; confirmed to genuinely fail pre-fix (`git stash` of only
+`main.py`/`IfcViewer.tsx`, reran: `AssertionError` on the `content-encoding == "gzip"` line) and
+pass post-fix. 344 tests pass (343 + 1 new); `ruff` clean; `npm run build` clean.

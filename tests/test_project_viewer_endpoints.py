@@ -156,6 +156,32 @@ def test_project_viewer_mesh_returns_real_triangulated_geometry(monkeypatch, tmp
         assert "center" not in element and "dimensions" not in element
 
 
+# D-056: owner-reported, 2026-09-16 -- DigitalHub's first (uncached) viewer
+# load felt close to two minutes. Measured, real causes: D-054 grew
+# DigitalHub's own viewer-mesh payload to 15.2 MB of uncompressed JSON with
+# nothing compressing it in transit. gzip on that exact payload compresses
+# it 4.3x for ~0.6s of server CPU. Uses this suite's own small fixture
+# (35 KB, well above GZipMiddleware's minimum_size=1000) rather than the
+# real Dataset Pack files, matching this test module's existing
+# CI-safe/no-large-fixture convention.
+def test_viewer_mesh_response_is_gzip_compressed_for_a_real_client(monkeypatch, tmp_path):
+    _configure_env(monkeypatch, tmp_path)
+    import app.main as main_module
+
+    with TestClient(main_module.app) as client:
+        compressed = client.get("/api/v1/project/viewer-mesh", headers={"accept-encoding": "gzip"})
+        uncompressed = client.get("/api/v1/project/viewer-mesh", headers={"accept-encoding": "identity"})
+
+    assert compressed.status_code == 200 and uncompressed.status_code == 200
+    assert compressed.headers.get("content-encoding") == "gzip"
+    assert "content-encoding" not in uncompressed.headers
+    assert compressed.json() == uncompressed.json()
+    # httpx's TestClient transparently decodes gzip, so `.content` is
+    # identical for both -- the actual proof of a smaller response on the
+    # wire is the raw `Content-Length` header the server itself sent.
+    assert int(compressed.headers["content-length"]) < int(uncompressed.headers["content-length"])
+
+
 def _patch_to_record_event_loop_thread(monkeypatch) -> list[int]:
     """Records the thread `_resolve_project` actually runs on for the
     request about to be made -- straight-line `async def` code with no

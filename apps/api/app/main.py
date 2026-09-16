@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, Response
 from opentelemetry import trace as otel_trace
 
@@ -106,6 +107,18 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# D-056: owner-reported, 2026-09-16 -- DigitalHub's first (uncached) 3D
+# viewer load felt close to two minutes. Real, measured causes, not
+# guessed: D-054 nearly tripled DigitalHub's rendered element count
+# (303 -> 748) and its own `GET /api/v1/project/viewer-mesh` payload grew
+# to a real, measured 15.2 MB of uncompressed JSON -- with nothing
+# compressing it in transit. gzip on this exact payload (measured, same
+# 748-element DigitalHub file) compresses it to 3.5 MB (4.3x) for ~0.6s of
+# server-side CPU, a real net win on any connection slower than very fast
+# broadband. `minimum_size` keeps small JSON responses (most of this
+# app's other routes) uncompressed, since gzip's own per-request overhead
+# isn't worth paying for a response that's already a few hundred bytes.
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 
 @app.post("/api/v1/session")
