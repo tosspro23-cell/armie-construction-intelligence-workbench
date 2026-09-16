@@ -9,7 +9,7 @@ from uuid import uuid4
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from opentelemetry import trace as otel_trace
 
 from app.agent.graph import AgentService
@@ -406,6 +406,14 @@ async def _safe_audit_append(audit_store, event: AuditEvent) -> str | None:
 
 @app.post("/api/v1/chat", dependencies=[Depends(require_rate_limit)])
 async def chat(request: ChatRequest, x_session_id: str | None = Header(default=None)):
+    # SPEC-M16: engine="v2" is a completely separate handler/response shape
+    # (a streamed SSE response, not a plain JSON AgentResponse) -- kept as
+    # an early, explicit dispatch rather than threaded through the rest of
+    # this function, so V1's own code path below is provably untouched
+    # (byte-for-byte, per the spec's own Invariants) for every caller that
+    # omits `engine` or passes "v1".
+    if request.engine == "v2":
+        return await _chat_v2(request, x_session_id)
     agent: AgentService = app.state.agent
     container: ServiceContainer = app.state.container
     conversations: ConversationStore = container.conversation_store
@@ -574,6 +582,88 @@ async def chat(request: ChatRequest, x_session_id: str | None = Header(default=N
             "execution_metadata": {**response.execution_metadata, "context_persist_error": context_persist_error}
         })
     return _tag_span_with_trace_id(response)
+
+
+async def _v2_sse_stream(agent: AgentService, conversations: ConversationStore, *, project_resources, thread_id: str, question: str, viewer_context: dict | None, recent_turns: list[dict[str, str]], context: dict, memory_turns: int, request_id: str, started: float):
+    """SPEC-M16 SS F: renders `AgentService.invoke_v2`'s event stream as
+    Server-Sent Events. Each line is `data: <json>\\n\\n`, the format
+    `EventSource`/a `ReadableStream` reader on the frontend can consume
+    incrementally -- tool-use status and answer tokens are forwarded the
+    moment they arrive, not buffered until the turn completes.
+    """
+    import json as _json
+
+    final_response = None
+    try:
+        async for event in agent.invoke_v2(project_resources=project_resources, thread_id=thread_id, question=question, viewer_context=viewer_context, recent_turns=recent_turns):
+            if event["type"] == "final":
+                final_response = event["response"]
+                payload = {"type": "final", "response": _json.loads(final_response.model_dump_json())}
+            else:
+                payload = event
+            yield f"data: {_json.dumps(payload, default=str)}\n\n"
+    except Exception as error:
+        yield f"data: {_json.dumps({'type': 'error', 'message': f'The request failed safely: {error}'})}\n\n"
+        return
+    if final_response is None:
+        return
+    # SPEC-M16 SS D: bounded recent-turn memory lives as an ordinary key
+    # inside the same context dict V1's own structured fields already
+    # share -- no schema migration needed, InMemoryConversationStore and
+    # PostgresConversationStore both already persist this dict verbatim.
+    if final_response.disposition.value == "answered":
+        updated_turns = (recent_turns + [{"question": question, "answer": final_response.answer_markdown}])[-memory_turns:]
+        try:
+            await asyncio.to_thread(conversations.set, thread_id, {**context, "v2_recent_turns": updated_turns})
+        except Exception:
+            pass  # SPEC-M16: a memory-persistence failure must not turn an already-delivered, already-streamed answer into a client-visible error.
+
+
+async def _chat_v2(request: ChatRequest, x_session_id: str | None):
+    """SPEC-M16: the V2 tool-calling agent's own request handler.
+
+    Deliberately a separate function from `chat()` above, not a branch
+    threaded through it -- V1's handler is complex enough that sharing
+    control flow risks changing its behavior by accident; duplicating the
+    handful of genuinely shared steps (thread/project resolution) here
+    keeps that risk at zero, matching this spec's own Invariant that V1
+    is byte-for-byte unaffected by this work.
+    """
+    agent: AgentService = app.state.agent
+    container: ServiceContainer = app.state.container
+    conversations: ConversationStore = container.conversation_store
+    settings = container.settings
+    thread_id = request.thread_id or str(uuid4())
+    requested_project_id = request.project_id or "demo"
+    try:
+        bound_project_id = await asyncio.to_thread(conversations.bind_project, thread_id, requested_project_id)
+    except Exception as error:
+        raise HTTPException(status_code=503, detail=f"Could not resolve project binding: {error}") from error
+    if bound_project_id != requested_project_id:
+        raise HTTPException(status_code=409, detail=f"This thread is bound to project '{bound_project_id}', not '{requested_project_id}'. Start a new conversation to switch projects.")
+    started = time.perf_counter()
+    try:
+        project_resources = await asyncio.wait_for(container.get_project(bound_project_id), timeout=settings.request_timeout_seconds)
+    except ProjectNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Unknown project '{bound_project_id}'.") from None
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Loading the project's source files exceeded the bounded request deadline.") from None
+    try:
+        context = await asyncio.to_thread(conversations.get, thread_id) or {}
+    except Exception as error:
+        raise HTTPException(status_code=503, detail=f"Could not read conversation context: {error}") from error
+    recent_turns = context.get("v2_recent_turns", [])[-settings.conversation_memory_turns:]
+    request_id = request.request_id or str(uuid4())
+    return StreamingResponse(
+        _v2_sse_stream(
+            agent, conversations, project_resources=project_resources, thread_id=thread_id, question=request.question,
+            viewer_context=request.viewer_context.model_dump() if request.viewer_context else None,
+            recent_turns=recent_turns, context=context, memory_turns=settings.conversation_memory_turns,
+            request_id=request_id, started=started,
+        ),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Thread-Id": thread_id},
+    )
 
 
 @app.post("/api/v1/chat/{thread_id}/resume", dependencies=[Depends(require_rate_limit)])

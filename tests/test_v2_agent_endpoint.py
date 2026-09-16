@@ -1,0 +1,132 @@
+"""SPEC-M16: end-to-end tests for the V2 tool-calling agent's own request
+handler (``_chat_v2``/``POST /api/v1/chat`` with ``engine="v2"``).
+
+Drives the real FastAPI endpoint function directly (matching this
+project's own established pattern in
+``test_chat_persistence_failure_handling.py`` -- calling
+``main_module.chat(...)`` and inspecting its return value, no live HTTP
+server needed), with a real ``ServiceContainer``/``AgentService``, a real
+IFC fixture, and only the model provider faked -- so this proves the same
+"real everything except the model call" claim every other test in this
+suite already holds V1 to.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from pathlib import Path
+
+from app.agent.graph import AgentService
+from app.config import Settings
+from app.schemas.models import ChatRequest
+from app.services import ServiceContainer
+from fakes.fake_provider import FakeModelProvider, ScriptedAnswer, ScriptedToolCalls
+
+ROOT = Path(__file__).resolve().parents[1]
+QUESTION = "How many doors are there?"
+
+
+def _settings(tmp_path: Path, **overrides) -> Settings:
+    defaults = dict(
+        data_dir=ROOT / "demo_data", ifc_file="armie_demo.ifc", pdf_files=["armie_demo_schedule.pdf"],
+        audit_store_path=tmp_path / "audit.jsonl", evidence_dir=tmp_path / "evidence",
+    )
+    defaults.update(overrides)
+    settings = Settings(**defaults)
+    settings.ensure_runtime_directories()
+    return settings
+
+
+def _build(settings: Settings, fake: FakeModelProvider) -> tuple[ServiceContainer, AgentService]:
+    container = ServiceContainer(settings, text_provider_factory=lambda s: fake, vision_provider_factory=lambda s: fake)
+    return container, AgentService(container)
+
+
+async def _collect_sse_events(streaming_response) -> list[dict]:
+    events = []
+    async for chunk in streaming_response.body_iterator:
+        text = chunk.decode() if isinstance(chunk, bytes) else chunk
+        for line in text.strip().split("\n"):
+            if line.startswith("data: "):
+                events.append(json.loads(line.removeprefix("data: ")))
+    return events
+
+
+def test_v2_engine_answers_correctly_via_the_real_endpoint(tmp_path: Path) -> None:
+    import app.main as main_module
+
+    settings = _settings(tmp_path)
+    fake = FakeModelProvider()
+    fake.script("v2_tool_turn", ScriptedToolCalls([("count_elements", {"entity_type": "IfcDoor"})]))
+    fake.script("v2_tool_turn", ScriptedAnswer(["The project has 6 doors."]))
+    container, service = _build(settings, fake)
+    main_module.app.state.container = container
+    main_module.app.state.agent = service
+    main_module.app.state.requests = {}
+
+    response = asyncio.run(main_module.chat(ChatRequest(request_id="v2-req-1", thread_id="v2-thread-1", question=QUESTION, engine="v2")))
+    events = asyncio.run(_collect_sse_events(response))
+
+    tool_statuses = [event for event in events if event["type"] == "tool_status"]
+    assert {status["status"] for status in tool_statuses} == {"started", "completed"}
+    final_events = [event for event in events if event["type"] == "final"]
+    assert len(final_events) == 1
+    final = final_events[0]["response"]
+    assert final["disposition"] == "answered"
+    assert "6 doors" in final["answer_markdown"]
+    assert final["execution_metadata"]["engine"] == "v2"
+    assert final["execution_metadata"]["model_call_count"] == 2  # one to decide the tool call, one to answer
+    assert len(final["citations"]) > 0
+
+
+def test_v2_engine_streams_the_answer_incrementally(tmp_path: Path) -> None:
+    """The whole point of streaming: multiple distinct answer_chunk events,
+    not the full answer delivered as a single chunk.
+    """
+    import app.main as main_module
+
+    settings = _settings(tmp_path)
+    fake = FakeModelProvider()
+    fake.script("v2_tool_turn", ScriptedAnswer(["Hello", ", ", "world."]))
+    container, service = _build(settings, fake)
+    main_module.app.state.container = container
+    main_module.app.state.agent = service
+    main_module.app.state.requests = {}
+
+    response = asyncio.run(main_module.chat(ChatRequest(request_id="v2-req-stream", thread_id="v2-thread-stream", question="hi", engine="v2")))
+    events = asyncio.run(_collect_sse_events(response))
+
+    chunks = [event["text"] for event in events if event["type"] == "answer_chunk"]
+    assert chunks == ["Hello", ", ", "world."]
+
+
+def test_v2_engine_recent_turn_memory_persists_and_is_reused(tmp_path: Path) -> None:
+    """SPEC-M16 SS D: a second turn on the same thread receives the first
+    turn's real question/answer as conversation history -- proven by
+    inspecting what the fake provider was actually called with, not
+    assumed from the persistence code alone.
+    """
+    import app.main as main_module
+
+    settings = _settings(tmp_path, conversation_memory_turns=6)
+    fake = FakeModelProvider()
+    fake.script("v2_tool_turn", ScriptedToolCalls([("count_elements", {"entity_type": "IfcDoor"})]))
+    fake.script("v2_tool_turn", ScriptedAnswer(["The project has 6 doors."]))
+    fake.script("v2_tool_turn", ScriptedAnswer(["And 4 windows, following up on the doors."]))
+    container, service = _build(settings, fake)
+    main_module.app.state.container = container
+    main_module.app.state.agent = service
+    main_module.app.state.requests = {}
+
+    r1 = asyncio.run(main_module.chat(ChatRequest(request_id="v2-mem-1", thread_id="v2-mem-thread", question=QUESTION, engine="v2")))
+    asyncio.run(_collect_sse_events(r1))
+
+    r2 = asyncio.run(main_module.chat(ChatRequest(request_id="v2-mem-2", thread_id="v2-mem-thread", question="and the windows?", engine="v2")))
+    events2 = asyncio.run(_collect_sse_events(r2))
+
+    second_call_messages = fake.calls[-1].prompt  # str(messages) -- stream_turn's own RecordedCall.prompt
+    assert QUESTION in second_call_messages
+    assert "6 doors" in second_call_messages
+    final2 = [event for event in events2 if event["type"] == "final"][0]["response"]
+    assert final2["disposition"] == "answered"
