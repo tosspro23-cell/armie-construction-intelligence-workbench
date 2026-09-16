@@ -23,7 +23,7 @@ from pathlib import Path
 
 from app.agent.graph import AgentService
 from app.config import Settings
-from app.services import ProjectResources, ServiceContainer
+from app.services import ProjectResources, ServiceContainer, SourceManifest
 from fakes.fake_provider import FakeModelProvider
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,6 +32,23 @@ CORPUS = "corpus"
 
 def _demo(container: ServiceContainer) -> ProjectResources:
     return asyncio.run(container.get_project("demo"))
+
+
+def _non_demo_project(container: ServiceContainer, project_id: str) -> ProjectResources:
+    """D-051/OD-48: the exact same underlying `ifc_repository`/
+    `document_analyzers` as `_demo()` above, wrapped in a manifest whose
+    `project_id` is deliberately not "demo" -- isolates the one variable
+    this milestone's code change actually touches (SPEC-M7's
+    `_retrieve_relevant_documents` no longer hard-gating on that string)
+    rather than also standing up a second real project's fixtures, which
+    this test does not need.
+    """
+    demo = asyncio.run(container.get_project("demo"))
+    manifest = SourceManifest(
+        project_id=project_id, display_name=project_id, source_set_id=f"{project_id}-v1",
+        ifc_file=demo.manifest.ifc_file, pdf_files=demo.manifest.pdf_files, file_hashes=demo.manifest.file_hashes,
+    )
+    return ProjectResources(demo.ifc_repository, demo.document_analyzers, manifest)
 
 
 class FakeSearchClient:
@@ -123,6 +140,37 @@ def test_a_recall_failure_becomes_a_directed_miss_when_retrieval_finds_a_candida
     assert embedding_provider.calls == 1
     assert search_client.calls == [{"search_text": "What is the connected load for Panel-E?", "top": 5}]
     assert response.execution_metadata.get("model_call_count", 0) == 1  # the embedding call, disclosed
+
+
+# --- D-051/OD-48: retrieval no longer hard-gated to "demo" ------------------------
+
+def test_retrieval_now_runs_for_a_non_demo_project(tmp_path: Path) -> None:
+    """SPEC-M13: before this milestone, `_retrieve_relevant_documents`
+    returned `[]` unconditionally for any `project_id != "demo"`, before
+    ever calling the search-client/embedding-provider factories at all --
+    a real Dataset Pack project (digitalhub/duplex) could never reach
+    this path no matter how it was configured. Same fixture/question as
+    the "demo" directed-miss test above, the only difference is the
+    project id on the manifest -- proves the gate is gone via a call-count
+    assertion (would have been 0/[] before this change), not by asserting
+    the final answer text alone.
+    """
+    settings = _settings(tmp_path, [f"{CORPUS}/schedule_l2_east.pdf", f"{CORPUS}/schedule_l2_west.pdf"])
+    search_client = FakeSearchClient(results=[
+        {"filename": "schedule_l2_east.pdf", "@search.score": 0.9},
+    ])
+    embedding_provider = FakeEmbeddingProvider()
+    container, service = _service(settings, search_client=search_client, embedding_provider=embedding_provider)
+
+    response = service.invoke(
+        project_resources=_non_demo_project(container, "duplex"), thread_id="non-demo-directed-miss",
+        viewer_context=None, question="What is the connected load for Panel-E?",
+    )
+
+    assert response.disposition.value == "clarification_required"
+    assert "schedule_l2_east.pdf" in response.answer_markdown
+    assert embedding_provider.calls == 1
+    assert search_client.calls == [{"search_text": "What is the connected load for Panel-E?", "top": 5}]
 
 
 def test_a_directed_miss_emits_a_dedicated_retrieval_evaluated_audit_event(tmp_path: Path) -> None:

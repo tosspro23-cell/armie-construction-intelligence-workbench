@@ -1126,14 +1126,18 @@ Return only a corrected MultiQueryPlan JSON object."""
         degrade to the existing blanket miss message, never surface as an
         unhandled error on top of an already-honest `clarification_required`.
         """
-        # SPEC-M9 §Explicitly excluded: retrieval is scoped to the "demo"
-        # project only -- an explicit, asserted gate, not an accident of a
-        # non-"demo" project happening to have too few documents to reach
-        # this branch. Checked before the search-client factory is even
-        # called, so a call-count assertion in tests can distinguish "never
-        # attempted" from "attempted and returned nothing."
-        if state["project_resources"].manifest.project_id != "demo":
-            return []
+        # D-051/OD-48: SPEC-M9 originally scoped this to the "demo" project
+        # only, an explicit gate, not an accident. Relaxed here -- any
+        # project with retrieval actually configured (the two checks
+        # immediately below) is now eligible, not just "demo" -- so the
+        # real Dataset Pack buildings (digitalhub/duplex, SPEC-M13) can be
+        # demonstrated against the same shared Azure AI Search index.
+        # `_retrieve_relevant_documents`'s own caller already filters
+        # every candidate against *this* project's own `document_analyzers`
+        # (`name in analyzers`), which is what actually prevents a
+        # different project's document from ever being named here --
+        # verified true independent of this gate, not something this
+        # change introduces.
         search_client = self.container.search_client_factory(self.settings)
         if search_client is None:
             return []
