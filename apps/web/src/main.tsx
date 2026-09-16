@@ -103,7 +103,13 @@ function App() {
   // be misleading here (that state also drives the top-of-page "API
   // unavailable" status label for the *whole app*, not one turn), so V2
   // gets its own turn-scoped error surfaced inline in the conversation.
-  const [v2Error, setV2Error] = useState<string | null>(null);
+  // Carries `question` too (owner-reported, 2026-09-16, second round): the
+  // v2Streaming block that had been showing the user's own message is
+  // cleared to null in submitV2's `finally` before this renders, so on a
+  // failed turn the question needs its own copy here or it vanishes along
+  // with v2Streaming, leaving the error bubble with no visible context for
+  // what was actually asked.
+  const [v2Error, setV2Error] = useState<{ question: string; message: string } | null>(null);
   const [tab, setTab] = useState<WorkspaceTab>("bim");
   const [drawingZoom, setDrawingZoom] = useState(1);
   const [drawingEvidence, setDrawingEvidence] = useState<{ bbox?: number[]; board?: string; field?: string; page?: number; document?: string; localized?: boolean } | null>(null);
@@ -299,7 +305,7 @@ function App() {
       }
     } catch (error) {
       console.error(error);
-      setV2Error((error as Error).message);
+      setV2Error({ question: askedQuestion, message: (error as Error).message });
     } finally {
       setBusy(false);
       setV2Streaming(null);
@@ -457,8 +463,12 @@ function App() {
             the conversation panel looking silently empty -- v2Streaming is
             cleared in submitV2's `finally` before this renders, so the
             error needs its own turn-scoped slot rather than reusing
-            v2Streaming's block. */}
-        {v2Error && <div className="message-row assistant"><article className="message assistant-message error"><div className="message-meta"><span>Assistant</span><span className="engine-badge">V2 (agent)</span><span>error</span></div><p className="runtime-error" role="alert">{v2Error}</p></article></div>}
+            v2Streaming's block. Second round, same day: v2Error's own
+            question was still missing (only the error bubble showed, with
+            no visible trace of what had been asked) -- v2Error now carries
+            its own `question` copy, rendered as its own user-message row
+            here, the same way v2Streaming's does above. */}
+        {v2Error && <React.Fragment><div className="message-row user"><article className="message user-message"><div className="message-meta"><span>User</span></div><p>{v2Error.question}</p></article></div><div className="message-row assistant"><article className="message assistant-message error"><div className="message-meta"><span>Assistant</span><span className="engine-badge">V2 (agent)</span><span>error</span></div><p className="runtime-error" role="alert">{v2Error.message}</p></article></div></React.Fragment>}
       </div><form onSubmit={engine === "v2" ? submitV2 : submit}><textarea value={question} onChange={(e) => setQuestion(e.target.value)} placeholder="e.g. How many doors are in the project?" rows={3} /><div className="submit-row"><button disabled={busy}>{busy ? (engine === "v2" ? "Agent working…" : `Checking evidence… ${requestStage}`) : "Ask with audit trail"}</button>{busy && engine === "v1" && <button type="button" className="stop-button" onClick={stopRequest}>Stop request</button>}</div></form></section>
       <aside className="inspector"><DecisionStory latest={latest} trace={trace} projectId={projectId} onOpenCitation={openCitation} /></aside>
     </section>

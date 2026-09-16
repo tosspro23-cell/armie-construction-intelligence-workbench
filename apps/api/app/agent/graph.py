@@ -1995,6 +1995,22 @@ Return only a corrected MultiQueryPlan JSON object."""
         answer_parts: list[str] = []
         max_iterations = self.settings.tool_calling_max_iterations
         for iteration in range(1, max_iterations + 1):
+            if iteration > 1:
+                # Owner-reported, 2026-09-16: only the very first model call
+                # of a turn got its own audit event ("v2_turn_started"
+                # above) -- a later iteration's call (the one that reads
+                # tool results back and composes the final natural-language
+                # answer) had no start marker of its own. DecisionStory.tsx's
+                # client-side stage-timing approximation charges the gap
+                # between two audit events to whichever stage the first one
+                # belongs to, so with no marker here that entire
+                # answer-composition call silently got folded into
+                # "Verification" (whatever the last verification-tagged
+                # event happened to be) -- making Verification's reported
+                # latency mostly someone else's cost, not its own. This
+                # gives the second (and any later) model call its own
+                # Planning-bucketed start, same as the first.
+                self._audit(state, "v2_turn_continued", "model_called", "V2 agent requested another model turn using this iteration's tool results.", {"iteration": iteration}, planning_mode="tool_calling")
             model_call_count = state.get("model_call_count", 0) + 1
             state["model_call_count"] = model_call_count
             turn_complete = None
@@ -2045,11 +2061,31 @@ Return only a corrected MultiQueryPlan JSON object."""
                 # DecisionStory.tsx's reconciliation table nor the Findings
                 # tab (SPEC-M11) had anything to render, even though the
                 # underlying comparison ran and the answer text described it.
-                if tool_call.tool_name == "reconcile_doors_windows" and tool_result.get("result_value"):
-                    all_reconciliation_items.extend(tool_result["result_value"])
+                tool_result_value = tool_result.get("result_value")
+                if tool_call.tool_name == "reconcile_doors_windows" and tool_result_value:
+                    all_reconciliation_items.extend(tool_result_value)
+                    # Owner-reported, 2026-09-16: this deployment's own real
+                    # quota is a modest 10 requests / 10,000 tokens per
+                    # minute (confirmed via `az cognitiveservices account
+                    # deployment list` -- GlobalStandard capacity=10) --
+                    # a real building's reconciliation can have several
+                    # dozen compared tags, and every one of them, matched
+                    # items included, was feeding straight back into this
+                    # same turn's *next* model call (the one composing the
+                    # final answer) as this tool's own result. The prose
+                    # `answer` this tool already produced faithfully
+                    # summarizes matched/mismatched counts; the model only
+                    # needs each *non-matched* item's own detail to phrase a
+                    # specific, correct answer, so only those are sent back
+                    # in full, with a bare count standing in for the rest.
+                    matched_count = sum(1 for item in tool_result_value if item.get("status") == "matched")
+                    tool_result_value = {
+                        "matched_count": matched_count,
+                        "non_matched_items": [item for item in tool_result_value if item.get("status") != "matched"],
+                    }
                 messages.append({
                     "role": "tool", "tool_call_id": tool_call.call_id,
-                    "content": json.dumps({"disposition": tool_result.get("disposition"), "answer": tool_result.get("answer"), "result_value": tool_result.get("result_value")}, default=str),
+                    "content": json.dumps({"disposition": tool_result.get("disposition"), "answer": tool_result.get("answer"), "result_value": tool_result_value}, default=str),
                 })
                 yield {"type": "tool_status", "tool_name": tool_call.tool_name, "status": "completed"}
         # SPEC-M16 Invariants: a hard, enforced cap -- never an unbounded loop.
