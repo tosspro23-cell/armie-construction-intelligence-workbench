@@ -2615,3 +2615,59 @@ real `AgentService.invoke()` graph against a real project with a genuine Chinese
 proving `answered`/`model_call_count == 0`/`planning_mode == "heuristic"` -- the actual dispatch
 order in `AgentService._route`, which the planning-layer-only tests cannot prove by themselves. 365
 tests pass (344 + 21 new); `ruff` clean; `npm run build` clean.
+
+## D-058 — SPEC-M15: Chinese fast path, phase 2 (quantity extrema, reconciliation, distance, viewer-snapshot, and a broader Chinese surface)
+
+Owner-asked, 2026-09-16, immediately after M14 shipped: cover the remaining functionality (计算 —
+calculations/quantity extrema — and 核对 — reconciliation, named explicitly) and broaden Chinese
+recognition's generalization ability generally. Full spec:
+`docs/specs/SPEC-M15-chinese-fast-path-phase2-v1.md`.
+
+**Confirmed by direct testing what already worked and what did not.** Reconciliation intent
+detection predates M14 and already recognized several natural phrasings, but
+`"门的数量和图纸是否匹配"` (a very natural way to ask it) was not detected — the verb marker had the
+negated `不匹配` (mismatch) but never the bare positive `匹配` (match). Quantity extrema, space
+distance, viewer-snapshot phrases, and standalone (non-contextual) `get_properties` had zero
+Chinese support, exactly matching what M14's own "Explicitly excluded scope" named as deferred.
+
+**A real design choice: Chinese quantity extrema decomposes the question rather than templating
+it, and ends up genuinely more general than English's own implementation, not just at parity with
+it.** English's `quantity_match`/`paraphrase_quantity` are rigid `re.fullmatch` sentence templates
+over a fixed, narrow entity set (`doors|windows|walls|slabs|stairs` — missing space/roof/column/
+beam/member/railing/covering/furniture/footing/plate even in English). Chinese word order for this
+intent is genuinely free ("最高的门是哪个" / "门的最大高度是多少" / "门的高度最大值是多少" all mean
+the same thing) — verified against 6 natural phrasings, three independent order-free signals (an
+entity alias, from the full `ELEMENT_ALIASES` table; a measure cue 高度/宽度/长度/面积, or the
+height-implying shortcuts 最高/最矮 mirroring English's own tallest/shortest shortcut; and a
+direction cue 最大/最大值 vs. 最小/最小值/最低/最短) are detected and combined in any order instead.
+
+**A real pre-existing bug, found (not introduced) while adding the `get_properties` Chinese
+keyword — reproduced independent of Chinese input.** `heuristic_plan`'s own `intent=` mapping had
+no case for `operation == "get_properties"`; every *other* `get_properties` `QueryPlan` in this
+file correctly uses `intent="property_lookup"`, but this one branch passed the raw operation string
+straight through, which is not a valid `QueryPlan.intent` literal.
+`heuristic_plan("what properties does the door have?", {}, has_viewer_context=False)` — no Chinese
+involved at all — raised a `pydantic.ValidationError` before this fix; this branch was simply never
+exercised by an existing test with an empty, non-contextual `context`.
+
+**Fix.** Chinese quantity-extrema decomposition (`heuristic_plan`, new branch before the
+`recognises_ifc` fallback); `cross_source_reconciliation_requested`'s verb marker gains `匹配`;
+a Chinese space-distance pattern (`从?(.+?)到(.+?)(?:的距离|有多远|距离)`, order-flexible, verified
+against 4 phrasings) feeds the existing `space_distance` construction unchanged; Chinese
+viewer-snapshot phrases (当前视图/现在这个视图/这个视角/看到什么/可见) added to the existing
+`has_viewer_context`-gated check; `属性` added alongside `property`/`properties`, with the
+`intent=` mapping bug above fixed as part of making that addition actually work; a modest,
+individually-justified broadening of M14's own surface (count intent 有几/总共/总数/总计,
+storey-grouping 各层/逐层/每个楼层, and three entity aliases 门扇/窗子/地基 alongside their existing
+formal forms) — each checked against M14's own documented collision risks (板/面板/构件), none
+applicable.
+
+**Verification.** New Chinese-parity tests mirror every operation added, including a negative case
+proving an entity+measure phrasing with no direction cue correctly stays incomplete (never guesses
+a plan) and a positive case proving the full-alias-table claim (a non-English-covered type,
+`IfcColumn`, resolves correctly). The reconciliation `匹配` gap and the `get_properties` crash were
+both confirmed live during implementation — observed failing exactly as described, then fixed, then
+re-confirmed passing, matching the same pre/post verification standard this session's other D-0xx
+fixes use. A live end-to-end test drives the real `AgentService.invoke()` graph for the
+quantity-extrema path, mirroring D-057's own harness. 395 tests pass (365 + 30 new); `ruff` clean;
+`npm run build` clean.

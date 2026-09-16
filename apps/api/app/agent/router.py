@@ -62,6 +62,12 @@ ELEMENT_ALIASES = {
     "饰面": "IfcCovering",
     "家具": "IfcFurnishingElement",
     "基础": "IfcFooting",
+    # SPEC-M15 §F: a modest, individually-justified broadening of M14's own
+    # alias set -- each checked against the same 板/面板/构件-style collision
+    # risk M14's Rationale established, none of which apply here.
+    "门扇": "IfcDoor",
+    "窗子": "IfcWindow",
+    "地基": "IfcFooting",
 }
 SUPPORTED_ENTITY_TYPES = set(ELEMENT_ALIASES.values())
 
@@ -106,7 +112,11 @@ def cross_source_reconciliation_requested(question: str) -> bool:
     # instead of a synthesized comparison. Listed as its own alternative
     # rather than folded into \bmatch\b, since "mismatch" is not a
     # substring-superset of "match" under \b semantics.
-    verb_marker = re.search(r"\b(compare|verify|reconcile|check|match|mismatch|mismatches|cross-check|cross check|consistent)\b|核对|比对|一致|不匹配", lowered)
+    # SPEC-M15 §B: "匹配" (match, positive) was missing alongside the
+    # existing "不匹配" (mismatch) -- found live: "门的数量和图纸是否匹配"
+    # (a very natural way to ask this) went undetected before this fix,
+    # since "匹配" only ever appeared here negated.
+    verb_marker = re.search(r"\b(compare|verify|reconcile|check|match|mismatch|mismatches|cross-check|cross check|consistent)\b|核对|比对|一致|不匹配|匹配", lowered)
     drawing_marker = re.search(r"\b(pdf|drawing|schedule)\b|图纸|排程|明细表", lowered)
     return bool(entity_marker and verb_marker and drawing_marker)
 
@@ -219,10 +229,10 @@ def fast_path_coverage(question: str, context: dict, has_viewer_context: bool) -
     )
     selected_element_template = bool(context.get("active_entity_ids")) and normalized in {"what is this?", "what is this", "which floor is it on?", "which floor is it on", "which level is it on?", "which level is it on"}
     clarification_template = bool(context.get("pending_space_distance")) and bool(re.fullmatch(r"(?:use|choose|select)\s+(?:bedroom\s+)?[a-z0-9_-]+\.?", normalized))
-    grouping_markers = ("by floor", "by storey", "each floor", "each storey", "per floor", "per storey", "break them down", "break down", "every floor", "按楼层", "按层", "每层", "每一层", "各楼层", "分楼层", "楼层分布", "哪层", "哪一层", "哪个楼层")
+    grouping_markers = ("by floor", "by storey", "each floor", "each storey", "per floor", "per storey", "break them down", "break down", "every floor", "按楼层", "按层", "每层", "每一层", "各楼层", "分楼层", "楼层分布", "哪层", "哪一层", "哪个楼层", "各层", "逐层", "每个楼层")
     prior_entities = {item.get("entity_type") for item in context.get("previous_subplans", []) if item.get("source") == "ifc" and item.get("entity_type")}
     simple_template = any(re.fullmatch(pattern, normalized) for pattern in simple_patterns) or selected_element_template or clarification_template
-    generic_count = (bool(re.search(r"\b(how many|count|number of|give me the number|there are)\b", normalized)) or any(marker in normalized for marker in ("有多少", "数量", "共有", "一共有", "统计"))) and len(unique_entities) == 1
+    generic_count = (bool(re.search(r"\b(how many|count|number of|give me the number|there are)\b", normalized)) or any(marker in normalized for marker in ("有多少", "数量", "共有", "一共有", "统计", "有几", "总共", "总数", "总计"))) and len(unique_entities) == 1
     generic_grouping = bool(unique_entities or prior_entities) and any(marker in normalized for marker in grouping_markers)
     complete = (ascii_only or contains_chinese) and (simple_template or generic_count or generic_grouping)
     covered = unique_entities if complete else []
@@ -279,8 +289,8 @@ def heuristic_multi_plan(question: str, context: dict, has_viewer_context: bool,
     # complete grouped-argmax contract.  Such requests must fall through to
     # the semantic planner, which can return the same canonical typed plan
     # after interpreting the whole utterance.
-    grouping = any(marker in normalized for marker in ("by floor", "by storey", "by level", "each floor", "each storey", "each level", "per floor", "per storey", "per level", "break them down", "break down", "every floor", "which floor", "which storey", "which level", "按楼层", "按层", "每层", "每一层", "各楼层", "分楼层", "楼层分布", "哪层", "哪一层", "哪个楼层"))
-    count_intent = bool(re.search(r"\b(how many|count|number of|give me the number|there are)\b", normalized)) or any(marker in normalized for marker in ("有多少", "数量", "共有", "一共有", "统计"))
+    grouping = any(marker in normalized for marker in ("by floor", "by storey", "by level", "each floor", "each storey", "each level", "per floor", "per storey", "per level", "break them down", "break down", "every floor", "which floor", "which storey", "which level", "按楼层", "按层", "每层", "每一层", "各楼层", "分楼层", "楼层分布", "哪层", "哪一层", "哪个楼层", "各层", "逐层", "每个楼层"))
+    count_intent = bool(re.search(r"\b(how many|count|number of|give me the number|there are)\b", normalized)) or any(marker in normalized for marker in ("有多少", "数量", "共有", "一共有", "统计", "有几", "总共", "总数", "总计"))
     entity_types: list[str] = []
     for alias, entity_type in ELEMENT_ALIASES.items():
         if _alias_search(alias, normalized) and entity_type not in entity_types:
@@ -437,7 +447,47 @@ def heuristic_plan(question: str, context: dict, has_viewer_context: bool, sourc
             rationale="Explicit entity, controlled measure, and aggregation converge on the generic IFC quantity contract.",
             planning_mode="heuristic", rule_id="generic_quantity_aggregation", matched_signals=[f"measure:{measure}", f"aggregation:{aggregation}"], match_status="complete",
         )
+    # SPEC-M15 §A: Chinese quantity extrema, decomposed rather than
+    # templated. Chinese word order for this intent is genuinely free
+    # ("最高的门是哪个" / "门的最大高度是多少" / "门的高度最大值是多少" all
+    # mean the same thing) -- unlike English's own fixed-order
+    # `re.fullmatch` templates above, so three independent, order-free
+    # signals are detected and combined instead of enumerating every
+    # possible phrasing: an entity alias (the full ELEMENT_ALIASES table,
+    # not English's own narrower fixed entity set), a measure cue, and a
+    # direction cue. Fires only when a measure AND a direction both
+    # resolve -- a partial match (only one of the two) falls through to
+    # the semantic planner exactly like an incomplete English phrasing.
+    zh_measure_words = {"高度": "height", "宽度": "width", "长度": "length", "面积": "area"}
+    zh_max_words = ("最大", "最大值")
+    zh_min_words = ("最小", "最小值", "最低", "最短")
+    zh_entity_type = next((value for key, value in ELEMENT_ALIASES.items() if not key.isascii() and _alias_search(key, lowered)), None)
+    if zh_entity_type:
+        zh_measure = next((value for key, value in zh_measure_words.items() if key in lowered), None)
+        zh_aggregation = "max" if any(word in lowered for word in zh_max_words) else "min" if any(word in lowered for word in zh_min_words) else None
+        if not zh_measure:
+            # "最高"/"最矮" imply height without an explicit measure noun,
+            # mirroring English's own "tallest"/"shortest" shortcut above.
+            if "最高" in lowered:
+                zh_measure, zh_aggregation = "height", "max"
+            elif "最矮" in lowered:
+                zh_measure, zh_aggregation = "height", "min"
+        elif not zh_aggregation and "最高" in lowered:
+            zh_aggregation = "max"
+        if zh_measure and zh_aggregation:
+            return QueryPlan(
+                source="ifc", intent="aggregate", operation="aggregate_quantity", entity_type=zh_entity_type,
+                filters={}, group_by="none", postprocess=None, expected_result_shape="scalar_measurement",
+                measure=zh_measure, aggregation=zh_aggregation,
+                rationale="Chinese quantity-extremum phrasing decomposed into entity/measure/direction signals, converging on the canonical IFC measurement contract.",
+                planning_mode="heuristic", rule_id="generic_quantity_aggregation_zh", matched_signals=[f"measure:{zh_measure}", f"aggregation:{zh_aggregation}"], match_status="complete",
+            )
     distance_match = re.search(r"(?:distance|far) from (.+?) to (.+?)(?:\?|$)", lowered)
+    # SPEC-M15 §C: Chinese has no equivalent to English's fixed "from X to Y"
+    # preposition order requirement here -- "从A到B的距离"/"A到B的距离"/
+    # "A到B有多远" are all natural and this pattern accepts each (the
+    # leading "从" is optional). Verified against all three forms.
+    zh_distance_match = re.search(r"从?(.+?)到(.+?)(?:的距离|有多远|距离)", lowered)
     if context.get("pending_space_distance") and re.search(r"(?:use|choose|select)\s+(?:bedroom\s+)?[A-Za-z0-9_-]+", lowered):
         identifier = re.search(r"(?:use|choose|select)\s+(?:bedroom\s+)?([A-Za-z0-9_-]+)", lowered).group(1)
         pending = dict(context["pending_space_distance"])
@@ -447,9 +497,10 @@ def heuristic_plan(question: str, context: dict, has_viewer_context: bool, sourc
             expected_result_shape="scalar_measurement", rationale="Clarification supplied the missing source space identifier.",
             planning_mode="context", rule_id="space_distance_clarification", matched_signals=["reference:pending_space_distance"], match_status="complete",
         )
-    if distance_match:
-        from_space = re.sub(r"^the\s+", "", distance_match.group(1).strip())
-        to_space = re.sub(r"^the\s+", "", distance_match.group(2).strip())
+    if distance_match or zh_distance_match:
+        match = distance_match or zh_distance_match
+        from_space = re.sub(r"^the\s+", "", match.group(1).strip())
+        to_space = re.sub(r"^the\s+", "", match.group(2).strip())
         # Generic room labels intentionally remain ambiguous; the repository
         # will require an exact room identifier before measuring.
         return QueryPlan(
@@ -458,7 +509,7 @@ def heuristic_plan(question: str, context: dict, has_viewer_context: bool, sourc
             rationale="A generic space-distance request requires two uniquely resolved named spaces.", planning_mode="heuristic",
             rule_id="generic_space_distance", matched_signals=["capability:space_distance"], match_status="complete",
         )
-    if any(term in lowered for term in ("open or enclosed", "what can you see", "in this view", "current view", "visible")):
+    if any(term in lowered for term in ("open or enclosed", "what can you see", "in this view", "current view", "visible", "当前视图", "现在这个视图", "这个视角", "看到什么", "可见")):
         return QueryPlan(
             source="viewer_snapshot", intent="visual_inspection", operation="inspect_view",
             rationale="Question explicitly requests current-view visual inspection.", planning_mode="heuristic",
@@ -485,8 +536,8 @@ def heuristic_plan(question: str, context: dict, has_viewer_context: bool, sourc
         # SPEC-M14: Chinese alternatives are plain substrings, matching
         # _alias_search's own reasoning -- \b never matches inside
         # unsegmented Chinese text.
-        grouping_language = any(term in lowered for term in ("by floor", "by storey", "by level", "per floor", "per storey", "per level", "each floor", "each storey", "each level", "按楼层", "按层", "每层", "每一层", "各楼层", "分楼层", "楼层分布", "哪层", "哪一层", "哪个楼层"))
-        operation = "group_by" if grouping_language else "count" if any(term in lowered for term in ("how many", "count", "number of", "total number", "total count", "有多少", "数量", "共有", "一共有", "统计")) else "group_by"
+        grouping_language = any(term in lowered for term in ("by floor", "by storey", "by level", "per floor", "per storey", "per level", "each floor", "each storey", "each level", "按楼层", "按层", "每层", "每一层", "各楼层", "分楼层", "楼层分布", "哪层", "哪一层", "哪个楼层", "各层", "逐层", "每个楼层"))
+        operation = "group_by" if grouping_language else "count" if any(term in lowered for term in ("how many", "count", "number of", "total number", "total count", "有多少", "数量", "共有", "一共有", "统计", "有几", "总共", "总数", "总计")) else "group_by"
         if any(term in lowered for term in ("maximum", "max ", "highest")):
             operation = "max"
         elif any(term in lowered for term in ("minimum", "min ", "lowest")):
@@ -495,16 +546,28 @@ def heuristic_plan(question: str, context: dict, has_viewer_context: bool, sourc
             operation = "average"
         elif any(term in lowered for term in ("total", "sum")) and not any(term in lowered for term in ("total number", "total count")):
             operation = "sum"
-        elif any(term in lowered for term in ("property", "properties")):
+        elif any(term in lowered for term in ("property", "properties", "属性")):
             operation = "get_properties"
-        group_by = "storey" if any(term in lowered for term in ("which floor", "which storey", "which level", "by floor", "by storey", "across levels", "by level", "per floor", "per level", "per storey", "each floor", "each level", "each storey", "按楼层", "按层", "每层", "每一层", "各楼层", "分楼层", "楼层分布", "哪层", "哪一层", "哪个楼层")) else "none"
+        group_by = "storey" if any(term in lowered for term in ("which floor", "which storey", "which level", "by floor", "by storey", "across levels", "by level", "per floor", "per level", "per storey", "each floor", "each level", "each storey", "按楼层", "按层", "每层", "每一层", "各楼层", "分楼层", "楼层分布", "哪层", "哪一层", "哪个楼层", "各层", "逐层", "每个楼层")) else "none"
         postprocess = "argmax" if group_by == "storey" and any(term in lowered for term in ("most", "maximum", "highest", "greatest number", "最多")) else "argmin" if group_by == "storey" and any(term in lowered for term in ("fewest", "least", "minimum", "lowest", "最少")) else None
         if context.get("active_group_by") == "space":
             group_by, operation = "space", "group_by"
-        explicit_grouping = any(term in lowered for term in ("most", "greatest number", "highest count", "fewest", "lowest count", "by floor", "by storey", "per floor", "per storey", "each floor", "each storey", "by level", "per level", "最多", "最少", "按楼层", "按层", "每层", "每一层", "各楼层", "分楼层", "楼层分布", "哪层", "哪一层", "哪个楼层"))
+        explicit_grouping = any(term in lowered for term in ("most", "greatest number", "highest count", "fewest", "lowest count", "by floor", "by storey", "per floor", "per storey", "each floor", "each storey", "by level", "per level", "最多", "最少", "按楼层", "按层", "每层", "每一层", "各楼层", "分楼层", "楼层分布", "哪层", "哪一层", "哪个楼层", "各层", "逐层", "每个楼层"))
         complete = bool(entity_type) and (operation == "count" or operation == "get_properties" or (group_by != "none" and explicit_grouping))
+        # SPEC-M15 §E: pre-existing bug, found (not introduced) while adding
+        # the Chinese "属性" keyword above -- `operation == "get_properties"`
+        # is a real, valid, `complete`-eligible outcome of this branch, but
+        # QueryPlan's `intent` enum has no "get_properties" member (every
+        # other get_properties QueryPlan in this file, e.g.
+        # selected_element_plan and the is_deictic branch above, correctly
+        # uses `intent="property_lookup"`). Reproduced independent of any
+        # Chinese input: `heuristic_plan("what properties does the door
+        # have?", {}, has_viewer_context=False)` raised the identical
+        # pydantic ValidationError before this fix -- this branch was
+        # simply never exercised by an existing test with an empty
+        # (non-contextual) `context`.
         return QueryPlan(
-            source="ifc", intent="aggregate" if operation in {"min", "max", "sum", "average", "group_by"} else operation,
+            source="ifc", intent="aggregate" if operation in {"min", "max", "sum", "average", "group_by"} else "property_lookup" if operation == "get_properties" else operation,
             operation=operation, entity_type=entity_type or context.get("active_entity_type"), group_by=group_by, postprocess=postprocess,
             expected_result_shape=("single_group_extremum" if postprocess else "grouped_counts" if group_by != "none" else "scalar_count" if operation == "count" else None),
             filters=context.get("active_filters", {}), rationale="Question maps to constrained IFC operations.",

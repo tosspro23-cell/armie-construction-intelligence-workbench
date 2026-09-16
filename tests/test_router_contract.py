@@ -20,6 +20,7 @@ from app.agent.router import (
     ELEMENT_ALIASES,
     capability_gate,
     cross_source_join_requested,
+    cross_source_reconciliation_requested,
     fast_path_coverage,
     ground_plan_to_selection,
     heuristic_multi_plan,
@@ -336,6 +337,146 @@ def test_capability_gate_accepts_valid_ifc_count_plan() -> None:
     supported, reason = capability_gate(plan)
     assert supported is True
     assert reason is None
+
+
+# --- SPEC-M15: Chinese fast path, phase 2 -----------------------------------
+
+@pytest.mark.parametrize("question,measure,aggregation", [
+    ("这个项目最高的门是哪个？", "height", "max"),
+    ("门的最大高度是多少？", "height", "max"),
+    ("哪个窗户面积最大？", "area", "max"),
+    ("最小的墙宽度是多少", "width", "min"),
+    ("哪扇门最矮？", "height", "min"),
+    ("门的高度最大值是多少", "height", "max"),
+])
+def test_heuristic_plan_chinese_quantity_extrema_decomposition(question: str, measure: str, aggregation: str) -> None:
+    """SPEC-M15 SS A: unlike English's own fixed-word-order `re.fullmatch`
+    templates, Chinese phrasing for this intent has no fixed order -- these
+    six variants are deliberately different orderings of the same meaning.
+    """
+    plan = heuristic_plan(question, {}, has_viewer_context=False)
+    assert plan.source == "ifc"
+    assert plan.operation == "aggregate_quantity"
+    assert plan.measure == measure
+    assert plan.aggregation == aggregation
+    assert plan.match_status == "complete"
+
+
+def test_heuristic_plan_chinese_quantity_extrema_uses_full_alias_table() -> None:
+    """SS A's decomposition deliberately covers the full ELEMENT_ALIASES
+    table, not English's own narrower fixed entity set (doors/windows/
+    walls/slabs/stairs only) -- verified against a type outside that set.
+    """
+    plan = heuristic_plan("这根柱子的最大高度是多少？", {}, has_viewer_context=False)
+    assert plan.entity_type == "IfcColumn"
+    assert plan.measure == "height"
+    assert plan.aggregation == "max"
+
+
+def test_heuristic_plan_chinese_quantity_extrema_partial_without_direction() -> None:
+    """An entity and a measure noun alone, with no direction cue, must not
+    guess a plan -- falls through exactly like an incomplete English
+    phrasing would.
+    """
+    plan = heuristic_plan("门的高度是多少？", {}, has_viewer_context=False)
+    assert plan.operation != "aggregate_quantity"
+
+
+@pytest.mark.parametrize("question", ["核对一下门的数量和图纸是否匹配", "检查窗户与图纸排程是否一致"])
+def test_reconciliation_chinese_phrasing_detected(question: str) -> None:
+    assert cross_source_reconciliation_requested(question) is True
+
+
+def test_reconciliation_chinese_positive_match_verb_gap() -> None:
+    """SPEC-M15 SS B: confirmed to genuinely fail pre-fix -- the verb marker
+    only ever had the negated "不匹配" (mismatch), never the bare positive
+    "匹配" (match), so this exact natural phrasing went undetected.
+    """
+    assert cross_source_reconciliation_requested("门的数量和图纸是否匹配") is True
+
+
+@pytest.mark.parametrize("question,from_space,to_space", [
+    ("从卧室到厨房的距离是多少？", "卧室", "厨房"),
+    ("卧室到厨房的距离是多少", "卧室", "厨房"),
+    ("卧室到厨房有多远？", "卧室", "厨房"),
+    ("从主卧到客厅有多远", "主卧", "客厅"),
+])
+def test_heuristic_plan_chinese_space_distance(question: str, from_space: str, to_space: str) -> None:
+    plan = heuristic_plan(question, {}, has_viewer_context=False)
+    assert plan.operation == "space_distance"
+    assert plan.entity_type == "IfcSpace"
+    assert plan.filters["from_space"] == from_space
+    assert plan.filters["to_space"] == to_space
+    assert plan.match_status == "complete"
+
+
+@pytest.mark.parametrize("question", ["这个视图里能看到什么？", "当前视图是开放还是封闭的？", "现在这个视角能看到什么", "这个视图中门是否可见"])
+def test_heuristic_plan_chinese_viewer_snapshot_phrases(question: str) -> None:
+    plan = heuristic_plan(question, {}, has_viewer_context=True)
+    assert plan.source == "viewer_snapshot"
+    assert plan.operation == "inspect_view"
+    assert plan.match_status == "complete"
+
+
+def test_heuristic_plan_chinese_viewer_snapshot_partial_without_viewer_context() -> None:
+    plan = heuristic_plan("这个视图里能看到什么？", {}, has_viewer_context=False)
+    assert plan.match_status == "partial"
+
+
+def test_heuristic_plan_chinese_get_properties_keyword() -> None:
+    plan = heuristic_plan("门有什么属性？", {}, has_viewer_context=False)
+    assert plan.source == "ifc"
+    assert plan.intent == "property_lookup"
+    assert plan.operation == "get_properties"
+    assert plan.match_status == "complete"
+
+
+def test_heuristic_plan_get_properties_no_longer_crashes_without_context() -> None:
+    """SPEC-M15 SS E: real pre-existing bug, found (not introduced) while
+    adding the Chinese "属性" keyword -- `intent="get_properties"` is not a
+    valid QueryPlan.intent literal. Reproduced independent of Chinese input:
+    this exact call raised a pydantic ValidationError before the fix.
+    """
+    plan = heuristic_plan("what properties does the door have?", {}, has_viewer_context=False)
+    assert plan.intent == "property_lookup"
+    assert plan.operation == "get_properties"
+
+
+@pytest.mark.parametrize("question,entity_type,shape", [
+    ("有几扇窗？", "IfcWindow", "count"),
+    ("总共有多少个空间？", "IfcSpace", "count"),
+    ("门扇的数量是多少？", "IfcDoor", "count"),
+    ("窗子有多少个？", "IfcWindow", "count"),
+    ("有多少个地基？", "IfcFooting", "count"),
+    ("各层的门数量", "IfcDoor", "group_by"),
+    ("逐层统计窗户", "IfcWindow", "group_by"),
+])
+def test_heuristic_plan_chinese_surface_broadening(question: str, entity_type: str, shape: str) -> None:
+    plan = heuristic_plan(question, {}, has_viewer_context=False)
+    assert plan.entity_type == entity_type
+    assert plan.operation == shape
+    assert plan.match_status == "complete"
+
+
+def test_chinese_quantity_extremum_is_answered_deterministically_end_to_end(tmp_path: Path) -> None:
+    """Mirrors SPEC-M14 SS E's own live end-to-end harness: proves the real
+    AgentService.invoke() dispatch order, not just the planning-layer shape.
+    """
+    settings = Settings(
+        data_dir=ROOT / "demo_data", ifc_file="armie_demo.ifc", pdf_files=["armie_demo_schedule.pdf"],
+        audit_store_path=tmp_path / "audit.jsonl", evidence_dir=tmp_path / "evidence",
+    )
+    settings.ensure_runtime_directories()
+    fake = FakeModelProvider()
+    container = ServiceContainer(settings, text_provider_factory=lambda s: fake, vision_provider_factory=lambda s: fake)
+    service = AgentService(container)
+    resources: ProjectResources = asyncio.run(container.get_project("demo"))
+
+    response = service.invoke(project_resources=resources, thread_id="m15-zh-quantity", viewer_context=None, question="这个项目最高的门是哪个？")
+
+    assert response.disposition.value == "answered"
+    assert response.execution_metadata.get("model_call_count", 0) == 0
+    assert response.execution_metadata.get("planning_mode") == "heuristic"
 
 
 # --- ground_plan_to_selection --------------------------------------------------
