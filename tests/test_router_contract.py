@@ -1,11 +1,21 @@
 """Deterministic contract tests for app.agent.router (SPEC-M1 §4.4/13).
 
-Pure functions only; no provider, no network, no fixtures beyond plain dicts.
+Pure functions only; no provider, no network, no fixtures beyond plain dicts
+-- except the one end-to-end SPEC-M14 case at the bottom, which drives the
+real `AgentService.invoke()` path (mirroring `test_failure_path_evals.py`'s
+own `_demo`/`_settings`/`_service` harness) to prove the claim that actually
+matters: a real Chinese count question against a real project returns
+``answered`` with zero model calls, not just that the planning-layer helpers
+return the right shape in isolation.
 """
 
 from __future__ import annotations
 
+import asyncio
+from pathlib import Path
+
 import pytest
+from app.agent.graph import AgentService
 from app.agent.router import (
     ELEMENT_ALIASES,
     capability_gate,
@@ -17,6 +27,11 @@ from app.agent.router import (
     nearest_space_requested,
     selected_element_plan,
 )
+from app.config import Settings
+from app.services import ProjectResources, ServiceContainer
+from fakes.fake_provider import FakeModelProvider
+
+ROOT = Path(__file__).resolve().parents[1]
 
 # --- fast_path_coverage -----------------------------------------------------
 
@@ -338,3 +353,31 @@ def test_ground_plan_to_selection_leaves_plan_unchanged_without_selection() -> N
     grounded, was_grounded = ground_plan_to_selection(plan, {}, "how many doors are there?")
     assert was_grounded is False
     assert grounded is plan
+
+
+# --- SPEC-M14: live end-to-end proof, not just planning-layer shape ---------
+
+def test_chinese_count_question_is_answered_deterministically_end_to_end(tmp_path: Path) -> None:
+    """The real claim this spec makes: a genuine Chinese count question,
+    driven through the full `AgentService.invoke()` graph against a real
+    project, is `answered` with zero model calls -- `heuristic_multi_plan`
+    returning the right shape in isolation (the tests above) is necessary
+    but not sufficient proof of that; `AgentService._route` has its own
+    dispatch order (`generic_multi is not None` checked before the LLM
+    branch) that only an end-to-end call actually exercises.
+    """
+    settings = Settings(
+        data_dir=ROOT / "demo_data", ifc_file="armie_demo.ifc", pdf_files=["armie_demo_schedule.pdf"],
+        audit_store_path=tmp_path / "audit.jsonl", evidence_dir=tmp_path / "evidence",
+    )
+    settings.ensure_runtime_directories()
+    fake = FakeModelProvider()
+    container = ServiceContainer(settings, text_provider_factory=lambda s: fake, vision_provider_factory=lambda s: fake)
+    service = AgentService(container)
+    resources: ProjectResources = asyncio.run(container.get_project("demo"))
+
+    response = service.invoke(project_resources=resources, thread_id="m14-zh-count", viewer_context=None, question="这个项目里有多少扇门？")
+
+    assert response.disposition.value == "answered"
+    assert response.execution_metadata.get("model_call_count", 0) == 0
+    assert response.execution_metadata.get("planning_mode") == "heuristic"
