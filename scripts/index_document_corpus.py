@@ -58,6 +58,21 @@ def _document_type(filename: str) -> str:
     return "unknown"
 
 
+# D-053: every Dataset Pack project's own filenames are prefixed
+# (digitalhub_/duplex_, SPEC-M13's own collision-avoidance convention) --
+# reused here to derive which project a document belongs to, rather than
+# a second, separately-maintained mapping that could drift from the
+# prefix convention the filenames themselves already encode. Everything
+# else in this shared corpus (SPEC-M6's own documents) belongs to "demo".
+def _project_id_for(filename: str) -> str:
+    basename = Path(filename).name
+    if basename.startswith("digitalhub_"):
+        return "digitalhub"
+    if basename.startswith("duplex_"):
+        return "duplex"
+    return "demo"
+
+
 def _extract_text(pdf_path: Path) -> str:
     import fitz
 
@@ -90,6 +105,15 @@ def build_index(index_client, index_name: str, vector_dimensions: int) -> None:
         SimpleField(name="id", type=SearchFieldDataType.String, key=True),
         SimpleField(name="filename", type=SearchFieldDataType.String, filterable=True, sortable=True),
         SimpleField(name="document_type", type=SearchFieldDataType.String, filterable=True, facetable=True),
+        # D-053: this index has always been shared across every project
+        # with no scoping field at all -- a generic query's global top-K
+        # (computed across every project's documents combined) could
+        # crowd a project's own relevant document out of contention
+        # entirely, found live against DigitalHub. `filterable=True` so
+        # `_retrieve_relevant_documents` (graph.py) can apply an OData
+        # `project_id eq '...'` filter server-side, before top-K
+        # truncation, not just as a client-side post-filter afterward.
+        SimpleField(name="project_id", type=SearchFieldDataType.String, filterable=True, facetable=True),
         SearchableField(name="content", type=SearchFieldDataType.String),
         SearchField(
             name="content_vector", type=SearchFieldDataType.Collection(SearchFieldDataType.Single),
@@ -183,7 +207,8 @@ async def index_corpus(pdf_files: list[str]) -> None:
         basename = Path(pdf_file).name
         documents.append({
             "id": _safe_id(basename), "filename": basename,
-            "document_type": _document_type(pdf_file), "content": text, "content_vector": vector,
+            "document_type": _document_type(pdf_file), "project_id": _project_id_for(pdf_file),
+            "content": text, "content_vector": vector,
         })
         print(f"embedded: {pdf_file} ({len(text)} chars, {len(vector)}-dim vector)")
 

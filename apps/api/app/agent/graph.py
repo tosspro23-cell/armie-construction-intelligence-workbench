@@ -1166,10 +1166,28 @@ Return only a corrected MultiQueryPlan JSON object."""
                 {"purpose": "azure_search_query_embedding", "vector_dimensions": len(vector)},
                 actual_provider=embedding_provider.name, actual_model=embedding_provider.model,
             )
+            # D-053: owner-reported, 2026-09-16, live -- a generic
+            # schedule-style question against DigitalHub returned an empty
+            # blanket miss even though retrieval genuinely ran (a real
+            # embedding call, model_call_count 1). Root cause, confirmed by
+            # querying the raw index directly: this shared index has no
+            # server-side project scoping, so `top=5` truncation happens
+            # across *every* project's documents combined, before this
+            # method's caller ever filters by `name in analyzers`. Demo's
+            # own 6 near-identically-worded schedule documents crowded
+            # DigitalHub's 3 out of the global top 5 entirely -- the
+            # existing `name in analyzers` filter (still kept below, as a
+            # second, independent safety net) only ever proves a *wrong*
+            # project's document can't be named, never that a project's
+            # *own* documents can't be squeezed out of contention first.
+            # `filter` applies server-side, before ranking/truncation, so
+            # the top-5 is now computed only among this project's own
+            # documents, not the whole shared index.
+            project_id = state["project_resources"].manifest.project_id
             results = search_client.search(
                 search_text=question,
                 vector_queries=[VectorizedQuery(vector=vector, k_nearest_neighbors=5, fields="content_vector")],
-                select=["filename"], top=5,
+                select=["filename"], top=5, filter=f"project_id eq '{project_id}'",
             )
             return [(item["filename"], item["@search.score"]) for item in results]
         except Exception as error:

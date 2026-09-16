@@ -57,8 +57,11 @@ class FakeSearchClient:
         self.raise_error = raise_error
         self.calls: list[dict] = []
 
-    def search(self, *, search_text, vector_queries, select, top):
-        self.calls.append({"search_text": search_text, "top": top})
+    def search(self, *, search_text, vector_queries, select, top, filter=None):
+        # D-053: `filter` recorded like every other real search argument --
+        # tests assert its exact value to prove the server-side project
+        # scope is actually being requested, not just accepted silently.
+        self.calls.append({"search_text": search_text, "top": top, "filter": filter})
         if self.raise_error:
             raise self.raise_error
         return iter(self.results)
@@ -138,7 +141,7 @@ def test_a_recall_failure_becomes_a_directed_miss_when_retrieval_finds_a_candida
     assert "schedule_l2_east.pdf" in response.answer_markdown
     assert "most relevant" in response.answer_markdown
     assert embedding_provider.calls == 1
-    assert search_client.calls == [{"search_text": "What is the connected load for Panel-E?", "top": 5}]
+    assert search_client.calls == [{"search_text": "What is the connected load for Panel-E?", "top": 5, "filter": "project_id eq 'demo'"}]
     assert response.execution_metadata.get("model_call_count", 0) == 1  # the embedding call, disclosed
 
 
@@ -170,7 +173,10 @@ def test_retrieval_now_runs_for_a_non_demo_project(tmp_path: Path) -> None:
     assert response.disposition.value == "clarification_required"
     assert "schedule_l2_east.pdf" in response.answer_markdown
     assert embedding_provider.calls == 1
-    assert search_client.calls == [{"search_text": "What is the connected load for Panel-E?", "top": 5}]
+    # D-053: the filter must carry *this* project's own id ("duplex"), not
+    # "demo" -- proves the server-side scope tracks the real caller, not a
+    # hardcoded default that happened to work before this project existed.
+    assert search_client.calls == [{"search_text": "What is the connected load for Panel-E?", "top": 5, "filter": "project_id eq 'duplex'"}]
 
 
 def test_a_directed_miss_emits_a_dedicated_retrieval_evaluated_audit_event(tmp_path: Path) -> None:

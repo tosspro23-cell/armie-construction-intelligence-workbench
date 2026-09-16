@@ -2319,3 +2319,47 @@ OpenAI resources (not fakes) reproduced both the DigitalHub precision-collision
 (`clarification_required`, naming `duplex_rfi_log_001.pdf`, retrieval-directed) correctly. The
 owner is best positioned to confirm the live UI itself now works end-to-end, since this session
 cannot authenticate against it directly.
+
+## D-053 — the shared Search index's global top-K truncation could crowd a project's own documents out entirely
+
+Owner-reported, 2026-09-16, immediately after D-052: asked a generic schedule-style question
+against DigitalHub ("what is connected load for panel-") and got a blanket miss even though
+retrieval genuinely ran (`model_call_count: 1`, a real embedding call).
+
+**Root cause, confirmed by querying the raw index directly, not guessed.** `_retrieve_relevant_documents`
+(`apps/api/app/agent/graph.py`) asks Azure AI Search for the global `top=5` results, *then* its
+caller filters those down to the current project's own configured documents (`name in analyzers`)
+-- a real, working safeguard against naming a *wrong* project's document (verified during D-051),
+but one that does nothing to stop a project's own *correct* document from being squeezed out of the
+top 5 in the first place, since the index has never had any project-scoping field at all. Reproduced
+exactly: querying the raw index for the reported question returned only `demo`'s own 6
+near-identically-worded schedule documents (`schedule_l2_east.pdf`, `schedule_mezzanine.pdf`,
+`schedule_l2_west.pdf`, `schedule_l3_east.pdf`, `schedule_l3_west.pdf`) in the top 5 -- none of
+DigitalHub's own 3 schedules made it in at all, purely because `demo`'s larger set of similarly-worded
+documents outranked them on this generic a query.
+
+**Fix.** `scripts/index_document_corpus.py`'s index schema gained a `project_id` field
+(`filterable=True`), populated per document from the same `digitalhub_`/`duplex_`-prefix convention
+SPEC-M13's own filenames already encode (`_project_id_for`, everything else defaulting to `demo`).
+`_retrieve_relevant_documents` now passes `filter=f"project_id eq '{project_id}'"` to the search
+call -- an OData filter Azure AI Search applies server-side, *before* ranking/truncation, so the
+top-5 is now computed only among the current project's own documents, never in competition with
+every other project's. The existing `name in analyzers` client-side filter is kept as a second,
+independent safety net, not replaced.
+
+**Verification.** All 32 currently-indexed documents (18 `demo` + 7 `digitalhub` + 7 `duplex`; the
+two large real door/window schedules remain deferred per D-052) re-indexed with the new field
+populated. A CI-safe test (`FakeSearchClient.search` now records and asserts the exact `filter`
+value) proves the correct project id is requested for both `demo` and a non-`demo` project
+(`duplex`), not a hardcoded default. 332 tests pass; `ruff` clean.
+
+**Live re-verification, real before/after, not assumed fixed.** Re-ran the identical raw query
+("what is connected load for panel-") against the live re-indexed corpus: without the filter, the
+top 5 are still all `demo`'s own documents (unchanged from the original repro); with
+`filter="project_id eq 'digitalhub'"`, the top 5 are now DigitalHub's own 5 documents, its
+schedules ranking highest (0.03333/0.03252/0.03252). The full `AgentService.invoke()` path,
+re-run with the exact reported question against a live DigitalHub-scoped project: `disposition:
+clarification_required`, answer now reads *"the most relevant configured document(s) may be:
+digitalhub_schedule_b01.pdf, digitalhub_schedule_e00.pdf, digitalhub_schedule_e01.pdf"* --
+`model_call_count: 1` -- the exact directed-miss behavior that was silently failing before this
+fix, confirmed live against the same real Azure resources production uses.
