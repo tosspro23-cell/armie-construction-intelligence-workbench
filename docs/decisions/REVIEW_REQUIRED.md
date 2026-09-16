@@ -47,6 +47,15 @@ Chinese answer-rendering branch (A16). SPEC-M1 M1 characterizes and pins this be
 (§4.6); it does not decide whether this is a committed, maintained product surface or
 scaffolding that should be redesigned, generalized, or removed.
 
+**Addressed by SPEC-M16's V2 engine (D-061), pending real rollout/benchmark data.** V2's
+tool-calling agent understands Chinese (and any other language the underlying model does)
+without a hardcoded phrase table at all -- the live benchmark
+(`docs/reports/2026-09-16-m16-v1-vs-v2-benchmark.md`) confirms this directly on several
+Chinese questions, including the exact "distinct window types" question that no amount of
+keyword-table extension (SPEC-M14/M15, D-059) could make V1 answer correctly. This does not
+retire V1's own Chinese scaffolding -- V1 remains the default, unmodified engine -- but it is
+the real, measured alternative this open question was waiting on.
+
 ## Why `three@0.155.0` was chosen despite the `web-ifc-three` peer range
 
 The frontend previously pinned `three@0.155.0` while `web-ifc-three@^0.0.126` peer-requires
@@ -149,6 +158,14 @@ answer-rendering) behaviour M1 already characterizes (§4.6) -- this is source-r
 detection, not answer language, and was not touched by M2P1 (§6 limits `router.py` changes
 to `requested_field` only). Evidence: `docs/reports/2026-08-24-m2p1-live-model-baseline.md`.
 
+**Addressed by SPEC-M16's V2 engine (D-061), pending real rollout/benchmark data.** V2 has no
+English-only keyword gate for PDF/electrical-schedule questions at all -- it decides which
+tool (including `extract_pdf_field`) to call from genuine language understanding, in any
+language the model handles. Not yet specifically live-tested on a Chinese electrical-schedule
+question (the benchmark report covers Chinese IFC questions, not this PDF-domain case) -- a
+real, scoped follow-up before this can be marked fully resolved rather than "addressed in
+principle."
+
 ## M2: the reconciliation detector is keyword-level, not attribute-aware
 
 `cross_source_reconciliation_requested` matches on a door/window entity term, a comparison
@@ -166,6 +183,15 @@ require the attribute mentioned to be width/height-shaped before matching, or ha
 `_synthesize_reconciliation_response` name the attribute it actually compared in the answer
 text so the substitution is visible rather than implicit. Not scheduled; flagging for a
 future milestone's scope decision.
+
+**Addressed by SPEC-M16's V2 engine (D-061), pending real rollout/benchmark data.** V2's
+`reconcile_doors_windows` tool description explicitly states it "only checks door/window
+width and height -- never claim it checked any other attribute," and the model deciding
+whether to call it (rather than a three-signal keyword match) can recognize a fire-rating
+question is not a width/height comparison in the first place. Not yet specifically live-tested
+against this exact "compare fire ratings" phrasing -- the benchmark report's own reconciliation
+case used a generic comparison question, not an attribute-substitution probe -- a real, scoped
+follow-up before this can be marked fully resolved.
 
 ## RESOLVED by M4: `checkpoint_db_path` is dead configuration
 

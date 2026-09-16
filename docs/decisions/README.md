@@ -2748,3 +2748,85 @@ answering the wrong (arbitrary-single-record) thing; it does not add the grouped
 capability itself, which would need its own scoped spec (a real design question: exact-match
 grouping vs. a tolerance band, which dimensions to group by, response shape for many distinct
 groups).
+
+## D-061 — SPEC-M16: V2, a full tool-calling agent, benchmarked live against V1
+
+Owner-initiated, 2026-09-16, continuing the same design conversation D-059/D-060 grew out of: is a
+fixed keyword/pattern table the right long-term architecture for understanding a question, or
+should the system move to a model that decides which deterministic tools to call -- with a full
+spec-level discussion (owner-directed: V2 as a complete, independent, standalone engine attempting
+every question from a clean start, never a fallback consulting V1's leftovers, selectable per
+question via a visible UI toggle, so a fair benchmark is actually possible) before any code.
+Full spec: `docs/specs/SPEC-M16-tool-calling-agent-phase1-v1.md`. Full live benchmark:
+`docs/reports/2026-09-16-m16-v1-vs-v2-benchmark.md`.
+
+**What shipped.** A new tool schema (`apps/api/app/agent/tools.py`) mirrors every existing
+deterministic IFC/PDF/viewer operation V1 already has -- a tool call's arguments build the exact
+same `QueryPlan` V1's own `capability_gate`/execution/verification/evidence layer already consumes,
+so none of that logic was reimplemented. A new `ModelProvider.stream_turn` (`providers/base.py`)
+returns a stream of typed events (`ToolCallEvent`, `AnswerChunkEvent`, `TurnCompleteEvent`) so one
+interface covers both tool selection and progressive final-answer rendering; `AzureOpenAIProvider`
+implements it as a single `stream=True` call with `tools=` -- tool-call argument fragments are
+buffered until complete and parseable, plain answer content streams live. `AgentService.invoke_v2`
+is the full loop: attempts every question from scratch (never touching V1's heuristics/semantic
+planner), executes model-requested tool calls in parallel via `asyncio.gather`, and enforces a hard
+`tool_calling_max_iterations` cap (default 6) against a runaway loop. `ChatRequest.engine`
+("v1" default, every existing caller unaffected; "v2" opts in) dispatches to a wholly separate SSE
+handler (`_chat_v2`) in `main.py`, streaming `tool_status`/`answer_chunk`/`final` events. Recent-turn
+conversational memory turned out simpler than the spec originally scoped: rather than a new
+column/migration, it lives as an ordinary `v2_recent_turns` key inside the same `context` dict V1's
+own structured fields already share -- both `InMemoryConversationStore` and
+`PostgresConversationStore` already persist this dict verbatim, so no schema change was needed at
+all. The workbench gained a visible "Engine: V1 / V2" toggle, per-turn engine/latency labeling, and
+progressive (SSE) rendering of V2's tool-use status and streamed answer.
+
+**A real, live-found bug, not caught by any fake-provider test.** Azure OpenAI's own streaming
+endpoint sends at least one leading chunk (content-filter/prompt-annotation metadata) with an empty
+`choices` array before any real delta arrives -- indexing `[0]` unconditionally crashed every single
+real V2 turn with `IndexError` the first time this was tested against the actual deployment. Never
+observed against the plain OpenAI API's own streaming shape in this codebase's other providers,
+only Azure's -- fixed by skipping any chunk with empty `choices`.
+
+**The live benchmark's headline result.** The exact question shape D-059 found live in production
+("所有窗户有几种类型") -- asking for a *distinct-dimension grouping*, an operation neither V1's
+fast path nor its typed `QueryPlan` schema can express at all -- was tested against both engines,
+real data, real model, side by side. V1 (even after D-059's own fix) still answers wrong: "各层窗户
+数量：**IfcWindow**：**4**。", a confused, mislabeled flat count that addresses neither "how many
+types" nor "each type's size." V2 called `get_element_properties`, received the real dimensions of
+all 4 real windows (a tool call, not an invented fact), and *correctly classified them into 2 real
+groups by actually reasoning over the returned data* -- exactly the "genuine interpretive judgment"
+case this spec's own Rationale predicted as the right place for V2's intelligence to matter, at
+essentially the same latency (19.02s) as V1's wrong answer.
+
+**Latency, reported honestly, not favorably.** Real time-to-first-token measured 5-19s across 10
+representative questions -- the spec's own draft target (~2s) was **not met**. The real cause,
+confirmed by the numbers themselves (`total ≈ ttft` in every case): the tool-selection round trip
+cannot itself be streamed (a tool call's argument JSON must be fully received before it is
+parseable) and dominates total wall time; the already-decided final answer does stream
+token-by-token as designed, but by then most of the turn has already elapsed invisibly. An
+immediate "thinking" event (streamed before the first real model round trip resolves) was added as
+the honest mitigation available in this phase -- it does not reduce real latency, only the
+perceived silence before something visible happens. On a question V1 already answers
+deterministically (reconciliation), V1 takes **0.09s/0 model calls** against V2's **13.95s** -- an
+honest confirmation that V2's real value is on questions V1's architecture cannot answer *correctly*
+at all, not on making already-solved questions faster, matching this spec's own Explicitly excluded
+scope stated before any of this was measured.
+
+**Verification.** All 10 representative questions (English and Chinese; count, parallel count,
+aggregate_quantity, group_by/argmax, get_properties with an honest multi-match disclosure,
+reconciliation, and the headline distinct-grouping case) answered correctly live against the real
+Azure deployment and the real IFC/PDF fixtures, zero fabricated facts -- every citation traces to a
+real tool call. A CI-safe eval suite (`FakeModelProvider`, no live call) exercises every tool type,
+a parallel-multi-tool-call case, and the zero-tool-call honesty case (`verification=not_applicable`,
+never a false "checked" claim) so this behavior stays regression-tested without a live model call in
+ordinary CI. 411 tests pass (401 + 10 new across this milestone's commits); `ruff` clean;
+`npm run build` clean; the full frontend flow (engine toggle, streaming render, per-turn labeling,
+V1 completely unaffected in the same session) verified live in a real browser against the real
+Azure deployment.
+
+**Known gap, found live, not fixed in this pass.** A turn with no tool calls that is really asking
+the user for more information (e.g. "what can you see in the current view?" with no active
+selection) returns `disposition=answered` rather than `clarification_required`, unlike V1's
+identical-situation handling -- `invoke_v2`'s disposition logic currently only distinguishes "had a
+tool call" from "did not," not "answered directly" from "asked a clarifying question." Named
+explicitly in the benchmark report rather than silently left for someone else to rediscover.
