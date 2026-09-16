@@ -142,6 +142,12 @@ class ChatRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
     viewer_context: ViewerContext | None = None
     source_preference: Literal["auto", "ifc", "pdf", "viewer_snapshot"] = "auto"
+    # SPEC-M16: "v1" (default, every caller from before this milestone) is
+    # today's heuristic-fast-path + semantic-planner engine, byte-for-byte
+    # unchanged. "v2" is the new, fully independent tool-calling agent --
+    # an explicit, visible per-question choice (the workbench's own engine
+    # toggle), never an automatic/silent substitution for v1.
+    engine: Literal["v1", "v2"] = "v1"
 
 
 class FindingTransitionRequest(BaseModel):
@@ -238,7 +244,12 @@ class QueryPlan(BaseModel):
     expected_result_shape: Literal["scalar_count", "grouped_counts", "single_group_extremum", "list", "properties", "element_identity", "element_storey", "element_properties", "document_value", "visual_claim", "scalar_measurement", "clarification"] | None = None
     requested_field: str | None = None
     rationale: str
-    planning_mode: Literal["heuristic", "llm", "context"] = "heuristic"
+    # SPEC-M16: "tool_calling" marks a plan V2's tool-calling agent built
+    # from a model-requested tool call, distinct from "llm" (V1's
+    # single-shot structured-output semantic planner) -- so the Decision
+    # Trace can honestly show which engine, and which planning mechanism,
+    # actually produced a given plan.
+    planning_mode: Literal["heuristic", "llm", "context", "tool_calling"] = "heuristic"
     rule_id: str | None = None
     matched_signals: list[str] = Field(default_factory=list)
     match_status: Literal["complete", "partial", "unknown"] = "unknown"
