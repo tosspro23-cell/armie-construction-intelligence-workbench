@@ -255,16 +255,21 @@ def heuristic_multi_plan(question: str, context: dict, has_viewer_context: bool,
                 matched_signals=["intent:cross_source_join"], match_status="complete",
             )],
         )
-    argmax = bool(re.search(r"\b(most|greatest number|highest count)\b", normalized))
-    argmin = bool(re.search(r"\b(fewest|lowest count|least)\b", normalized))
+    # SPEC-M14: Chinese keyword alternatives are plain substring checks
+    # (`in`/no `\b`), matching this codebase's own existing Chinese-marker
+    # style (cross_source_reconciliation_requested) rather than regex word
+    # boundaries, which never match inside unsegmented Chinese text (see
+    # _alias_search's own docstring).
+    argmax = bool(re.search(r"\b(most|greatest number|highest count)\b", normalized)) or "最多" in normalized
+    argmin = bool(re.search(r"\b(fewest|lowest count|least)\b", normalized)) or "最少" in normalized
     # Keep the deterministic route deliberately narrow.  Merely mentioning a
     # level in a natural-language comparison (for example, “one level at a
     # time”) is not enough to prove that the heuristic has recovered the
     # complete grouped-argmax contract.  Such requests must fall through to
     # the semantic planner, which can return the same canonical typed plan
     # after interpreting the whole utterance.
-    grouping = any(marker in normalized for marker in ("by floor", "by storey", "by level", "each floor", "each storey", "each level", "per floor", "per storey", "per level", "break them down", "break down", "every floor", "which floor", "which storey", "which level"))
-    count_intent = bool(re.search(r"\b(how many|count|number of|give me the number|there are)\b", normalized))
+    grouping = any(marker in normalized for marker in ("by floor", "by storey", "by level", "each floor", "each storey", "each level", "per floor", "per storey", "per level", "break them down", "break down", "every floor", "which floor", "which storey", "which level", "按楼层", "按层", "每层", "每一层", "各楼层", "分楼层", "楼层分布", "哪层", "哪一层", "哪个楼层"))
+    count_intent = bool(re.search(r"\b(how many|count|number of|give me the number|there are)\b", normalized)) or any(marker in normalized for marker in ("有多少", "数量", "共有", "一共有", "统计"))
     entity_types: list[str] = []
     for alias, entity_type in ELEMENT_ALIASES.items():
         if _alias_search(alias, normalized) and entity_type not in entity_types:
@@ -466,8 +471,11 @@ def heuristic_plan(question: str, context: dict, has_viewer_context: bool, sourc
     # treating a valid conversation turn as an unsupported standalone prompt.
     recognises_ifc = bool(entity_type or any(term in lowered for term in ("storey", "floor", "level", "bim", "ifc", "property", "quantity")))
     if recognises_ifc:
-        grouping_language = any(term in lowered for term in ("by floor", "by storey", "by level", "per floor", "per storey", "per level", "each floor", "each storey", "each level"))
-        operation = "group_by" if grouping_language else "count" if any(term in lowered for term in ("how many", "count", "number of", "total number", "total count")) else "group_by"
+        # SPEC-M14: Chinese alternatives are plain substrings, matching
+        # _alias_search's own reasoning -- \b never matches inside
+        # unsegmented Chinese text.
+        grouping_language = any(term in lowered for term in ("by floor", "by storey", "by level", "per floor", "per storey", "per level", "each floor", "each storey", "each level", "按楼层", "按层", "每层", "每一层", "各楼层", "分楼层", "楼层分布", "哪层", "哪一层", "哪个楼层"))
+        operation = "group_by" if grouping_language else "count" if any(term in lowered for term in ("how many", "count", "number of", "total number", "total count", "有多少", "数量", "共有", "一共有", "统计")) else "group_by"
         if any(term in lowered for term in ("maximum", "max ", "highest")):
             operation = "max"
         elif any(term in lowered for term in ("minimum", "min ", "lowest")):
@@ -478,11 +486,11 @@ def heuristic_plan(question: str, context: dict, has_viewer_context: bool, sourc
             operation = "sum"
         elif any(term in lowered for term in ("property", "properties")):
             operation = "get_properties"
-        group_by = "storey" if any(term in lowered for term in ("which floor", "which storey", "which level", "by floor", "by storey", "across levels", "by level", "per floor", "per level", "per storey", "each floor", "each level", "each storey")) else "none"
-        postprocess = "argmax" if group_by == "storey" and any(term in lowered for term in ("most", "maximum", "highest", "greatest number")) else "argmin" if group_by == "storey" and any(term in lowered for term in ("fewest", "least", "minimum", "lowest")) else None
+        group_by = "storey" if any(term in lowered for term in ("which floor", "which storey", "which level", "by floor", "by storey", "across levels", "by level", "per floor", "per level", "per storey", "each floor", "each level", "each storey", "按楼层", "按层", "每层", "每一层", "各楼层", "分楼层", "楼层分布", "哪层", "哪一层", "哪个楼层")) else "none"
+        postprocess = "argmax" if group_by == "storey" and any(term in lowered for term in ("most", "maximum", "highest", "greatest number", "最多")) else "argmin" if group_by == "storey" and any(term in lowered for term in ("fewest", "least", "minimum", "lowest", "最少")) else None
         if context.get("active_group_by") == "space":
             group_by, operation = "space", "group_by"
-        explicit_grouping = any(term in lowered for term in ("most", "greatest number", "highest count", "fewest", "lowest count", "by floor", "by storey", "per floor", "per storey", "each floor", "each storey", "by level", "per level"))
+        explicit_grouping = any(term in lowered for term in ("most", "greatest number", "highest count", "fewest", "lowest count", "by floor", "by storey", "per floor", "per storey", "each floor", "each storey", "by level", "per level", "最多", "最少", "按楼层", "按层", "每层", "每一层", "各楼层", "分楼层", "楼层分布", "哪层", "哪一层", "哪个楼层"))
         complete = bool(entity_type) and (operation == "count" or operation == "get_properties" or (group_by != "none" and explicit_grouping))
         return QueryPlan(
             source="ifc", intent="aggregate" if operation in {"min", "max", "sum", "average", "group_by"} else operation,

@@ -142,7 +142,10 @@ tuple already drives `heuristic_multi_plan`'s `count_intent`/`grouping`/`argmax`
 `heuristic_plan`'s `recognises_ifc` operation/`group_by`/`postprocess` derivation:
 
 - Count intent: 有多少, 数量, 共有, 一共有, 统计
-- Storey grouping: 按楼层, 按层, 每层, 每一层, 各楼层, 分楼层, 楼层分布
+- Storey grouping: 按楼层, 按层, 每层, 每一层, 各楼层, 分楼层, 楼层分布, 哪层, 哪一层, 哪个楼层
+  (the "哪层" family found necessary during implementation: "哪层的门最多" names no explicit
+  "by floor" marker, only asks *which* floor, mirroring English's own "which floor" already
+  present alongside "by floor" in the same lists)
 - Argmax (most): 最多
 - Argmin (fewest): 最少
 
