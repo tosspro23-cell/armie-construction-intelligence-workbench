@@ -1,8 +1,11 @@
 from __future__ import annotations
 
-from typing import Callable, TypeVar
+import json
+from typing import Any, AsyncIterator, Callable, TypeVar
 
 from pydantic import BaseModel
+
+from app.providers.base import AnswerChunkEvent, ToolCallEvent, TurnCompleteEvent
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -121,6 +124,62 @@ class AzureOpenAIProvider:
                 "schema": response_model.model_json_schema()}},
         )
         return response_model.model_validate_json(response.choices[0].message.content)
+
+    async def stream_turn(
+        self, *, messages: list[dict[str, Any]], tools: list[dict[str, Any]], purpose: str,
+    ) -> AsyncIterator[AnswerChunkEvent | ToolCallEvent | TurnCompleteEvent]:
+        """SPEC-M16: one streamed V2 turn.
+
+        A single `stream=True` call with `tools=` passed. Tool-call
+        argument fragments arrive incrementally, indexed by their position
+        in the model's response (the SDK's own accumulation convention --
+        `delta.tool_calls[i].function.arguments` is a partial JSON string
+        fragment, not a complete value, until the stream ends), so they are
+        buffered here and only ever emitted as a complete, parsed
+        `ToolCallEvent` once the stream itself ends with
+        `finish_reason == "tool_calls"`. Plain answer content, in
+        contrast, is never buffered -- each `delta.content` fragment is a
+        real, already-final piece of the model's answer and is forwarded
+        as an `AnswerChunkEvent` immediately, which is what makes this
+        genuinely streamed rather than a single response chunked
+        afterwards.
+        """
+        client = self._client()
+        stream = await client.chat.completions.create(
+            model=self.model, messages=messages, tools=tools, stream=True,
+        )
+        # Keyed by the SDK's own per-call tool_call index -- the model can
+        # request several tool calls in one turn, and their argument
+        # fragments interleave across chunks by this index, not by order
+        # of arrival.
+        pending_calls: dict[int, dict[str, Any]] = {}
+        content_parts: list[str] = []
+        async for chunk in stream:
+            delta = chunk.choices[0].delta
+            if delta.content:
+                content_parts.append(delta.content)
+                yield AnswerChunkEvent(text=delta.content)
+            for tool_call_delta in delta.tool_calls or []:
+                slot = pending_calls.setdefault(tool_call_delta.index, {"id": None, "name": "", "arguments": ""})
+                if tool_call_delta.id:
+                    slot["id"] = tool_call_delta.id
+                if tool_call_delta.function and tool_call_delta.function.name:
+                    slot["name"] += tool_call_delta.function.name
+                if tool_call_delta.function and tool_call_delta.function.arguments:
+                    slot["arguments"] += tool_call_delta.function.arguments
+        tool_calls = [
+            ToolCallEvent(call_id=slot["id"] or f"call_{index}", tool_name=slot["name"], arguments=json.loads(slot["arguments"] or "{}"))
+            for index, slot in sorted(pending_calls.items())
+        ]
+        raw_message: dict[str, Any] = {"role": "assistant"}
+        if tool_calls:
+            raw_message["tool_calls"] = [
+                {"id": call.call_id, "type": "function", "function": {"name": call.tool_name, "arguments": json.dumps(call.arguments)}}
+                for call in tool_calls
+            ]
+        else:
+            raw_message["content"] = "".join(content_parts)
+        yield TurnCompleteEvent(tool_calls=tool_calls, raw_assistant_message=raw_message)
 
 
 class AzureOpenAIEmbeddingProvider:

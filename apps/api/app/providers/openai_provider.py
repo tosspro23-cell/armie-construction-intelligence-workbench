@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from typing import TypeVar
+from typing import Any, AsyncIterator, TypeVar
 
 from pydantic import BaseModel
+
+from app.providers.base import AnswerChunkEvent, ToolCallEvent, TurnCompleteEvent
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -35,6 +37,17 @@ class OpenAIProvider:
                 "schema": response_model.model_json_schema()}},
         )
         return response_model.model_validate_json(response.choices[0].message.content)
+
+    def stream_turn(
+        self, *, messages: list[dict[str, Any]], tools: list[dict[str, Any]], purpose: str,
+    ) -> AsyncIterator[AnswerChunkEvent | ToolCallEvent | TurnCompleteEvent]:
+        """SPEC-M16, Explicitly excluded scope: this phase implements V2's
+        tool-calling only against AzureOpenAIProvider (the deployment this
+        project's own live infrastructure actually uses). Raising here is
+        the honest behavior for the plain OpenAI provider, not a silent
+        gap.
+        """
+        raise NotImplementedError("OpenAI direct-API tool-calling (SPEC-M16 V2) is not implemented in this phase.")
 
     async def vision_structured(
         self, *, prompt: str, image_base64: str, response_model: type[T], purpose: str
