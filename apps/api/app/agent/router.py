@@ -91,6 +91,29 @@ def _alias_search(term: str, text: str) -> re.Match[str] | None:
     return re.search(pattern, text)
 
 
+_ZH_COUNT_MARKERS = ("有多少", "数量", "共有", "一共有", "统计", "总共", "总数", "总计")
+
+
+def _zh_count_intent(text: str) -> bool:
+    """Detect a Chinese "how many" count intent, distinct from "how many
+    kinds/types" (a fundamentally different, ungrouped-by-attribute request
+    this deterministic fast path does not support).
+
+    Owner-reported, 2026-09-16: a real regression, live in production --
+    SPEC-M15 §F's bare "有几" marker matched inside "有几种类型" ("how many
+    *types*"), so "所有窗户有几种类型，每种类型的大小...是多少" was answered
+    with a flat total window count, silently discarding the actual
+    per-type-dimension request. "有几" genuinely means "how many" in
+    "有几扇门"/"有几个空间", but never when immediately followed by "种"
+    (kind) or "类" (category) -- excluded via negative lookahead rather
+    than removed outright, since the genuine-count reading is still common
+    and worth keeping.
+    """
+    if any(marker in text for marker in _ZH_COUNT_MARKERS):
+        return True
+    return bool(re.search(r"有几(?!种|类)", text))
+
+
 def cross_source_reconciliation_requested(question: str) -> bool:
     """Detect the narrow IFC<->drawing door/window reconciliation pilot (SPEC-M2 §4A).
 
@@ -232,7 +255,7 @@ def fast_path_coverage(question: str, context: dict, has_viewer_context: bool) -
     grouping_markers = ("by floor", "by storey", "each floor", "each storey", "per floor", "per storey", "break them down", "break down", "every floor", "按楼层", "按层", "每层", "每一层", "各楼层", "分楼层", "楼层分布", "哪层", "哪一层", "哪个楼层", "各层", "逐层", "每个楼层")
     prior_entities = {item.get("entity_type") for item in context.get("previous_subplans", []) if item.get("source") == "ifc" and item.get("entity_type")}
     simple_template = any(re.fullmatch(pattern, normalized) for pattern in simple_patterns) or selected_element_template or clarification_template
-    generic_count = (bool(re.search(r"\b(how many|count|number of|give me the number|there are)\b", normalized)) or any(marker in normalized for marker in ("有多少", "数量", "共有", "一共有", "统计", "有几", "总共", "总数", "总计"))) and len(unique_entities) == 1
+    generic_count = (bool(re.search(r"\b(how many|count|number of|give me the number|there are)\b", normalized)) or _zh_count_intent(normalized)) and len(unique_entities) == 1
     generic_grouping = bool(unique_entities or prior_entities) and any(marker in normalized for marker in grouping_markers)
     complete = (ascii_only or contains_chinese) and (simple_template or generic_count or generic_grouping)
     covered = unique_entities if complete else []
@@ -290,7 +313,7 @@ def heuristic_multi_plan(question: str, context: dict, has_viewer_context: bool,
     # the semantic planner, which can return the same canonical typed plan
     # after interpreting the whole utterance.
     grouping = any(marker in normalized for marker in ("by floor", "by storey", "by level", "each floor", "each storey", "each level", "per floor", "per storey", "per level", "break them down", "break down", "every floor", "which floor", "which storey", "which level", "按楼层", "按层", "每层", "每一层", "各楼层", "分楼层", "楼层分布", "哪层", "哪一层", "哪个楼层", "各层", "逐层", "每个楼层"))
-    count_intent = bool(re.search(r"\b(how many|count|number of|give me the number|there are)\b", normalized)) or any(marker in normalized for marker in ("有多少", "数量", "共有", "一共有", "统计", "有几", "总共", "总数", "总计"))
+    count_intent = bool(re.search(r"\b(how many|count|number of|give me the number|there are)\b", normalized)) or _zh_count_intent(normalized)
     entity_types: list[str] = []
     for alias, entity_type in ELEMENT_ALIASES.items():
         if _alias_search(alias, normalized) and entity_type not in entity_types:
@@ -537,7 +560,7 @@ def heuristic_plan(question: str, context: dict, has_viewer_context: bool, sourc
         # _alias_search's own reasoning -- \b never matches inside
         # unsegmented Chinese text.
         grouping_language = any(term in lowered for term in ("by floor", "by storey", "by level", "per floor", "per storey", "per level", "each floor", "each storey", "each level", "按楼层", "按层", "每层", "每一层", "各楼层", "分楼层", "楼层分布", "哪层", "哪一层", "哪个楼层", "各层", "逐层", "每个楼层"))
-        operation = "group_by" if grouping_language else "count" if any(term in lowered for term in ("how many", "count", "number of", "total number", "total count", "有多少", "数量", "共有", "一共有", "统计", "有几", "总共", "总数", "总计")) else "group_by"
+        operation = "group_by" if grouping_language else "count" if (any(term in lowered for term in ("how many", "count", "number of", "total number", "total count")) or _zh_count_intent(lowered)) else "group_by"
         if any(term in lowered for term in ("maximum", "max ", "highest")):
             operation = "max"
         elif any(term in lowered for term in ("minimum", "min ", "lowest")):

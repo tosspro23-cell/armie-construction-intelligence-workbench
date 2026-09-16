@@ -2671,3 +2671,38 @@ re-confirmed passing, matching the same pre/post verification standard this sess
 fixes use. A live end-to-end test drives the real `AgentService.invoke()` graph for the
 quantity-extrema path, mirroring D-057's own harness. 395 tests pass (365 + 30 new); `ruff` clean;
 `npm run build` clean.
+
+## D-059 — SPEC-M15 §F's bare "有几" matched inside "有几种类型" (a different, unsupported request)
+
+Owner-reported live in production, 2026-09-16, immediately after M14/M15 deployed: on the real
+Duplex building, "我问的是这个建筑物里的所有窗户有几种类型，每种类型的大小分别是多少？长宽是多少？"
+(how many *types* of window are there, and what size is each type) was answered with a flat
+"这个项目中共有 24 扇窗" (24 windows total) -- a real number, but not remotely the question asked,
+which wanted a breakdown by distinct dimension, not a raw count.
+
+**Root cause, confirmed by direct reproduction, not assumed.** SPEC-M15 §F added a bare `"有几"`
+substring marker to `heuristic_multi_plan`/`heuristic_plan`'s Chinese count-intent detection,
+meant to catch "有几扇门"/"有几个空间". `"有几"` is also a substring of `"有几种"` (how many
+*kinds*) and `"有几类"` (how many *categories*) -- a fundamentally different request shape (asking
+for a group-by-distinct-attribute breakdown) this deterministic fast path has never supported, in
+either language. `heuristic_plan("我问的是...有几种类型...", {}, has_viewer_context=False)`
+returned a `complete` plain `count` `QueryPlan` for `IfcWindow` before this fix -- the entire
+"each type's size" half of the question was silently discarded, and the wrong answer was
+delivered with full confidence (`answered`/`passed`), not a clarification or a semantic-planner
+handoff.
+
+**Fix.** A new `_zh_count_intent` helper (`router.py`) replaces the three inline
+`"有几"`-in-tuple checks: it recognizes `"有几"` as genuine count intent everywhere *except*
+immediately before `"种"` or `"类"` (`re.search(r"有几(?!种|类)", text)`), via negative lookahead
+rather than removing the marker outright, since the genuine-count reading ("有几扇门") is still
+common and worth keeping. `"有几扇窗"`/`"有几个空间"`/`"有几道门"` continue to resolve exactly as
+SPEC-M15 §F intended.
+
+**Verification.** New test reproduces the exact production question (plus two shorter variants,
+"这个建筑里有几类窗户" and "有几种门？") and asserts neither `heuristic_plan` nor
+`heuristic_multi_plan` may claim `complete`/non-`None` for any of them -- they must fall through to
+the semantic planner instead, which is honest about a request it does not fully support rather
+than confidently answering the wrong one. Confirmed to genuinely fail pre-fix (`git stash` of only
+the `router.py` change, reran: `AssertionError: assert 'complete' != 'complete'`) and pass
+post-fix. A second test confirms the genuine "有几X" count forms are unaffected. 399 tests pass
+(395 + 4 new); `ruff` clean; `npm run build` clean.

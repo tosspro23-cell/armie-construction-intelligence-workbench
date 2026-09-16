@@ -455,6 +455,40 @@ def test_heuristic_plan_chinese_surface_broadening(question: str, entity_type: s
     plan = heuristic_plan(question, {}, has_viewer_context=False)
     assert plan.entity_type == entity_type
     assert plan.operation == shape
+
+
+@pytest.mark.parametrize("question", [
+    "我问的是这个建筑物里的所有窗户有几种类型，每种类型的大小分别是多少？长宽是多少？",
+    "这个建筑里有几类窗户",
+    "有几种门？",
+])
+def test_zh_count_intent_excludes_how_many_kinds_not_how_many_items(question: str) -> None:
+    """Owner-reported, 2026-09-16: a real regression, live in production.
+
+    SPEC-M15 SS F's bare "有几" marker matched inside "有几种类型" ("how many
+    *kinds*"), a fundamentally different, ungrouped-by-attribute request
+    this deterministic fast path does not support -- the live app answered
+    "所有窗户有几种类型，每种类型的大小...是多少" with a flat total window
+    count, silently discarding the actual per-type-dimension question.
+    Confirmed to genuinely fail pre-fix: `heuristic_plan` returned a
+    `complete` plain `count` plan for the exact production question above.
+    Neither `heuristic_plan` nor `heuristic_multi_plan` may now claim
+    `complete`/non-`None` for any of these -- they must fall through to the
+    semantic planner, which is honest about not fully supporting a
+    group-by-distinct-dimension request rather than confidently answering
+    the wrong question.
+    """
+    plan = heuristic_plan(question, {}, has_viewer_context=False)
+    assert plan.match_status != "complete"
+    assert heuristic_multi_plan(question, {}, has_viewer_context=False) is None
+
+
+def test_zh_count_intent_still_recognises_genuine_how_many_forms() -> None:
+    for question, entity_type in [("有几扇窗？", "IfcWindow"), ("有几个空间", "IfcSpace"), ("有几道门", "IfcDoor")]:
+        plan = heuristic_plan(question, {}, has_viewer_context=False)
+        assert plan.entity_type == entity_type
+        assert plan.operation == "count"
+        assert plan.match_status == "complete"
     assert plan.match_status == "complete"
 
 
