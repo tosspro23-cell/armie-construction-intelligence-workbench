@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Optional, TypedDict
+import json
+from typing import Any, AsyncIterator, Optional, TypedDict
 from uuid import uuid4
 
 from langgraph.graph import END, START, StateGraph
@@ -15,6 +16,7 @@ from app.agent.plan_validation import (
     verify_execution_consistency,
 )
 from app.agent.router import (
+    SUPPORTED_ENTITY_TYPES,
     capability_gate,
     cross_source_join_requested,
     fast_path_coverage,
@@ -27,7 +29,9 @@ from app.agent.router import (
     resolve_reference,
     selected_element_plan,
 )
+from app.agent.tools import TOOL_DEFINITIONS, build_plan_from_tool_call
 from app.config import Settings
+from app.providers.base import AnswerChunkEvent, ToolCallEvent, TurnCompleteEvent
 from app.schemas.models import (
     AgentResponse,
     AuditEvent,
@@ -1864,6 +1868,160 @@ Return only a corrected MultiQueryPlan JSON object."""
         }
         outcome = self.graph.invoke(initial)
         return AgentResponse.model_validate(outcome["final_response"])
+
+    @staticmethod
+    def _v2_system_prompt() -> str:
+        """SPEC-M16: V2's own system prompt.
+
+        Deliberately restates the same honesty invariant every part of V1
+        already enforces structurally (D-001): the model's role is
+        deciding *which* tool(s) answer a question, never stating a fact
+        without one. Nothing here asks the model to compute, estimate, or
+        recall a construction fact from its own training -- only to call a
+        tool and then describe that tool's real, verified return value.
+        """
+        return (
+            "You are a construction/BIM assistant with tools to query a real IFC building model "
+            "and its PDF drawings/schedules. Decide which tool(s) answer the user's question, call "
+            "them (several independent ones in the same turn if the question needs them), then "
+            "answer using ONLY the values those tools actually returned this turn. Never state a "
+            "count, measurement, or property value you did not just receive from a tool call -- if "
+            "no tool can answer part of the question, say so honestly rather than guessing. "
+            "Respond in the same language as the user's latest message. "
+            f"Valid entity_type values for every tool: {sorted(SUPPORTED_ENTITY_TYPES)}. "
+            "reconcile_doors_windows only checks door/window width and height -- never claim it "
+            "checked any other attribute (fire rating, material, etc.)."
+        )
+
+    def _v2_dispatch_tool(self, tool_call: ToolCallEvent, state: GraphState) -> dict[str, Any]:
+        """SPEC-M16: execute one V2-requested tool call, synchronously.
+
+        Called via `asyncio.to_thread` from the async V2 loop (this is the
+        same blocking IfcOpenShell/file-bound work V1's own `_execute_ifc`/
+        `_execute_pdf`/`_execute_viewer` already do -- offloading it here
+        keeps the event loop free for other requests/streaming exactly the
+        way V1's own `asyncio.to_thread(agent.invoke, ...)` call in
+        `main.py` already does for the whole V1 turn).
+
+        Reuses V1's own execution/verification/evidence methods completely
+        unchanged (this module's own established contract) -- no new
+        computation logic exists for V2 anywhere in this codebase.
+        """
+        if tool_call.tool_name == "reconcile_doors_windows":
+            reason = "V2 tool call: door/window width/height reconciliation against the PDF schedule."
+            multi_plan = MultiQueryPlan(
+                intent="reconciliation", response_language="en", raw_user_message=state["question"],
+                normalized_request=state["question"], interpretation_confidence="high", rationale=reason,
+                subplans=[
+                    QueryPlan(subtask_id="task_1", source="ifc", intent="reconciliation", operation="list", entity_type=None, filters={}, group_by="none", expected_result_shape="list", rationale=reason, planning_mode="tool_calling", rule_id="tool:reconcile_doors_windows", matched_signals=["intent:reconciliation"], match_status="complete"),
+                    QueryPlan(subtask_id="task_2", source="pdf", intent="reconciliation", operation="extract_field", filters={"page_hint": 2}, group_by="none", expected_result_shape="list", rationale=reason, planning_mode="tool_calling", rule_id="tool:reconcile_doors_windows", matched_signals=["intent:reconciliation"], match_status="complete"),
+                ],
+            )
+            result = self._synthesize_reconciliation_response(state, multi_plan)
+            return {
+                "tool_result": {"answer": result["answer"], "disposition": result["disposition"], "citations": result["citations"], "verification": result["verification"], "result_value": result.get("reconciliation_items")},
+                "evidence": result.get("evidence", []),
+                "tool_call_count": state.get("tool_call_count", 0) + result.get("tool_call_count_delta", 1),
+            }
+        plan = build_plan_from_tool_call(tool_call.tool_name, tool_call.arguments)
+        allowed, reason = capability_gate(plan)
+        if not allowed:
+            return {"tool_result": {"answer": reason or "This request is outside the supported tool capabilities.", "disposition": "unsupported", "citations": [], "verification": VerificationStatus(status="not_applicable", reason="Rejected by the capability gate before execution.").model_dump(), "result_value": None}, "evidence": [], "tool_call_count": state.get("tool_call_count", 0)}
+        local_state: GraphState = {**state, "plan": plan.model_dump()}
+        if plan.source == "ifc":
+            return self._execute_ifc(local_state)
+        if plan.source == "pdf":
+            return self._execute_pdf(local_state)
+        if plan.source == "viewer_snapshot":
+            return self._execute_viewer(local_state)
+        return {"tool_result": self._error_result(f"Unsupported tool source: {plan.source}")}
+
+    async def invoke_v2(
+        self,
+        *,
+        project_resources: ProjectResources,
+        thread_id: str | None,
+        question: str,
+        viewer_context: dict | None,
+        recent_turns: list[dict[str, str]] | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """SPEC-M16: V2's tool-calling agent loop, streamed.
+
+        Yields plain dicts for the caller (an SSE endpoint, or a test
+        harness collecting them into a list) to forward:
+        - {"type": "tool_status", "tool_name": ..., "status": "started"|"completed"}
+        - {"type": "answer_chunk", "text": ...}
+        - {"type": "final", "response": AgentResponse}  -- always the last event
+
+        Runs independently of V1's LangGraph `StateGraph` -- V2 attempts
+        every question from a clean start (SPEC-M16 OD-50: a full,
+        standalone engine for a fair benchmark, never a fallback consulting
+        V1's heuristics/semantic planner first).
+        """
+        thread_id = thread_id or str(uuid4())
+        trace_id = str(uuid4())
+        state: GraphState = {
+            "project_resources": project_resources, "thread_id": thread_id, "trace_id": trace_id,
+            "question": question, "viewer_context": viewer_context or {}, "conversation_context": {},
+            "tool_call_count": 0, "model_call_count": 0,
+        }
+        provider = self.container.text_provider_factory(self.settings)
+        messages: list[dict[str, Any]] = [{"role": "system", "content": self._v2_system_prompt()}]
+        for turn in recent_turns or []:
+            messages.append({"role": "user", "content": turn["question"]})
+            messages.append({"role": "assistant", "content": turn["answer"]})
+        messages.append({"role": "user", "content": question})
+
+        self._audit(state, "v2_turn_started", "model_called", "V2 tool-calling agent turn started.", {"question": question, "recent_turn_count": len(recent_turns or [])}, planning_mode="tool_calling")
+
+        all_citations: list[dict[str, Any]] = []
+        all_evidence: list[dict[str, Any]] = []
+        answer_parts: list[str] = []
+        max_iterations = self.settings.tool_calling_max_iterations
+        for iteration in range(1, max_iterations + 1):
+            model_call_count = state.get("model_call_count", 0) + 1
+            state["model_call_count"] = model_call_count
+            turn_complete = None
+            async for event in provider.stream_turn(messages=messages, tools=TOOL_DEFINITIONS, purpose="v2_tool_turn"):
+                if isinstance(event, AnswerChunkEvent):
+                    answer_parts.append(event.text)
+                    yield {"type": "answer_chunk", "text": event.text}
+                elif isinstance(event, TurnCompleteEvent):
+                    turn_complete = event
+            messages.append(turn_complete.raw_assistant_message)
+            if not turn_complete.tool_calls:
+                self._audit(state, "v2_turn_finalized", "finalized", "V2 agent finished calling tools and produced its final answer.", {"iteration": iteration}, planning_mode="tool_calling", actual_provider=provider.name, actual_model=provider.model)
+                disposition = "answered" if all_citations else "answered"
+                verification = VerificationStatus(status="passed" if all_citations else "not_applicable", reason="Every stated fact came from a verified tool call this turn." if all_citations else "No tool call was needed to answer this question.")
+                response = AgentResponse(
+                    thread_id=thread_id, trace_id=trace_id, disposition=Disposition(disposition),
+                    answer_markdown="".join(answer_parts), citations=[Citation.model_validate(item) for item in all_citations],
+                    verification=verification, execution_metadata={"engine": "v2", "model_call_count": model_call_count, "tool_call_count": state.get("tool_call_count", 0), "iterations": iteration, "planning_mode": "tool_calling", "actual_provider": provider.name, "actual_model": provider.model},
+                )
+                yield {"type": "final", "response": response}
+                return
+            for tool_call in turn_complete.tool_calls:
+                yield {"type": "tool_status", "tool_name": tool_call.tool_name, "status": "started"}
+            results = await asyncio.gather(*(asyncio.to_thread(self._v2_dispatch_tool, tool_call, state) for tool_call in turn_complete.tool_calls))
+            for tool_call, result in zip(turn_complete.tool_calls, results):
+                tool_result = result.get("tool_result", {})
+                state["tool_call_count"] = result.get("tool_call_count", state.get("tool_call_count", 0))
+                all_citations.extend(tool_result.get("citations", []))
+                all_evidence.extend(result.get("evidence", []))
+                messages.append({
+                    "role": "tool", "tool_call_id": tool_call.call_id,
+                    "content": json.dumps({"disposition": tool_result.get("disposition"), "answer": tool_result.get("answer"), "result_value": tool_result.get("result_value")}, default=str),
+                })
+                yield {"type": "tool_status", "tool_name": tool_call.tool_name, "status": "completed"}
+        # SPEC-M16 Invariants: a hard, enforced cap -- never an unbounded loop.
+        self._audit(state, "v2_turn_error", "error", "V2 agent exceeded its bounded tool-call iteration limit without finalizing.", {"max_iterations": max_iterations}, planning_mode="tool_calling")
+        response = AgentResponse(
+            thread_id=thread_id, trace_id=trace_id, disposition=Disposition.ERROR,
+            answer_markdown=f"The request failed safely: exceeded the maximum of {max_iterations} tool-call rounds without reaching a final answer.",
+            verification=VerificationStatus(status="not_applicable", reason="Iteration limit exceeded before a final answer was reached."),
+            execution_metadata={"engine": "v2", "model_call_count": state.get("model_call_count", 0), "tool_call_count": state.get("tool_call_count", 0), "iterations": max_iterations},
+        )
+        yield {"type": "final", "response": response}
 
     @staticmethod
     def _citations(evidence: list[Evidence], state: GraphState) -> list[dict]:

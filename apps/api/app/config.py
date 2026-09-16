@@ -162,6 +162,18 @@ class Settings(BaseSettings):
     model_call_timeout_seconds: float = 90.0
     request_timeout_seconds: float = 180.0
 
+    # SPEC-M16: V2 tool-calling agent. A hard cap on how many model-decided
+    # tool-call rounds one turn may take before this system gives up and
+    # returns an honest disposition="error" rather than looping forever --
+    # matches the existing bounded-retry precedent (max_verification_retries
+    # above; semantic repair/escalation in graph.py).
+    tool_calling_max_iterations: int = 6
+    # How many recent raw (question, answer) turns V2 sees as real
+    # conversation history, oldest evicted once the cap is reached -- not
+    # an unbounded transcript. V1 is unaffected; it continues to use only
+    # its existing narrow structured conversation_context fields.
+    conversation_memory_turns: int = 6
+
     # Multi-project workspace via Azure Data Lake Storage Gen2 (SPEC-M9,
     # D-023), opt-in like every other Azure setting above: unset means the
     # only project is the implicit one described by ifc_file/pdf_files
