@@ -83,6 +83,94 @@
     ],
     "source_set_id": "demo-v2"
   },
+  "digitalhub": {
+    "display_name": "RWTH DigitalHub (real building)",
+    "files": {
+      "DigitalHub_FM-ARC_v2.ifc": {
+        "content_sha256": "19d7d02d53c2b88e86890ee236297b12bbb0f7748030cd32ff6a22762e9966bb"
+      },
+      "corpus/digitalhub_door_spec_sheet.pdf": {
+        "content_sha256": "b7c02c736a17c1005f2d9be632a2df1cbebbab39b7bec5cdf188890e533b724d"
+      },
+      "corpus/digitalhub_meeting_minutes_2026_02_10.pdf": {
+        "content_sha256": "29ef3e8b7effb21774409dbbf2b6be9285b3652264e98f4ab30e033acf386422"
+      },
+      "corpus/digitalhub_rfi_log_001.pdf": {
+        "content_sha256": "5ed7f764e2f7bb6e5547f3d1aa46bb1b6e4bb82f8599d56c450642bb6b707e12"
+      },
+      "corpus/digitalhub_schedule_b01.pdf": {
+        "content_sha256": "6129be0ac00aa032cec68e3031b6f8d6016d69f4ee590b0187e030ed4dc00ad6"
+      },
+      "corpus/digitalhub_schedule_e00.pdf": {
+        "content_sha256": "33c075870aeaa33f18bdec6b78c983c553f56c3513e65d04562d9bbfe078ad86"
+      },
+      "corpus/digitalhub_schedule_e01.pdf": {
+        "content_sha256": "d2a3f8238bdefda2d94a3226d950bb0cacb2326d0dc92777f373ec4c784fbd9f"
+      },
+      "corpus/digitalhub_window_spec_sheet.pdf": {
+        "content_sha256": "8b5e165a4bb3ccc6cf02dc2c5b676238a1859668e991edcc1f1b935d5b456755"
+      },
+      "digitalhub_schedule.pdf": {
+        "content_sha256": "4f6f4896240dd933020468908d8721e489d51e6466fdfa02cbc7bc2c43a4bac2"
+      }
+    },
+    "ifc_file": "DigitalHub_FM-ARC_v2.ifc",
+    "pdf_files": [
+      "digitalhub_schedule.pdf",
+      "corpus/digitalhub_door_spec_sheet.pdf",
+      "corpus/digitalhub_meeting_minutes_2026_02_10.pdf",
+      "corpus/digitalhub_rfi_log_001.pdf",
+      "corpus/digitalhub_schedule_b01.pdf",
+      "corpus/digitalhub_schedule_e00.pdf",
+      "corpus/digitalhub_schedule_e01.pdf",
+      "corpus/digitalhub_window_spec_sheet.pdf"
+    ],
+    "source_set_id": "digitalhub-v3"
+  },
+  "duplex": {
+    "display_name": "Duplex Apartment (real building)",
+    "files": {
+      "Duplex_A_20110907.ifc": {
+        "content_sha256": "b347a2c8aa8fff6db896a4417a9c50c22ac0ccd7c5cfc22b99b8d29336c606ed"
+      },
+      "corpus/duplex_door_spec_sheet.pdf": {
+        "content_sha256": "9ac605e7133f99160ff597c2ecab52bb799dc25388ea94be94fa7295c7eb35f8"
+      },
+      "corpus/duplex_meeting_minutes_2026_02_10.pdf": {
+        "content_sha256": "facf55662abf7cb521ebf9644c752c2296a4028fcd904126ee28f581047d41fe"
+      },
+      "corpus/duplex_rfi_log_001.pdf": {
+        "content_sha256": "86d7185c87f9c0b84e2c8238d9f883ce6ac068c20708fe8baa7a1be9e05a015b"
+      },
+      "corpus/duplex_schedule_level1.pdf": {
+        "content_sha256": "53a1face6704ea33034b94021dc4bb459a2f9acf3395d7e626f2a45d377d3ac5"
+      },
+      "corpus/duplex_schedule_level2.pdf": {
+        "content_sha256": "ca935a3cdf1d0b328912625975b0387b669ad48835e9fd5cd66fb913902b52ba"
+      },
+      "corpus/duplex_schedule_roof.pdf": {
+        "content_sha256": "b08a9d6b7709bd70a93c93bf62663e4d1d11456198201c010ed1192dbed6064c"
+      },
+      "corpus/duplex_window_spec_sheet.pdf": {
+        "content_sha256": "3a9b8a54e584d5c75bca5a517b9b9b5a1d38699897095a1a4055b9f355159e29"
+      },
+      "duplex_schedule.pdf": {
+        "content_sha256": "276f925025817a12929e6f4e73484796d13322ff316097314ced08ea9533242d"
+      }
+    },
+    "ifc_file": "Duplex_A_20110907.ifc",
+    "pdf_files": [
+      "duplex_schedule.pdf",
+      "corpus/duplex_door_spec_sheet.pdf",
+      "corpus/duplex_meeting_minutes_2026_02_10.pdf",
+      "corpus/duplex_rfi_log_001.pdf",
+      "corpus/duplex_schedule_level1.pdf",
+      "corpus/duplex_schedule_level2.pdf",
+      "corpus/duplex_schedule_roof.pdf",
+      "corpus/duplex_window_spec_sheet.pdf"
+    ],
+    "source_set_id": "duplex-v2"
+  },
   "westgate": {
     "display_name": "Westgate Distribution Center",
     "files": {
@@ -98,37 +186,5 @@
       "westgate_schedule.pdf"
     ],
     "source_set_id": "westgate-v1"
-  },
-  "digitalhub": {
-    "display_name": "RWTH DigitalHub (real building)",
-    "files": {
-      "DigitalHub_FM-ARC_v2.ifc": {
-        "content_sha256": "19d7d02d53c2b88e86890ee236297b12bbb0f7748030cd32ff6a22762e9966bb"
-      },
-      "digitalhub_schedule.pdf": {
-        "content_sha256": "4f6f4896240dd933020468908d8721e489d51e6466fdfa02cbc7bc2c43a4bac2"
-      }
-    },
-    "ifc_file": "DigitalHub_FM-ARC_v2.ifc",
-    "pdf_files": [
-      "digitalhub_schedule.pdf"
-    ],
-    "source_set_id": "digitalhub-v2"
-  },
-  "duplex": {
-    "display_name": "Duplex Apartment (real building)",
-    "files": {
-      "Duplex_A_20110907.ifc": {
-        "content_sha256": "b347a2c8aa8fff6db896a4417a9c50c22ac0ccd7c5cfc22b99b8d29336c606ed"
-      },
-      "duplex_schedule.pdf": {
-        "content_sha256": "276f925025817a12929e6f4e73484796d13322ff316097314ced08ea9533242d"
-      }
-    },
-    "ifc_file": "Duplex_A_20110907.ifc",
-    "pdf_files": [
-      "duplex_schedule.pdf"
-    ],
-    "source_set_id": "duplex-v1"
   }
 }
