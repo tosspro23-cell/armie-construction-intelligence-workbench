@@ -961,18 +961,38 @@ Return only a corrected MultiQueryPlan JSON object."""
                         fragments.append(answer)
                 elif plan.get("source") == "ifc" and plan.get("operation") == "get_properties" and chinese:
                     records = item.get("result_value") or []
-                    record = records[0] if isinstance(records, list) and records else {}
-                    element = record.get("element", {}) if isinstance(record, dict) else {}
-                    label = {
-                        "IfcDoor": "门", "IfcWindow": "窗", "IfcWall": "墙", "IfcSpace": "空间",
-                        "IfcStair": "楼梯", "IfcSlab": "楼板", "IfcRoof": "屋顶", "IfcColumn": "柱",
-                        "IfcBeam": "梁", "IfcMember": "构件", "IfcRailing": "栏杆", "IfcCovering": "饰面",
-                        "IfcFurnishingElement": "家具", "IfcFooting": "基础", "IfcPlate": "面板",
-                    }.get(element.get("entity_type"), "构件")
-                    fragments.append(
-                        f"当前选中的是一个{label}，IFC 类型为 **{element.get('entity_type', plan.get('entity_type'))}**。"
-                        f"所在楼层：**{record.get('storey') or 'Unassigned'}**。"
-                    )
+                    # D-060: mirrors the English _format_ifc_answer fix above
+                    # -- more than one matched record means no single element
+                    # was genuinely selected (a real selection always narrows
+                    # to exactly one via a global_ids filter), so claiming
+                    # "当前选中的是..." for an arbitrary records[0] would be a
+                    # false, misleading certainty.
+                    if isinstance(records, list) and len(records) > 1:
+                        entity_label = {
+                            "IfcDoor": "门", "IfcWindow": "窗", "IfcWall": "墙", "IfcSpace": "空间",
+                            "IfcStair": "楼梯", "IfcSlab": "楼板", "IfcRoof": "屋顶", "IfcColumn": "柱",
+                            "IfcBeam": "梁", "IfcMember": "构件", "IfcRailing": "栏杆", "IfcCovering": "饰面",
+                            "IfcFurnishingElement": "家具", "IfcFooting": "基础", "IfcPlate": "面板",
+                        }.get(plan.get("entity_type"), "构件")
+                        sample = records[:5]
+                        lines = [f"- {(record.get('element', {}) or {}).get('name') or '未命名'}（{record.get('storey') or '未分配楼层'}）" for record in sample]
+                        more = f"\n……还有 {len(records) - 5} 个。" if len(records) > 5 else ""
+                        fragments.append(
+                            f"共有 **{len(records)}** 个{entity_label}匹配此请求——并未唯一确定某一个构件，以下是部分示例：\n\n" + "\n".join(lines) + more
+                        )
+                    else:
+                        record = records[0] if isinstance(records, list) and records else {}
+                        element = record.get("element", {}) if isinstance(record, dict) else {}
+                        label = {
+                            "IfcDoor": "门", "IfcWindow": "窗", "IfcWall": "墙", "IfcSpace": "空间",
+                            "IfcStair": "楼梯", "IfcSlab": "楼板", "IfcRoof": "屋顶", "IfcColumn": "柱",
+                            "IfcBeam": "梁", "IfcMember": "构件", "IfcRailing": "栏杆", "IfcCovering": "饰面",
+                            "IfcFurnishingElement": "家具", "IfcFooting": "基础", "IfcPlate": "面板",
+                        }.get(element.get("entity_type"), "构件")
+                        fragments.append(
+                            f"当前选中的是一个{label}，IFC 类型为 **{element.get('entity_type', plan.get('entity_type'))}**。"
+                            f"所在楼层：**{record.get('storey') or 'Unassigned'}**。"
+                        )
                 else:
                     fragments.append(answer)
             elif chinese and plan.get("group_by") == "space":
@@ -1904,13 +1924,34 @@ Return only a corrected MultiQueryPlan JSON object."""
             breakdown = "; ".join(f"**{group}**: **{count}**" for group, count in value.items())
             return f"Per-storey {label} counts: {breakdown}."
         if plan.operation == "get_properties" and isinstance(value, list) and value:
+            if plan.expected_result_shape == "element_storey":
+                return f"It is on **{value[0].get('storey') or 'Unassigned'}**."
+            if plan.expected_result_shape == "element_identity":
+                element = value[0].get("element", {})
+                return f"The selected element is **{element.get('entity_type', plan.entity_type)}** named **{element.get('name', 'Unnamed')}**."
+            # D-060: owner-reported, 2026-09-16 -- a get_properties question
+            # with no narrowing shape/selection (e.g. "what is the length
+            # and width of the windows?", asked about a type in general,
+            # not "this" one) matches every element of that type, but this
+            # branch always took `value[0]` and phrased it as "The selected
+            # element is..." -- a false, arbitrary certainty (whichever
+            # element happened to sort first), not a genuine single
+            # selection. `element_storey`/`element_identity` above are
+            # unaffected: both are only ever produced by a real
+            # global_ids-filtered selection (selected_element_plan), where
+            # `value` is already exactly one element by construction.
+            if len(value) > 1:
+                label = (plan.entity_type or "IfcProduct").removeprefix("Ifc").lower()
+                sample = value[:5]
+                lines = [f"- {record.get('element', {}).get('name', 'Unnamed')} ({record.get('storey') or 'Unassigned'})" for record in sample]
+                more = f"\n…and {len(value) - 5} more." if len(value) > 5 else ""
+                return (
+                    f"**{len(value)}** {label}s matched this request -- no single element was uniquely selected, so here is a sample "
+                    f"rather than one arbitrarily chosen result:\n\n" + "\n".join(lines) + more
+                )
             record = value[0]
             element = record.get("element", {})
             properties = record.get("properties", {})
-            if plan.expected_result_shape == "element_storey":
-                return f"It is on **{record.get('storey') or 'Unassigned'}**."
-            if plan.expected_result_shape == "element_identity":
-                return f"The selected element is **{element.get('entity_type', plan.entity_type)}** named **{element.get('name', 'Unnamed')}**."
             preferred_keys = ("IfcMaterial", "IsExternal", "LoadBearing", "FireRating", "Length", "Width", "Height", "GrossVolume")
             key_properties = [f"- {name}: {item}" for name, item in properties.items() if any(name.endswith(f".{key}") for key in preferred_keys)][:6]
             property_lines = "\n".join(key_properties) or "- Full property set is available in the evidence inspector."

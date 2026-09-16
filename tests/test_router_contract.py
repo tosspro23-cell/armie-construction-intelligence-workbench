@@ -492,6 +492,46 @@ def test_zh_count_intent_still_recognises_genuine_how_many_forms() -> None:
     assert plan.match_status == "complete"
 
 
+# --- D-060: get_properties on multiple matches must not claim a single ------
+# selection
+
+@pytest.mark.parametrize("question,expected_count", [
+    ("what properties do the windows have?", 4),
+    ("窗户有什么属性？", 4),
+])
+def test_get_properties_with_multiple_matches_reports_the_real_count_end_to_end(question: str, expected_count: int, tmp_path: Path) -> None:
+    """Owner-reported live in production, 2026-09-16: a follow-up asking for
+    windows' dimensions in general (not "this" one) was answered
+    "当前选中的是一个窗...所在楼层：Level 1" -- a specific, singular claim,
+    even though nothing was ever actually selected. Root cause: `armie_demo`
+    has 4 real windows; `get_properties` with an entity-type-wide (no
+    global_ids) filter matches all 4, but both `_format_ifc_answer` and its
+    Chinese counterpart in `_natural_answer` unconditionally took
+    `value[0]`/`records[0]` and phrased it as "The selected element
+    is..."/"当前选中的是..." -- an arbitrary, misleadingly confident pick
+    from whichever element happened to sort first, not a genuine selection.
+    Confirmed to genuinely fail pre-fix (`git stash` reran: both messages
+    named exactly one "Level 01 Window 1" as if uniquely selected).
+    """
+    settings = Settings(
+        data_dir=ROOT / "demo_data", ifc_file="armie_demo.ifc", pdf_files=["armie_demo_schedule.pdf"],
+        audit_store_path=tmp_path / "audit.jsonl", evidence_dir=tmp_path / "evidence",
+    )
+    settings.ensure_runtime_directories()
+    fake = FakeModelProvider()
+    container = ServiceContainer(settings, text_provider_factory=lambda s: fake, vision_provider_factory=lambda s: fake)
+    service = AgentService(container)
+    resources: ProjectResources = asyncio.run(container.get_project("demo"))
+
+    response = service.invoke(project_resources=resources, thread_id=f"d060-{question}", viewer_context=None, question=question)
+
+    assert response.disposition.value == "answered"
+    assert response.execution_metadata.get("model_call_count", 0) == 0
+    assert str(expected_count) in response.answer_markdown
+    assert "当前选中的是一个" not in response.answer_markdown
+    assert "The selected element is" not in response.answer_markdown
+
+
 def test_chinese_quantity_extremum_is_answered_deterministically_end_to_end(tmp_path: Path) -> None:
     """Mirrors SPEC-M14 SS E's own live end-to-end harness: proves the real
     AgentService.invoke() dispatch order, not just the planning-layer shape.

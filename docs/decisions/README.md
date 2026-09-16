@@ -2706,3 +2706,45 @@ than confidently answering the wrong one. Confirmed to genuinely fail pre-fix (`
 the `router.py` change, reran: `AssertionError: assert 'complete' != 'complete'`) and pass
 post-fix. A second test confirms the genuine "有几X" count forms are unaffected. 399 tests pass
 (395 + 4 new); `ruff` clean; `npm run build` clean.
+
+## D-060 — `get_properties` on multiple matches claimed a single, arbitrary selection
+
+Owner-reported live in production, 2026-09-16, in the same conversation as D-059: a follow-up
+asking for windows' dimensions in general ("那么窗户的长宽是多少？", not "this" one) was answered
+"我理解你是在问建筑模型中的对应构件。当前选中的是一个窗，IFC 类型为 IfcWindow。所在楼层：Level 1。"
+-- a specific, singular claim, even though nothing was ever deliberately selected in that turn.
+
+**Root cause, confirmed by direct reproduction against the real demo fixture (4 real windows), not
+assumed.** `get_properties` executed with an entity-type-wide filter (no `global_ids`) --
+correctly, per `IfcRepository.execute`, which enumerates and returns properties for *every*
+matching element (`value = [self._element_properties(item) for item in elements[: query.limit]]`,
+`repository.py`) -- matched all 4 real windows. Both response-formatting paths, though,
+unconditionally took the *first* one: `_format_ifc_answer`'s English branch
+(`record = value[0]`) and `_natural_answer`'s Chinese branch (`record = records[0]`), then phrased
+it as "The selected element is..."/"当前选中的是..." -- a false, arbitrarily-confident claim
+(whichever element happened to sort first), not a genuine single selection.
+`expected_result_shape in {"element_storey", "element_identity"}` is unaffected by this fix: both
+are only ever produced by a real `global_ids`-filtered selection (`selected_element_plan`), where
+the result is already exactly one element by construction, not by coincidence.
+
+**Fix.** Both formatters now check the real match count first: `len(value) > 1` (English) /
+`len(records) > 1` (Chinese) triggers an honest "**N** {type}s matched this request -- no single
+element was uniquely selected" message with a bounded (5-item) sample of names/storeys, rather than
+presenting one arbitrary record as definitive. The existing single-match behavior (including the
+narrow `element_storey`/`element_identity` shapes) is unchanged.
+
+**Verification.** Live end-to-end (not just unit-level) reproduction against the real
+`armie_demo.ifc` fixture (4 real `IfcWindow` elements): "what properties do the windows have?" /
+"窗户有什么属性？" now both correctly report "**4** ... matched," zero model calls, in both
+languages; confirmed to genuinely fail pre-fix (`git stash` of only the `graph.py` change, reran:
+both messages named exactly one `"Level 01 Window 1"` as if it were uniquely selected). 401 tests
+pass (399 + 2 new); `ruff` clean; `npm run build` clean.
+
+**Known, explicitly out of scope for this fix.** The deeper capability gap this incident surfaced
+-- there is still no operation for "list each *distinct* size/dimension a type comes in," which is
+what "所有窗户有几种类型，每种类型的大小...是多少" (D-059) and "窗户的长宽是多少" (this entry) were
+both really asking for -- is not addressed here. This fix stops the system from confidently
+answering the wrong (arbitrary-single-record) thing; it does not add the grouped-by-dimension
+capability itself, which would need its own scoped spec (a real design question: exact-match
+grouping vs. a tolerance band, which dimensions to group by, response shape for many distinct
+groups).
