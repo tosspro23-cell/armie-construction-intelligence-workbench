@@ -101,6 +101,10 @@ input, textarea { width: 100%; background: #0b1020; color: #f6f8ff; border: 1px 
 .technical-details { margin-top: 8px; color: #a8b4cf; font-size: .78rem; }
 .technical-details summary { cursor: pointer; color: #9fbfff; }
 .passed { color: #8ff0b1; } .failed { color: #ff9696; } .not_applicable { color: #d6c17a; }
+/* SPEC-M16: V1/V2 engine labeling + V2's own live tool-use progress. */
+.engine-badge { padding: 1px 6px; border-radius: 6px; background: #24345c; color: #bcd2ff; font-size: .68rem; letter-spacing: .02em; }
+.v2-streaming { opacity: .92; }
+.v2-tool-status { margin: 4px 0 0; color: #8ab9ff; font-size: .82rem; font-style: italic; }
 form { margin-top: 16px; display: grid; gap: 10px; position: sticky; bottom: 0; padding-top: 10px; background: #121a30; z-index: 2; }
 .submit-row { display: flex; gap: 8px; align-items: center; }
 .stop-button { background: #ff9696; color: #240d14; }

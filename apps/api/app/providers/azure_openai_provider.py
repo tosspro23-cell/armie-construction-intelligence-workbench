@@ -155,6 +155,15 @@ class AzureOpenAIProvider:
         pending_calls: dict[int, dict[str, Any]] = {}
         content_parts: list[str] = []
         async for chunk in stream:
+            # Confirmed live against the real Azure OpenAI deployment,
+            # 2026-09-16: Azure's own streaming endpoint sends at least one
+            # leading chunk (content-filter/prompt-annotation metadata)
+            # with an empty `choices` array before any real delta arrives
+            # -- indexing [0] unconditionally raised IndexError on every
+            # single real streamed turn. Never observed against the plain
+            # OpenAI API's own streaming shape, only Azure's.
+            if not chunk.choices:
+                continue
             delta = chunk.choices[0].delta
             if delta.content:
                 content_parts.append(delta.content)

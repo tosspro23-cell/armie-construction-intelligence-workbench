@@ -1973,6 +1973,16 @@ Return only a corrected MultiQueryPlan JSON object."""
         messages.append({"role": "user", "content": question})
 
         self._audit(state, "v2_turn_started", "model_called", "V2 tool-calling agent turn started.", {"question": question, "recent_turn_count": len(recent_turns or [])}, planning_mode="tool_calling")
+        # SPEC-M16 SS E: real, measured latency (see the live benchmark
+        # report) found that most of a turn's wall time is a single,
+        # invisible-to-the-user model round trip deciding which tool(s) to
+        # call, *before* anything streams -- a genuine architectural limit
+        # of tool-calling (the decision round cannot itself be streamed;
+        # see stream_turn's own docstring), not something this phase's
+        # design can eliminate. This is the honest mitigation available
+        # now: an immediate signal that the agent has started working,
+        # rather than several seconds of visible silence.
+        yield {"type": "thinking"}
 
         all_citations: list[dict[str, Any]] = []
         all_evidence: list[dict[str, Any]] = []

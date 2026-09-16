@@ -1,6 +1,6 @@
 import React, { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { api, ApiAuthError, AuthedImage, ensureSessionId, setStoredApiKey } from "./apiClient";
+import { api, ApiAuthError, AuthedImage, ensureSessionId, setStoredApiKey, withAuthHeader } from "./apiClient";
 import { DecisionStory } from "./DecisionStory";
 import { Findings } from "./Findings";
 import { IfcViewer, ViewerStatus } from "./IfcViewer";
@@ -83,6 +83,14 @@ function App() {
   const [snapshot, setSnapshot] = useState<string | null>(null);
   const [snapshotCleared, setSnapshotCleared] = useState(false);
   const [sourcePreference, setSourcePreference] = useState<SourcePreference>("auto");
+  // SPEC-M16: "v1" (default) is today's engine, completely unaffected by
+  // this toggle -- submit() below is untouched. "v2" is the new,
+  // independent tool-calling agent (SS C), submitted via the separate
+  // submitV2() path so V1's own request/response handling never has to
+  // account for a second response shape (a streamed SSE turn instead of
+  // one JSON object).
+  const [engine, setEngine] = useState<"v1" | "v2">("v1");
+  const [v2Streaming, setV2Streaming] = useState<{ statuses: string[]; answer: string } | null>(null);
   const [tab, setTab] = useState<WorkspaceTab>("bim");
   const [drawingZoom, setDrawingZoom] = useState(1);
   const [drawingEvidence, setDrawingEvidence] = useState<{ bbox?: number[]; board?: string; field?: string; page?: number; document?: string; localized?: boolean } | null>(null);
@@ -199,6 +207,82 @@ function App() {
     } finally { window.clearInterval(progressTimer); controllerRef.current = null; setBusy(false); setActiveRequestId(null); setRequestStage("idle"); }
   }
 
+  // SPEC-M16: V2's own submit path -- a separate function, not a branch
+  // inside submit() above, so V1's request/response handling (a single
+  // JSON object) never has to account for V2's streamed SSE shape.
+  // Consumes the response body as a raw stream (fetch + ReadableStream,
+  // not EventSource, which cannot POST or carry the auth header this app
+  // needs) and renders tool-use status lines and answer tokens as they
+  // arrive, then folds the final event into the same `turns` list V1
+  // uses, labeled by engine so a benchmark comparison is legible without
+  // cross-referencing the audit trail.
+  async function submitV2(event: FormEvent) {
+    event.preventDefault();
+    if (!question.trim() || busy) return;
+    const askedQuestion = question.trim();
+    setBusy(true);
+    setV2Streaming({ statuses: [], answer: "" });
+    setQuestion("");
+    try {
+      const response = await fetch("/api/v1/chat", withAuthHeader({
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ thread_id: threadId, project_id: projectId, question: askedQuestion, engine: "v2" }),
+      }));
+      if (!response.ok || !response.body) throw new Error(`V2 request failed (${response.status}).`);
+      const newThreadId = response.headers.get("X-Thread-Id") || threadId;
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let finalResponse: Response | null = null;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          const event = JSON.parse(line.slice("data: ".length));
+          if (event.type === "thinking") {
+            // SPEC-M16 SS E: the tool-selection round cannot itself be
+            // streamed (it must be fully received before its arguments
+            // are parseable) -- real measurement found this is most of a
+            // turn's wall time. An immediate "thinking" line is the
+            // honest mitigation: something visible right away, not
+            // several seconds of silence before the first real status.
+            setV2Streaming((current) => current && { ...current, statuses: ["Thinking…"] });
+          } else if (event.type === "tool_status") {
+            setV2Streaming((current) => current && {
+              ...current,
+              statuses: event.status === "started"
+                ? [...current.statuses.filter((s) => s !== "Thinking…"), `Calling ${event.tool_name}…`]
+                : current.statuses.map((s) => s === `Calling ${event.tool_name}…` ? `${event.tool_name} ✓` : s),
+            });
+          } else if (event.type === "answer_chunk") {
+            setV2Streaming((current) => current && { ...current, statuses: current.statuses.filter((s) => s !== "Thinking…"), answer: current.answer + event.text });
+          } else if (event.type === "final") {
+            finalResponse = event.response as Response;
+          } else if (event.type === "error") {
+            throw new Error(event.message);
+          }
+        }
+      }
+      if (finalResponse) {
+        setThreadId(newThreadId || undefined);
+        setTurns((current) => [...current, {
+          id: finalResponse!.trace_id, user: askedQuestion, assistant: finalResponse!,
+          timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }), trace: [],
+        }]);
+      }
+    } catch (error) {
+      console.error(error);
+      setApiError(`The V2 agent request failed: ${(error as Error).message}`);
+    } finally {
+      setBusy(false);
+      setV2Streaming(null);
+    }
+  }
+
   async function stopRequest() {
     if (!activeRequestId) return;
     const requestId = activeRequestId;
@@ -312,6 +396,10 @@ function App() {
     <div className="top-controls">
       {projects.length > 0 && <label>Project <select value={projectId || "demo"} onChange={(e) => switchProject(e.target.value)}>{projects.map((p) => <option key={p.project_id} value={p.project_id}>{p.display_name}</option>)}</select></label>}
       <label>Source <select value={sourcePreference} onChange={(e) => setSourcePreference(e.target.value as SourcePreference)}><option value="auto">Auto</option><option value="ifc">IFC Model</option><option value="pdf">Engineering Drawing</option><option value="viewer_snapshot">Current Viewer Snapshot</option></select></label>
+      {/* SPEC-M16: explicit, visible per-question engine choice -- never
+          automatic/silent routing between V1 and V2 (this spec's own
+          Invariant). Defaults to V1 every time the app loads. */}
+      <label title="V1: today's engine. V2: the new independent tool-calling agent (beta) -- pick either per question to compare them.">Engine <select value={engine} onChange={(e) => setEngine(e.target.value as "v1" | "v2")}><option value="v1">V1 (current)</option><option value="v2">V2 (agent, beta)</option></select></label>
       <button type="button" onClick={newConversation}>New conversation</button><button type="button" onClick={() => { setSelected(null); setSelectionCleared(true); setHighlightedIds(new Set()); }}>Clear selection</button><button type="button" onClick={() => { setSnapshot(null); setSnapshotCleared(true); }}>Clear snapshot</button>
     </div>
     <section className="workspace">
@@ -329,7 +417,13 @@ function App() {
         {tab === "snapshot" && <section className="snapshot"><h2>Viewer Snapshot</h2>{snapshot ? <img src={snapshot} alt="Captured IFC viewer context" /> : <p className="empty">Capture a BIM view to enable image-grounded inspection.</p>}<p>Selected: {selected?.globalId || "none"}</p></section>}
         {tab === "findings" && <Findings projectId={projectId} />}
       </aside>
-      <section className="chat"><h2>Conversation</h2><div className="messages" ref={timelineRef}>{turns.length === 0 ? <p className="empty">Ask a BIM, drawing, or current-view question. Auto chooses the source; overrides remain in technical details.</p> : turns.map((turn) => <React.Fragment key={turn.id}><div className="message-row user"><article className="message user-message"><div className="message-meta"><span>User</span><time>{turn.timestamp}</time></div><p>{turn.user}</p></article></div><div className="message-row assistant"><article className={`message assistant-message ${turn.assistant.disposition}`}><div className="message-meta"><span>Assistant</span><span>{turn.assistant.disposition.replace(/_/g, " ")}</span><span className={turn.assistant.verification.status}>{turn.assistant.verification.status}</span><time>{turn.timestamp}</time></div><p>{renderAnswerMarkdown(turn.assistant.answer_markdown)}</p><details className="technical-details"><summary>Technical details</summary><small>Source: {turn.assistant.execution_metadata.source || "—"} · Planner: {turn.assistant.execution_metadata.planning_mode || "—"} · Models: {turn.assistant.execution_metadata.model_call_count || 0} · Tools: {turn.assistant.execution_metadata.tool_call_count || 0} · Trace: {turn.assistant.trace_id}</small></details></article></div></React.Fragment>)}</div><form onSubmit={submit}><textarea value={question} onChange={(e) => setQuestion(e.target.value)} placeholder="e.g. How many doors are in the project?" rows={3} /><div className="submit-row"><button disabled={busy}>{busy ? `Checking evidence… ${requestStage}` : "Ask with audit trail"}</button>{busy && <button type="button" className="stop-button" onClick={stopRequest}>Stop request</button>}</div></form></section>
+      <section className="chat"><h2>Conversation</h2><div className="messages" ref={timelineRef}>{turns.length === 0 ? <p className="empty">Ask a BIM, drawing, or current-view question. Auto chooses the source; overrides remain in technical details.</p> : turns.map((turn) => <React.Fragment key={turn.id}><div className="message-row user"><article className="message user-message"><div className="message-meta"><span>User</span><time>{turn.timestamp}</time></div><p>{turn.user}</p></article></div><div className="message-row assistant"><article className={`message assistant-message ${turn.assistant.disposition}`}><div className="message-meta"><span>Assistant</span>{/* SPEC-M16: labeled so a V1/V2 benchmark comparison is legible without cross-referencing the audit trail. */}<span className="engine-badge">{turn.assistant.execution_metadata.engine === "v2" ? "V2 (agent)" : "V1"}</span><span>{turn.assistant.disposition.replace(/_/g, " ")}</span><span className={turn.assistant.verification.status}>{turn.assistant.verification.status}</span><time>{turn.timestamp}</time></div><p>{renderAnswerMarkdown(turn.assistant.answer_markdown)}</p><details className="technical-details"><summary>Technical details</summary><small>Source: {turn.assistant.execution_metadata.source || "—"} · Planner: {turn.assistant.execution_metadata.planning_mode || "—"} · Models: {turn.assistant.execution_metadata.model_call_count || 0} · Tools: {turn.assistant.execution_metadata.tool_call_count || 0} · Latency: {turn.assistant.execution_metadata.latency_ms ? `${turn.assistant.execution_metadata.latency_ms} ms` : "—"} · Trace: {turn.assistant.trace_id}</small></details></article></div></React.Fragment>)}
+        {/* SPEC-M16 SS F: V2's own live progress -- tool-use status lines
+            clear/tick as calls resolve, then the final answer's tokens
+            append as they stream in, verified live in the browser (this
+            session's own established standard), not just unit-tested. */}
+        {v2Streaming && <div className="message-row assistant"><article className="message assistant-message v2-streaming"><div className="message-meta"><span>Assistant</span><span className="engine-badge">V2 (agent)</span><span>working…</span></div>{v2Streaming.statuses.map((status, index) => <p key={index} className="v2-tool-status">{status}</p>)}{v2Streaming.answer && <p>{renderAnswerMarkdown(v2Streaming.answer)}</p>}</article></div>}
+      </div><form onSubmit={engine === "v2" ? submitV2 : submit}><textarea value={question} onChange={(e) => setQuestion(e.target.value)} placeholder="e.g. How many doors are in the project?" rows={3} /><div className="submit-row"><button disabled={busy}>{busy ? (engine === "v2" ? "Agent working…" : `Checking evidence… ${requestStage}`) : "Ask with audit trail"}</button>{busy && engine === "v1" && <button type="button" className="stop-button" onClick={stopRequest}>Stop request</button>}</div></form></section>
       <aside className="inspector"><DecisionStory latest={latest} trace={trace} projectId={projectId} onOpenCitation={openCitation} /></aside>
     </section>
   </main>;
