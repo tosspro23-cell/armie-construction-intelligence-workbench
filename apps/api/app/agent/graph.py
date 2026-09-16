@@ -1991,6 +1991,7 @@ Return only a corrected MultiQueryPlan JSON object."""
         all_citations: list[dict[str, Any]] = []
         all_evidence: list[dict[str, Any]] = []
         all_plans: list[dict[str, Any]] = []
+        all_reconciliation_items: list[dict[str, Any]] = []
         answer_parts: list[str] = []
         max_iterations = self.settings.tool_calling_max_iterations
         for iteration in range(1, max_iterations + 1):
@@ -2022,7 +2023,10 @@ Return only a corrected MultiQueryPlan JSON object."""
                         # "source" convention this mirrors).
                         "normalized_request": question, "subplans": all_plans, "source": self._v2_source_label(all_plans),
                     },
+                    reconciliation_items=[ReconciliationItem.model_validate(item) for item in all_reconciliation_items],
                 )
+                if response.reconciliation_items:
+                    self._upsert_findings_from_reconciliation(state, response)
                 yield {"type": "final", "response": response}
                 return
             for tool_call in turn_complete.tool_calls:
@@ -2034,6 +2038,15 @@ Return only a corrected MultiQueryPlan JSON object."""
                 all_citations.extend(tool_result.get("citations", []))
                 all_evidence.extend(result.get("evidence", []))
                 all_plans.extend(result.get("plan", []))
+                # Owner-reported, 2026-09-16: reconcile_doors_windows's own
+                # per-tag matched/mismatch breakdown (computed in
+                # _v2_dispatch_tool's reconciliation branch, same as V1's)
+                # never reached the final AgentResponse for V2 -- neither
+                # DecisionStory.tsx's reconciliation table nor the Findings
+                # tab (SPEC-M11) had anything to render, even though the
+                # underlying comparison ran and the answer text described it.
+                if tool_call.tool_name == "reconcile_doors_windows" and tool_result.get("result_value"):
+                    all_reconciliation_items.extend(tool_result["result_value"])
                 messages.append({
                     "role": "tool", "tool_call_id": tool_call.call_id,
                     "content": json.dumps({"disposition": tool_result.get("disposition"), "answer": tool_result.get("answer"), "result_value": tool_result.get("result_value")}, default=str),

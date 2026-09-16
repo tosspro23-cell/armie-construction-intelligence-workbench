@@ -32,9 +32,21 @@ function auditStage(event: TraceEvent): Stage {
   const type = event.event_type.toLowerCase();
   if (step.includes("resolve") || type.includes("context") || type.includes("selection")) return "Intent Understanding";
   if (type.includes("coverage") || type.includes("canonical") || type.includes("normalize") || type.includes("delta") || type.includes("precedence")) return "Normalization";
-  if (step.includes("route") || step.includes("plan") || type.includes("semantic") || type.includes("repair")) return "Planning";
+  // "v2_turn_started"/"model_called" (SPEC-M16): V2 has no separate
+  // context-resolution/normalization phase -- its one tool-selection model
+  // call *is* "Planning" (its own Plan step subtitle already reads
+  // "tool_calling planning"). Owner-reported, 2026-09-16: without this,
+  // the event fell through to the unused "Final Response" bucket and V2's
+  // Question/Plan steps showed no time at all.
+  if (step.includes("route") || step.includes("plan") || type.includes("semantic") || type.includes("repair") || step.startsWith("v2_turn_started")) return "Planning";
   if (step.includes("execute") || type.includes("tool") || type.includes("subplan")) return "Execution";
-  if (step.includes("verif") || type.includes("verif") || type.includes("evidence")) return "Verification";
+  // type.includes("consistency") (owner-reported, 2026-09-16): a plain
+  // "execution_consistency" event_type/step (emitted by the same shared
+  // _execute_ifc consistency check both V1 and V2 use) doesn't contain
+  // "verif", so it fell through to "Final Response" -- an unused bucket --
+  // instead of Verification, alongside its sibling result_shape_verification
+  // event which already matched. Affects both engines equally; not V2-only.
+  if (step.includes("verif") || type.includes("verif") || type.includes("evidence") || type.includes("consistency")) return "Verification";
   return "Final Response";
 }
 

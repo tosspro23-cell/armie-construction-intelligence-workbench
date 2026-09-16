@@ -597,7 +597,23 @@ async def _v2_sse_stream(agent: AgentService, conversations: ConversationStore, 
     try:
         async for event in agent.invoke_v2(project_resources=project_resources, thread_id=thread_id, question=question, viewer_context=viewer_context, recent_turns=recent_turns):
             if event["type"] == "final":
-                final_response = event["response"]
+                # Owner-reported, 2026-09-16: V2 responses never carried a
+                # total latency (the Result step's "~X s" figure and the
+                # per-step breakdown line both depend on
+                # execution_metadata.latency_ms) -- `started`/`request_id`
+                # were already threaded into this function for exactly this,
+                # but nothing ever used them. Mirrors chat()'s own
+                # post-`agent.invoke` enrichment above (D-023 addendum) so
+                # both engines' responses carry the same fields.
+                final_response = event["response"].model_copy(update={
+                    "execution_metadata": {
+                        **event["response"].execution_metadata,
+                        "request_id": request_id,
+                        "latency_ms": round((time.perf_counter() - started) * 1000, 1),
+                        "project_id": project_resources.manifest.project_id,
+                        "source_set_id": project_resources.manifest.source_set_id,
+                    }
+                })
                 payload = {"type": "final", "response": _json.loads(final_response.model_dump_json())}
             else:
                 payload = event
