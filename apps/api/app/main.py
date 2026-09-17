@@ -584,7 +584,7 @@ async def chat(request: ChatRequest, x_session_id: str | None = Header(default=N
     return _tag_span_with_trace_id(response)
 
 
-async def _v2_sse_stream(agent: AgentService, conversations: ConversationStore, *, project_resources, thread_id: str, question: str, viewer_context: dict | None, recent_turns: list[dict[str, str]], context: dict, memory_turns: int, request_id: str, started: float, deadline: float, record: dict):
+async def _v2_sse_stream(agent: AgentService, conversations: ConversationStore, *, project_resources, thread_id: str, question: str, viewer_context: dict | None, recent_turns: list[dict[str, str]], context: dict, memory_turns: int, request_id: str, started: float, deadline: float, record: dict, source_preference: str):
     """SPEC-M16 SS F: renders `AgentService.invoke_v2`'s event stream as
     Server-Sent Events. Each line is `data: <json>\\n\\n`, the format
     `EventSource`/a `ReadableStream` reader on the frontend can consume
@@ -610,6 +610,7 @@ async def _v2_sse_stream(agent: AgentService, conversations: ConversationStore, 
         async for event in agent.invoke_v2(
             project_resources=project_resources, thread_id=thread_id, question=question, viewer_context=viewer_context,
             recent_turns=recent_turns, deadline=deadline, cancel_check=lambda: record.get("status") == "cancel_requested",
+            source_preference=source_preference,
         ):
             if event["type"] == "final":
                 # Owner-reported, 2026-09-16: V2 responses never carried a
@@ -650,6 +651,16 @@ async def _v2_sse_stream(agent: AgentService, conversations: ConversationStore, 
                 if context_persist_error:
                     execution_metadata["context_persist_error"] = context_persist_error
                 final_response = final_response.model_copy(update={"execution_metadata": execution_metadata})
+                # Independent-review finding, 2026-09-17, second pass: this
+                # request's own record was registered with `trace_id=request_id`
+                # (matching chat()'s own initial registration for V1) but,
+                # unlike chat() (which updates it to `response.trace_id` on
+                # completion, main.py:579), V2's record here never got the
+                # same update -- invoke_v2 always mints its own separate
+                # trace_id, so `GET /api/v1/requests/{request_id}` kept
+                # reporting a trace_id that `/api/v1/traces/{trace_id}`
+                # never actually has any audit events under.
+                record["trace_id"] = final_response.trace_id
                 record["status"] = "completed" if final_response.disposition.value not in {"timeout", "cancelled", "error"} else final_response.disposition.value
                 payload = {"type": "final", "response": _json.loads(final_response.model_dump_json())}
             else:
@@ -726,6 +737,7 @@ async def _chat_v2(request: ChatRequest, x_session_id: str | None):
             viewer_context=request.viewer_context.model_dump() if request.viewer_context else None,
             recent_turns=recent_turns, context=context, memory_turns=settings.conversation_memory_turns,
             request_id=request_id, started=started, deadline=deadline, record=record,
+            source_preference=request.source_preference,
         ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Thread-Id": thread_id},

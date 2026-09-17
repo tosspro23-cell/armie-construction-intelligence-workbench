@@ -118,6 +118,29 @@ def test_v2_partial_tool_failure_marks_partially_answered(tmp_path: Path) -> Non
     assert len(response.citations) == 4  # only the real, successful IfcDoor call contributes citations
 
 
+def test_v2_summarizes_a_clarification_required_subtask_as_clarification_required(tmp_path: Path) -> None:
+    """Independent-review finding, 2026-09-17, second pass: a turn whose
+    only dispatched tool call came back disposition="clarification_required"
+    (a real, honest "please disambiguate," not a failure) fell through
+    every named branch in the disposition-summary logic straight to the
+    generic "error" catch-all -- a normal conversational clarification was
+    misreported as a system failure.
+
+    space_distance against armie_demo.ifc (which has no IfcSpace elements
+    at all) deterministically triggers this exact tool-level disposition
+    (`_execute_ifc`'s own except-clause for an unresolvable space name),
+    without needing a synthetic/mocked tool_result.
+    """
+    fake = FakeModelProvider()
+    fake.script("v2_tool_turn", ScriptedToolCalls([("space_distance", {"from_space": "Nonexistent Room A", "to_space": "Nonexistent Room B"})]))
+    fake.script("v2_tool_turn", ScriptedAnswer(["Please specify the exact room identifiers you mean."]))
+    _, service, resources = _service(tmp_path, fake)
+
+    response = asyncio.run(_run(service, resources, "What is the distance between room A and room B?", "eval-clarification-subtask"))
+
+    assert response.disposition.value == "clarification_required"
+
+
 def test_v2_representative_eval_reconciliation(tmp_path: Path) -> None:
     fake = FakeModelProvider()
     fake.script("v2_tool_turn", ScriptedToolCalls([("reconcile_doors_windows", {})]))
@@ -196,6 +219,33 @@ def test_v2_rejects_narrative_that_contradicts_its_own_tool_result(tmp_path: Pat
     assert response.citations == []  # real evidence must not sit alongside a withdrawn, inconsistent claim
 
 
+def test_v2_rejects_a_fabricated_number_hidden_behind_a_correct_decoy(tmp_path: Path) -> None:
+    """Independent-review finding, 2026-09-17, third pass: the first
+    version of the consistency check (fixed above) only required "some
+    real number from this turn appears *somewhere* in the answer" --
+    bypassable by mentioning the real number as an unrelated aside while
+    stating a fabricated one as the actual claim. Reproduced live: a real
+    count_elements call returns 4; the model answers "4 records were
+    checked. There are 99999 doors, all certified for 120 minutes." -- a
+    genuine "4" is present, so the first check alone passed clean.
+
+    Fixed by additionally requiring that wherever the answer names this
+    tool call's own entity noun ("door"/"doors") next to a number, that
+    number is a real one -- "99999 doors" fails this even though "4"
+    exists elsewhere in the same text.
+    """
+    fake = FakeModelProvider()
+    fake.script("v2_tool_turn", ScriptedToolCalls([("count_elements", {"entity_type": "IfcDoor"})]))
+    fake.script("v2_tool_turn", ScriptedAnswer(["4 records were checked. There are 99999 doors, all certified for 120 minutes."]))
+    _, service, resources = _service(tmp_path, fake)
+
+    response = asyncio.run(_run(service, resources, "How many doors are there?", "eval-fabrication-decoy"))
+
+    assert response.disposition.value == "error"
+    assert response.verification.status == "failed"
+    assert "99999" not in response.answer_markdown
+
+
 def test_narrative_consistency_check_tolerates_natural_rounding_of_a_measurement() -> None:
     """Owner-reported, 2026-09-17 (found live): a real space_distance call
     returning {"value_m": 5.234, ...} (the same shape aggregate_quantity
@@ -206,15 +256,17 @@ def test_narrative_consistency_check_tolerates_natural_rounding_of_a_measurement
     disposition=error. A count (whole number) still requires an exact
     match: "4 doors" vs "5 doors" is a real discrepancy, not rounding.
     """
+    no_terms: frozenset[str] = frozenset()
     facts = AgentService._numeric_tokens_from_result_value({"value_m": 5.234, "from_space": "B204", "to_space": "B202"})
-    assert AgentService._narrative_consistent_with_tool_facts("B204 到 B202 的距离约为 5.23 米。", [facts])
-    assert AgentService._narrative_consistent_with_tool_facts("The distance is 5.2 m.", [facts])
-    assert AgentService._narrative_consistent_with_tool_facts("The distance is 5.234 m.", [facts])
-    assert not AgentService._narrative_consistent_with_tool_facts("The distance is 12 m.", [facts])
+    assert AgentService._narrative_consistent_with_tool_facts("B204 到 B202 的距离约为 5.23 米。", [(no_terms, facts)])
+    assert AgentService._narrative_consistent_with_tool_facts("The distance is 5.2 m.", [(no_terms, facts)])
+    assert AgentService._narrative_consistent_with_tool_facts("The distance is 5.234 m.", [(no_terms, facts)])
+    assert not AgentService._narrative_consistent_with_tool_facts("The distance is 12 m.", [(no_terms, facts)])
 
+    door_terms = AgentService._entity_terms_for("IfcDoor")
     door_count_facts = AgentService._numeric_tokens_from_result_value(4)
-    assert AgentService._narrative_consistent_with_tool_facts("There are 4 doors.", [door_count_facts])
-    assert not AgentService._narrative_consistent_with_tool_facts("There are 5 doors.", [door_count_facts])
+    assert AgentService._narrative_consistent_with_tool_facts("There are 4 doors.", [(door_terms, door_count_facts)])
+    assert not AgentService._narrative_consistent_with_tool_facts("There are 5 doors.", [(door_terms, door_count_facts)])
 
 
 def test_v2_respects_an_expired_deadline(tmp_path: Path) -> None:
@@ -246,6 +298,55 @@ def test_v2_respects_an_expired_deadline(tmp_path: Path) -> None:
 
     assert final.disposition.value == "timeout"
     assert not fake.calls  # the deadline check runs before the model is ever called
+
+
+def test_v2_respects_a_deadline_that_expires_mid_model_call(tmp_path: Path) -> None:
+    """Independent-review finding, 2026-09-17, second pass: the first
+    version of the deadline check above only ran *between* iterations --
+    a single iteration's own model call sleeping/hanging past `deadline`
+    was never interrupted. Reproduced live with the project's IFC cache
+    pre-warmed (matching the reviewer's own repro note): a still-valid
+    50ms deadline at iteration start, a 200ms-delayed fake model, and the
+    turn still finalized normally (disposition=clarification_required)
+    ~200ms later -- no timeout at all.
+
+    Fixed by wrapping each received stream event in `asyncio.wait_for`
+    against the remaining budget, not just checking at the loop's own
+    iteration boundary. `resources.ifc_repository.metadata()` is called
+    once before timing starts, deliberately, to warm the same
+    IfcOpenShell-parsing cache invoke_v2's own storey-name lookup reads --
+    otherwise that parse's own real latency (order 100ms for even this
+    small fixture) can by itself exceed a 50ms deadline before the loop
+    is ever reached, masking whether *this* fix (mid-call, not pre-call)
+    is the one actually doing the catching.
+    """
+    import functools
+    import time as _time
+
+    from fakes.fake_provider import sleep_past_deadline
+
+    fake = FakeModelProvider()
+    fake.script("v2_tool_turn", functools.partial(sleep_past_deadline, 0.2, then=ScriptedAnswer(["This should never be reached in time."])))
+    _, service, resources = _service(tmp_path, fake)
+    resources.ifc_repository.metadata()  # warm the cache -- see docstring above
+
+    final = None
+    async def _run_with_deadline():
+        nonlocal final
+        deadline = _time.perf_counter() + 0.05
+        async for event in service.invoke_v2(
+            project_resources=resources, thread_id="eval-mid-call-timeout", question="How many doors are there?",
+            viewer_context=None, deadline=deadline,
+        ):
+            if event["type"] == "final":
+                final = event["response"]
+    t0 = _time.perf_counter()
+    asyncio.run(_run_with_deadline())
+    elapsed = _time.perf_counter() - t0
+
+    assert final.disposition.value == "timeout"
+    assert elapsed < 0.15  # nowhere near the fake model's own full 200ms delay
+    assert "This should never be reached in time." not in final.answer_markdown
 
 
 def test_v2_respects_a_cancellation_request(tmp_path: Path) -> None:

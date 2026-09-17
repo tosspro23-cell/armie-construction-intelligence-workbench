@@ -155,3 +155,71 @@ def test_v2_engine_recent_turn_memory_persists_and_is_reused(tmp_path: Path) -> 
     assert "4 doors" in second_call_messages
     final2 = [event for event in events2 if event["type"] == "final"][0]["response"]
     assert final2["disposition"] == "answered"
+
+
+def test_v2_never_streams_a_narrative_before_it_passes_verification(tmp_path: Path) -> None:
+    """Independent-review finding, 2026-09-17, second pass: `answer_chunk`
+    events used to be forwarded to the client the instant each token
+    arrived from the model -- a narrative later caught as inconsistent
+    with this turn's own tool results (a real count_elements call
+    returning 4, a fake model answering "There are 99999 doors") had
+    *already* been streamed to and rendered by the client before its own
+    rejection was even decided. SPEC-M16's own Invariant ("streaming only
+    ever carries already-verified content") was never actually true for
+    this second model call, only for tool execution.
+
+    Now buffered until the consistency check passes; an inconsistent
+    narrative must never reach the client as an answer_chunk, in any
+    form, at any point in the event stream -- not just absent from the
+    final response.
+    """
+    import app.main as main_module
+
+    settings = _settings(tmp_path)
+    fake = FakeModelProvider()
+    fake.script("v2_tool_turn", ScriptedToolCalls([("count_elements", {"entity_type": "IfcDoor"})]))
+    fake.script("v2_tool_turn", ScriptedAnswer(["There are 99999 doors, all fire-certified for 120 minutes."]))
+    container, service = _build(settings, fake)
+    main_module.app.state.container = container
+    main_module.app.state.agent = service
+    main_module.app.state.requests = {}
+
+    response = asyncio.run(main_module.chat(ChatRequest(request_id="v2-no-leak-1", thread_id="v2-no-leak-thread", question=QUESTION, engine="v2")))
+    events = asyncio.run(_collect_sse_events(response))
+
+    answer_chunks = [event for event in events if event["type"] == "answer_chunk"]
+    assert answer_chunks == []  # never sent, not even before the final rejection
+    final = [event for event in events if event["type"] == "final"][0]["response"]
+    assert final["disposition"] == "error"
+    assert "99999" not in final["answer_markdown"]
+
+
+def test_v2_request_record_gets_the_real_trace_id_used_by_the_turn(tmp_path: Path) -> None:
+    """Independent-review finding, 2026-09-17, second pass: this request's
+    own record in `app.state.requests` was registered with
+    `trace_id=request_id` (matching chat()'s own initial registration for
+    V1) but, unlike chat() (which updates it to the real
+    `response.trace_id` on completion), V2's record here never got the
+    same update -- invoke_v2 always mints its own separate trace_id, so
+    `GET /api/v1/requests/{request_id}` kept reporting a trace_id that
+    `/api/v1/traces/{trace_id}` never actually has any audit events under.
+    """
+    import app.main as main_module
+
+    settings = _settings(tmp_path)
+    fake = FakeModelProvider()
+    fake.script("v2_tool_turn", ScriptedToolCalls([("count_elements", {"entity_type": "IfcDoor"})]))
+    fake.script("v2_tool_turn", ScriptedAnswer(["The project has 4 doors."]))
+    container, service = _build(settings, fake)
+    main_module.app.state.container = container
+    main_module.app.state.agent = service
+    main_module.app.state.requests = {}
+
+    response = asyncio.run(main_module.chat(ChatRequest(request_id="v2-trace-sync-1", thread_id="v2-trace-sync-thread", question=QUESTION, engine="v2")))
+    events = asyncio.run(_collect_sse_events(response))
+
+    final = [event for event in events if event["type"] == "final"][0]["response"]
+    record = main_module.app.state.requests["v2-trace-sync-1"]
+    assert record["trace_id"] == final["trace_id"]
+    assert record["trace_id"] != "v2-trace-sync-1"  # the real trace_id, not the placeholder it started as
+    assert record["status"] == "completed"

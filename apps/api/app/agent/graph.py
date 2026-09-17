@@ -1901,7 +1901,7 @@ Return only a corrected MultiQueryPlan JSON object."""
         return AgentResponse.model_validate(outcome["final_response"])
 
     @staticmethod
-    def _v2_system_prompt(storey_names: list[str] | None = None) -> str:
+    def _v2_system_prompt(storey_names: list[str] | None = None, source_preference: str = "auto") -> str:
         """SPEC-M16: V2's own system prompt.
 
         Deliberately restates the same honesty invariant every part of V1
@@ -1910,12 +1910,29 @@ Return only a corrected MultiQueryPlan JSON object."""
         without one. Nothing here asks the model to compute, estimate, or
         recall a construction fact from its own training -- only to call a
         tool and then describe that tool's real, verified return value.
+
+        `source_preference` (independent-review finding, 2026-09-17): the
+        workbench's own Source control (auto/ifc/pdf/viewer_snapshot)
+        reached V1's `agent.invoke` but was never even threaded into
+        `_chat_v2`/`invoke_v2` at all for V2 -- confirmed live: setting it
+        to "pdf" and asking a question the model could answer via either
+        source still ran the IFC tool. V2 has no routing-layer concept of
+        "source" the way V1's own heuristic router does (the model picks
+        a *tool*, not a *source*, and several tools are IFC-only or
+        PDF-only with no overlap at all) -- a prompt-level steer for the
+        genuinely ambiguous cases is the honest integration point this
+        architecture actually has, not a hard routing gate.
         """
         storey_guidance = (
             f"This project's real storey names are exactly: {storey_names} -- always pass one of "
             "these exact strings as a storey filter, never a translation, abbreviation, or ordinal "
             "guess (e.g. \"第二层\" or \"2nd floor\") of the storey the user meant. "
         ) if storey_names else ""
+        source_guidance = {
+            "ifc": "The user has set a source preference of 'ifc' -- when a question could plausibly be answered from either the IFC model or the PDF drawings, prefer the IFC-based tools (count_elements, group_elements_by_storey, get_element_properties, aggregate_quantity, space_distance) over extract_pdf_field, unless the question is unambiguously about the PDF schedule itself. ",
+            "pdf": "The user has set a source preference of 'pdf' -- when a question could plausibly be answered from either the IFC model or the PDF drawings, prefer extract_pdf_field over the IFC-based tools, unless the question is unambiguously about the 3D model itself. ",
+            "viewer_snapshot": "The user has set a source preference of 'viewer_snapshot' -- prefer inspect_current_view over other tools when the question could plausibly be about what is currently shown in the 3D viewer. ",
+        }.get(source_preference, "")
         return (
             "You are a construction/BIM assistant with tools to query a real IFC building model "
             "and its PDF drawings/schedules. Decide which tool(s) answer the user's question, call "
@@ -1925,6 +1942,7 @@ Return only a corrected MultiQueryPlan JSON object."""
             "no tool can answer part of the question, say so honestly rather than guessing. "
             "Respond in the same language as the user's latest message. "
             f"{storey_guidance}"
+            f"{source_guidance}"
             "If a tool result includes a non-empty 'warnings' field (e.g. a storey filter matched "
             "zero elements), that is a signal your filter value may be wrong, not proof the true "
             "count is zero -- reconsider the filter (check it against the real storey names above) "
@@ -2025,6 +2043,7 @@ Return only a corrected MultiQueryPlan JSON object."""
         recent_turns: list[dict[str, str]] | None = None,
         deadline: float | None = None,
         cancel_check: Callable[[], bool] | None = None,
+        source_preference: str = "auto",
     ) -> AsyncIterator[dict[str, Any]]:
         """SPEC-M16: V2's tool-calling agent loop, streamed.
 
@@ -2076,7 +2095,7 @@ Return only a corrected MultiQueryPlan JSON object."""
             ]
         except Exception:
             storey_names = []
-        messages: list[dict[str, Any]] = [{"role": "system", "content": self._v2_system_prompt(storey_names)}]
+        messages: list[dict[str, Any]] = [{"role": "system", "content": self._v2_system_prompt(storey_names, source_preference)}]
         for turn in recent_turns or []:
             messages.append({"role": "user", "content": turn["question"]})
             messages.append({"role": "assistant", "content": turn["answer"]})
@@ -2105,18 +2124,22 @@ Return only a corrected MultiQueryPlan JSON object."""
         # where some subtask failed/was unsupported (previously collapsed
         # into a flat "answered" as long as *any* call left a citation).
         subtask_dispositions: list[str] = []
-        # `expected_numeric_facts`: one set of plausible number-strings per
-        # successful scalar/aggregate/group-by tool result this turn --
+        # `expected_numeric_facts`: one (entity_terms, expected_numbers) pair
+        # per successful scalar/aggregate/group-by tool result this turn --
         # this turn's own ground truth, independent of anything the model
-        # goes on to say. Used after the final answer is assembled to
-        # check the model's own narrated numbers actually came from a real
-        # tool result, not free-form invention on top of a real citation
-        # (a fake provider scripted to answer "99999" after a real
-        # count_elements call returning 4 previously still finalized as
-        # disposition=answered, verification=passed, since that check only
-        # ever looked at "did a tool call leave a citation this turn," not
-        # whether the model's own prose was consistent with it).
-        expected_numeric_facts: list[set[str]] = []
+        # goes on to say. Used after the final answer is assembled to check
+        # the model's own narrated numbers actually came from a real tool
+        # result, not free-form invention on top of a real citation (a fake
+        # provider scripted to answer "99999" after a real count_elements
+        # call returning 4 previously still finalized as disposition=answered,
+        # verification=passed/verified, since that check only ever looked at
+        # "did a tool call leave a citation this turn," not whether the
+        # model's own prose was consistent with it -- and even the first
+        # numeric-only version of this check was itself bypassable by
+        # mentioning the *real* number in an unrelated aside while stating a
+        # *fabricated* one as the actual claim; entity_terms lets the check
+        # bind a number to what it's actually claimed to describe).
+        expected_numeric_facts: list[tuple[frozenset[str], set[float]]] = []
         answer_parts: list[str] = []
         max_iterations = self.settings.tool_calling_max_iterations
         for iteration in range(1, max_iterations + 1):
@@ -2168,14 +2191,81 @@ Return only a corrected MultiQueryPlan JSON object."""
                 self._audit(state, "v2_turn_continued", "model_called", "V2 agent requested another model turn using this iteration's tool results.", {"iteration": iteration}, planning_mode="tool_calling")
             model_call_count = state.get("model_call_count", 0) + 1
             state["model_call_count"] = model_call_count
+            # Independent-review finding, 2026-09-17, second pass: the
+            # model's final-answer text is now buffered rather than
+            # streamed live (see below) -- without some signal here, an
+            # iteration composing a long answer would go visibly silent
+            # for its whole duration instead of the token-by-token
+            # progress it used to show. Re-uses the same "thinking" signal
+            # SPEC-M16 SS E already established for the first call's own
+            # silent decision round trip (which already gets it once,
+            # before this loop starts -- only re-sent for iteration > 1 so
+            # it isn't emitted twice back-to-back for the first).
+            if iteration > 1:
+                yield {"type": "thinking"}
             turn_complete = None
-            async for event in provider.stream_turn(messages=messages, tools=TOOL_DEFINITIONS, purpose="v2_tool_turn"):
+            this_iteration_answer_parts: list[str] = []
+            # Independent-review finding, 2026-09-17, second pass: two
+            # separate problems shared this one loop, both confirmed live
+            # with a scripted slow fake model (a real hung/slow deployment
+            # call, not just "too many rounds"):
+            #
+            # (a) The per-iteration deadline/cancel checks above only run
+            # *between* iterations -- a single iteration's own model call
+            # sleeping/hanging past `deadline` was never interrupted,
+            # confirmed live: deadline=50ms, a 200ms-delayed fake model,
+            # turn still finalized normally ~200ms later with no timeout.
+            # Now wrapped with `asyncio.wait_for` per received event, so a
+            # slow *individual* call is bounded too, not just cumulative
+            # iteration count.
+            #
+            # (b) `AnswerChunkEvent`s used to be yielded live, the instant
+            # each token arrived -- meaning a narrative later caught as
+            # inconsistent with this turn's own tool results (see
+            # `_narrative_consistent_with_tool_facts` below) had *already*
+            # been streamed to and rendered by the client before its own
+            # rejection was even decided. SPEC-M16's own Invariant
+            # ("streaming only ever carries already-verified content")
+            # was never actually true for this second model call, only
+            # for tool execution. Buffered per-iteration here instead;
+            # only replayed to the client (still as a fast burst of the
+            # same chunks, not one flat block, to keep some sense of
+            # progressive reveal) once the narrative has actually passed
+            # the consistency check below -- an inconsistent one is never
+            # sent to the client in any form, chunked or otherwise.
+            stream_iter = provider.stream_turn(messages=messages, tools=TOOL_DEFINITIONS, purpose="v2_tool_turn").__aiter__()
+            while True:
+                remaining = (deadline - time.perf_counter()) if deadline is not None else None
+                if remaining is not None and remaining <= 0:
+                    self._audit(state, "v2_turn_error", "timeout", "V2 agent exceeded its bounded wall-clock deadline mid-model-call.", {"iteration": iteration}, planning_mode="tool_calling")
+                    response = AgentResponse(
+                        thread_id=thread_id, trace_id=trace_id, disposition=Disposition.TIMEOUT,
+                        answer_markdown="The request exceeded its time limit. Please retry with a narrower question.",
+                        verification=VerificationStatus(status="not_applicable", reason="Timed out before a final answer was reached."),
+                        execution_metadata={"engine": "v2", "model_call_count": state.get("model_call_count", 0), "tool_call_count": state.get("tool_call_count", 0), "iterations": iteration, "planning_mode": "tool_calling"},
+                    )
+                    yield {"type": "final", "response": response}
+                    return
+                try:
+                    event = await (asyncio.wait_for(stream_iter.__anext__(), timeout=remaining) if remaining is not None else stream_iter.__anext__())
+                except StopAsyncIteration:
+                    break
+                except asyncio.TimeoutError:
+                    self._audit(state, "v2_turn_error", "timeout", "V2 agent's model call itself exceeded the bounded wall-clock deadline.", {"iteration": iteration}, planning_mode="tool_calling")
+                    response = AgentResponse(
+                        thread_id=thread_id, trace_id=trace_id, disposition=Disposition.TIMEOUT,
+                        answer_markdown="The request exceeded its time limit. Please retry with a narrower question.",
+                        verification=VerificationStatus(status="not_applicable", reason="Timed out before a final answer was reached."),
+                        execution_metadata={"engine": "v2", "model_call_count": state.get("model_call_count", 0), "tool_call_count": state.get("tool_call_count", 0), "iterations": iteration, "planning_mode": "tool_calling"},
+                    )
+                    yield {"type": "final", "response": response}
+                    return
                 if isinstance(event, AnswerChunkEvent):
-                    answer_parts.append(event.text)
-                    yield {"type": "answer_chunk", "text": event.text}
+                    this_iteration_answer_parts.append(event.text)
                 elif isinstance(event, TurnCompleteEvent):
                     turn_complete = event
             messages.append(turn_complete.raw_assistant_message)
+            answer_parts.extend(this_iteration_answer_parts)
             if not turn_complete.tool_calls:
                 # Independent-review finding, 2026-09-17: a stream cut short
                 # by the model's own max-token limit or blocked mid-answer
@@ -2224,6 +2314,19 @@ Return only a corrected MultiQueryPlan JSON object."""
                     disposition = "answered"
                 elif any(d == "answered" for d in subtask_dispositions):
                     disposition = "partially_answered"
+                # Independent-review finding, 2026-09-17, second pass: a
+                # turn whose *only* dispatched tool call came back
+                # disposition="clarification_required" (e.g. extract_pdf_field
+                # matching more than one configured document, genuinely
+                # asking the user to disambiguate, not failing) fell
+                # through every named branch straight to the generic
+                # "error" catch-all below -- a normal, honest clarification
+                # request was misreported as a system failure. Checked
+                # before "unsupported": asking the user something
+                # actionable is a better outcome to surface than a flat
+                # "not supported" when both are present in the same turn.
+                elif "clarification_required" in subtask_dispositions:
+                    disposition = "clarification_required"
                 elif "unsupported" in subtask_dispositions:
                     disposition = "unsupported"
                 else:
@@ -2244,7 +2347,7 @@ Return only a corrected MultiQueryPlan JSON object."""
                     disposition = "error"
                     verification = VerificationStatus(status="failed", reason="The final answer's own stated numbers could not be matched to any value this turn's tool calls actually returned.")
                     narrative = "I could not safely finalize this answer: what I was about to say did not match the values the tools actually returned this turn."
-                    self._audit(state, "v2_narrative_consistency", "error", "V2's final narrative did not match this turn's own tool results; answer withheld.", {"expected_numeric_facts": [sorted(f) for f in expected_numeric_facts]}, planning_mode="tool_calling")
+                    self._audit(state, "v2_narrative_consistency", "error", "V2's final narrative did not match this turn's own tool results; answer withheld.", {"expected_numeric_facts": [{"entity_terms": sorted(terms), "numbers": sorted(numbers)} for terms, numbers in expected_numeric_facts]}, planning_mode="tool_calling")
                     # Real evidence must never sit alongside a withdrawn
                     # claim it wasn't actually consistent with -- a client
                     # rendering both together would read as "here's the
@@ -2253,6 +2356,19 @@ Return only a corrected MultiQueryPlan JSON object."""
                     all_citations = []
                 else:
                     verification = VerificationStatus(status="verified" if all_citations else "not_applicable", reason="Every stated fact came from a verified tool call this turn." if all_citations else "No tool call was made this turn -- nothing here is a claim of fact.")
+                    # Independent-review finding, 2026-09-17, second pass:
+                    # only replayed here, now that the narrative has
+                    # actually passed the consistency check above -- this
+                    # is the *only* place this whole method ever sends
+                    # answer_chunk events to the client. Sent as the same
+                    # per-token chunks the model itself produced (a fast
+                    # burst, not a flat block) purely to preserve some
+                    # sense of progressive reveal; the safety property
+                    # (nothing shown before verification) does not depend
+                    # on this granularity -- an inconsistent narrative
+                    # above never reaches this line at all.
+                    for chunk in this_iteration_answer_parts:
+                        yield {"type": "answer_chunk", "text": chunk}
                 response = AgentResponse(
                     thread_id=thread_id, trace_id=trace_id, disposition=Disposition(disposition),
                     answer_markdown=narrative, citations=[Citation.model_validate(item) for item in all_citations],
@@ -2311,7 +2427,22 @@ Return only a corrected MultiQueryPlan JSON object."""
                 if tool_result.get("disposition") == "answered":
                     facts = self._numeric_tokens_from_result_value(tool_result_value)
                     if facts:
-                        expected_numeric_facts.append(facts)
+                        # Independent-review finding, 2026-09-17, third
+                        # pass: "does at least one real number appear
+                        # *somewhere* in the answer" was itself bypassable
+                        # -- confirmed live: a fake model answering "4
+                        # records were checked. There are 99999 doors, all
+                        # certified for 120 minutes" after a real
+                        # count_elements call returning 4 still passed,
+                        # since "4" is genuinely present, just not as the
+                        # actual claim about doors. Recording this tool
+                        # call's own entity terms alongside its expected
+                        # numbers lets the check additionally require that
+                        # wherever the answer names *this* entity next to a
+                        # number, that number is a real one -- not just
+                        # that a real number exists in the text somewhere.
+                        entity_terms = self._entity_terms_for(result.get("plan", [{}])[0].get("entity_type"))
+                        expected_numeric_facts.append((entity_terms, facts))
                 if tool_call.tool_name == "reconcile_doors_windows" and tool_result_value:
                     all_reconciliation_items.extend(tool_result_value)
                     # Owner-reported, 2026-09-16: this deployment's own real
@@ -2452,16 +2583,64 @@ Return only a corrected MultiQueryPlan JSON object."""
         return numbers
 
     @staticmethod
-    def _narrative_consistent_with_tool_facts(answer_markdown: str, expected_numeric_facts: list[set[float]]) -> bool:
+    def _entity_terms_for(entity_type: str | None) -> frozenset[str]:
+        """Independent-review finding, 2026-09-17, third pass: the English
+        noun(s) a real answer about this entity type would actually use
+        ("door"/"doors" for IfcDoor), reusing the exact vocabulary
+        `ELEMENT_ALIASES` already teaches the router/model -- not a
+        separate, hand-maintained list that can drift from it. Lets the
+        consistency check look for *this specific claim* ("N doors")
+        rather than treating every number anywhere in the answer as
+        equally relevant.
+
+        English-only for now, a disclosed, real limitation: a Chinese
+        answer's own noun for the same entity ("门"/"扇") is not in this
+        set, so the proximity check below simply has nothing to bind to
+        for a Chinese answer and silently skips it -- the baseline
+        "some real number appears somewhere" check still applies to every
+        language equally, only this stricter half is English-only today.
+        """
+        if not entity_type:
+            return frozenset()
+        from app.agent.router import ELEMENT_ALIASES
+
+        terms = {alias for alias, canonical in ELEMENT_ALIASES.items() if canonical == entity_type and alias.isascii()}
+        terms.add(entity_type.removeprefix("Ifc").lower())
+        return frozenset(terms)
+
+    @staticmethod
+    def _narrative_consistent_with_tool_facts(answer_markdown: str, expected_numeric_facts: list[tuple[frozenset[str], set[float]]]) -> bool:
         """Independent-review finding, 2026-09-17: this turn's own real
-        numbers (`expected_numeric_facts`, one set per successful tool
-        call) vs. what the model's final prose actually says. Every
-        *individual* tool call's own expected set must have at least one
-        of its numbers appear (within tolerance) somewhere in the answer
-        -- checking only "any number from any call appears somewhere"
-        would let a multi-tool turn (e.g. "doors, windows, and walls")
-        pass even if two of the three were fabricated, as long as one real
-        number happened to survive.
+        numbers vs. what the model's final prose actually says.
+
+        Two checks, both required, per tool call:
+
+        1. **Baseline (every language)**: at least one of this call's own
+           real numbers appears (within tolerance) somewhere in the
+           answer. Catches a model that never mentions the true value at
+           all.
+
+        2. **Entity-bound (English answers only -- see `_entity_terms_for`)**:
+           wherever the answer mentions this call's own entity noun next
+           to a number, that number must be one of the real ones. Catches
+           the specific bypass independent review found live: a fake
+           model answering "4 records were checked. There are 99999
+           doors, all certified for 120 minutes" after a real
+           count_elements call returning 4 passed check 1 alone (a real
+           "4" genuinely appears in the text), because check 1 never
+           verified *what* the "4" was actually claimed to describe --
+           only that a correct number existed somewhere. "99999" sits
+           directly next to "doors," the exact entity this tool call was
+           about, and does not match; check 2 catches that.
+
+        Neither check is a general semantic fact-checker (see
+        `_numeric_tokens_from_result_value`'s own docstring) -- a
+        sufficiently contrived answer that avoids ever placing a wrong
+        number near the entity noun (e.g. restates the claim in a
+        differently-worded clause with no noun nearby at all) can still
+        defeat check 2; only check 1's weaker guarantee then applies.
+        This is a real, disclosed boundary, not a claim of a complete
+        semantic verifier.
 
         A whole-number expectation (a count) must match exactly -- "4
         doors" vs "5 doors" is a real, meaningful discrepancy, not
@@ -2472,17 +2651,30 @@ Return only a corrected MultiQueryPlan JSON object."""
         """
         import re
 
-        answer_numbers = [float(match) for match in re.findall(r"\d+(?:\.\d+)?", answer_markdown)]
-
         def _matches(expected: float, actual: float) -> bool:
             if float(expected).is_integer():
                 return actual == expected
             return abs(actual - expected) < 0.05
 
-        return all(
-            any(_matches(expected, actual) for expected in expected_set for actual in answer_numbers)
-            for expected_set in expected_numeric_facts
-        )
+        answer_lower = answer_markdown.lower()
+        answer_numbers = [float(match) for match in re.findall(r"\d+(?:\.\d+)?", answer_markdown)]
+
+        for entity_terms, expected in expected_numeric_facts:
+            # Check 1: baseline presence, any language.
+            if not any(_matches(value, actual) for value in expected for actual in answer_numbers):
+                return False
+            # Check 2: entity-bound -- a number within a short window of
+            # this call's own entity noun must be a real one. A window of
+            # ~15 characters on each side comfortably covers "4 doors" /
+            # "there are 99999 doors" / "doors: 99999" without reaching
+            # into an unrelated adjacent sentence.
+            for term in entity_terms:
+                for match in re.finditer(re.escape(term), answer_lower):
+                    window = answer_lower[max(0, match.start() - 15): match.end() + 15]
+                    nearby_numbers = [float(n) for n in re.findall(r"\d+(?:\.\d+)?", window)]
+                    if nearby_numbers and not any(_matches(value, actual) for value in expected for actual in nearby_numbers):
+                        return False
+        return True
 
     @staticmethod
     def _citations(evidence: list[Evidence], state: GraphState) -> list[dict]:
