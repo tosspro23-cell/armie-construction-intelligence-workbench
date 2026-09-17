@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 from app.agent.graph import AgentService
 from app.config import Settings
+from app.schemas.models import VerificationStatus
 from app.services import ProjectResources, ServiceContainer
 from fakes.fake_provider import FakeModelProvider, ScriptedAnswer, ScriptedToolCalls
 
@@ -350,6 +351,60 @@ def test_v2_rejects_a_fabricated_property_value_from_a_list_shaped_tool_result(t
     assert response.disposition.value == "error"
     assert response.verification.status == "failed"
     assert "99999" not in response.answer_markdown
+
+
+def test_v2_exposes_an_exhaustive_distinct_value_summary_for_a_truncated_list_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Owner decision, 2026-09-17: closes the sample-truncation false-
+    completeness gap (independent review, third pass, P2 #5 -- "how many
+    distinct window sizes" answered from only the first 40 of 85 elements
+    could truthfully report 3 distinct sizes in the sample while a 4th
+    exists only among the omitted ones) at the data layer, not by
+    restricting the model's own output the way a structural fact-binding
+    rewrite would -- see graph.py's own comment on
+    `_distinct_value_summary`'s caller for the reasoning (V2 exists so the
+    model can freely synthesize over tool results; capping output to only
+    ever restate bound fields would reintroduce the same ceiling V2 was
+    built to avoid). Instead, the full untruncated list -- already fully
+    available server-side before capping to `_V2_TOOL_RESULT_LIST_CAP` --
+    is used to compute an exhaustive per-field distinct-value count,
+    included in the tool result asked back to the model.
+
+    Verified here by dispatching a synthetic 85-item get_element_properties
+    result whose 4th distinct height (0.9 m) appears only at index 84 --
+    past the 40-item sample cap -- and asserting the model's own next call
+    actually received all 4 distinct values, not just the 3 visible in
+    sample_items.
+    """
+    fake = FakeModelProvider()
+    fake.script("v2_tool_turn", ScriptedToolCalls([("get_element_properties", {"entity_type": "IfcFurnishingElement"})]))
+    fake.script("v2_tool_turn", ScriptedAnswer(["There are 4 distinct heights: 0.45 m, 0.5 m, 0.6 m, and 0.9 m."]))
+    _, service, resources = _service(tmp_path, fake)
+
+    items = []
+    for i in range(85):
+        height = 0.45 if i < 60 else (0.5 if i < 80 else (0.6 if i < 84 else 0.9))  # 4th distinct value only at index 84
+        items.append({"element": {"express_id": 1000 + i, "entity_type": "IfcFurnishingElement"}, "storey": "Level 01", "properties": {"Height": height}})
+
+    real_dispatch = AgentService._v2_dispatch_tool
+
+    def synthetic_large_list_dispatch(self, tool_call, state):
+        if tool_call.tool_name == "get_element_properties":
+            return {
+                "tool_result": {"answer": "Found 85 matching elements.", "disposition": "answered", "citations": [], "verification": VerificationStatus(status="verified", reason="test").model_dump(), "result_value": items},
+                "evidence": [], "tool_call_delta": 1, "plan": [{"entity_type": "IfcFurnishingElement", "source": "ifc"}],
+            }
+        return real_dispatch(self, tool_call, state)
+
+    monkeypatch.setattr(AgentService, "_v2_dispatch_tool", synthetic_large_list_dispatch)
+
+    response = asyncio.run(_run(service, resources, "How many distinct heights of furnishing elements are there?", "eval-distinct-value-summary"))
+
+    assert response.disposition.value == "answered"
+    second_call_messages = fake.calls[-1].prompt
+    tool_message_start = second_call_messages.index("'role': 'tool'")
+    tool_payload_text = second_call_messages[tool_message_start:]
+    assert "distinct_value_summary" in tool_payload_text
+    assert "0.9" in tool_payload_text  # the 4th distinct value, only present past the 40-item sample cap
 
 
 def test_narrative_consistency_check_tolerates_natural_rounding_of_a_measurement() -> None:

@@ -1962,23 +1962,31 @@ Return only a corrected MultiQueryPlan JSON object."""
             "again with the same or a differently-worded request hoping for a different or more "
             "complete result. State the exact total, describe the sample honestly as partial, and "
             "stop there rather than retrying. "
-            # Independent-review finding, 2026-09-17, third pass: a sample
-            # cap is safe for a total *count* (that number is exact
-            # regardless of sampling) but not for a claim about *how many
-            # distinct values/types* exist -- e.g. "how many distinct
-            # window sizes" answered from only the first 40 of 85
-            # elements could truthfully report 3 distinct sizes in the
-            # sample while a 4th exists only among the omitted ones, and
-            # nothing in the tool result or the numeric consistency check
-            # catches this, since the reported total_count is itself
-            # correct. Not yet fixed by a deterministic tool (that would
-            # need a real distinct-value-grouping operation, out of scope
-            # here) -- this is a prompt-level mitigation only.
-            "If a result was capped to a sample plus a total count, you cannot truthfully claim to "
-            "know how many *distinct* values, types, or sizes exist among ALL of them -- only how "
-            "many appear in the sample you were shown. Never state a distinct-value/type count as "
-            "if it were exhaustive when the underlying list was sampled; say explicitly that further, "
-            "unseen items might include additional distinct values."
+            # Independent-review finding, 2026-09-17, third pass, resolved
+            # at the data layer rather than by restricting what the model
+            # is allowed to say (owner decision, 2026-09-17: V2 exists
+            # specifically so the model can freely synthesize over tool
+            # results instead of being limited to a closed, pre-built set
+            # of operations -- capping the *output* to only ever restate
+            # bound fields, as a stricter fact-binding architecture would,
+            # would reintroduce exactly the ceiling V2 was built to avoid.
+            # Enriching the *input* with complete information costs
+            # nothing in generalization and closes the same gap at its
+            # actual root cause: the model not having complete data, not
+            # a rendering problem). A sample cap is safe for a total
+            # *count* (exact regardless of sampling) but was not safe for
+            # a claim about *how many distinct values/types* exist -- "how
+            # many distinct window sizes" answered from only the first 40
+            # of 85 elements could truthfully report 3 distinct sizes in
+            # the sample while a 4th existed only among the omitted ones.
+            # `distinct_value_summary` below is computed from the FULL,
+            # untruncated list before capping, so it is exhaustive even
+            # when sample_items is not.
+            "If a result was capped to a sample plus a total count, do not infer how many *distinct* "
+            "values, types, or sizes exist from sample_items alone -- it is only a partial sample. "
+            "When the tool result includes a distinct_value_summary field, it is computed from ALL "
+            "items (not just the sample) and is the exact, exhaustive answer for how many distinct "
+            "values exist for that field; use it instead of counting from sample_items."
         )
 
     def _v2_dispatch_tool(self, tool_call: ToolCallEvent, state: GraphState) -> dict[str, Any]:
@@ -2547,13 +2555,31 @@ Return only a corrected MultiQueryPlan JSON object."""
                     # tool's own prose `answer` already states the total;
                     # the model gets a representative sample plus a count
                     # for the rest instead of paying for the entire list.
+                    # Owner decision, 2026-09-17: closes the same gap a
+                    # structured fact-binding rewrite would have (a
+                    # distinct-value/type/size claim drawn from only the
+                    # sample could be wrong even though sample_items and
+                    # total_count are each individually correct) -- but at
+                    # the data layer, not the output layer. V2 exists
+                    # specifically so the model can freely synthesize over
+                    # tool results rather than being limited to a closed,
+                    # pre-built set of operations; restricting the model's
+                    # *output* to only ever restate bound fields (as a
+                    # stricter fact-binding architecture would) would
+                    # reintroduce that same ceiling one layer up. Computed
+                    # from the full, untruncated list before capping, so
+                    # it stays exhaustive even when sample_items isn't.
+                    distinct_value_summary = self._distinct_value_summary(tool_result_value)
                     tool_result_value = {
                         "total_count": len(tool_result_value),
                         "sample_items": tool_result_value[:_V2_TOOL_RESULT_LIST_CAP],
+                        "distinct_value_summary": distinct_value_summary,
                         "note": (
                             f"{len(tool_result_value) - _V2_TOOL_RESULT_LIST_CAP} further item(s) omitted for brevity; the total_count above is exact. "
-                            "The omitted items may include distinct values/types/sizes not present in sample_items -- "
-                            "do not state a count of distinct values as exhaustive based on this sample alone."
+                            "sample_items is only a partial sample -- do not infer a distinct-value/type/size count from it alone. "
+                            "distinct_value_summary is computed from ALL items (not just the sample) and is the exact, exhaustive "
+                            "count of distinct values for fields with a small number of distinct values -- use it, not "
+                            "sample_items, whenever the question is about how many distinct values/types/sizes exist."
                         ),
                     }
                 messages.append({
@@ -2691,6 +2717,60 @@ Return only a corrected MultiQueryPlan JSON object."""
             for item in value:
                 numbers |= AgentService._numeric_tokens_from_result_value(item)
         return numbers
+
+    @staticmethod
+    def _flatten_for_distinct_summary(obj: Any, prefix: str = "", depth: int = 0, max_depth: int = 3) -> dict[str, Any]:
+        """Dotted-path flattening of one list item's nested dict fields
+        (e.g. get_element_properties's {"element": {...}, "storey": ...,
+        "properties": {...}} -> {"element.entity_type": ..., "storey":
+        ..., "properties.Height": ...}), used only by
+        `_distinct_value_summary` below. List-valued fields are skipped
+        (too structurally varied to summarize safely); depth is bounded
+        to avoid runaway recursion on an unexpectedly deep shape.
+        """
+        flat: dict[str, Any] = {}
+        if depth >= max_depth or not isinstance(obj, dict):
+            return flat
+        for key, value in obj.items():
+            path = f"{prefix}.{key}" if prefix else key
+            if isinstance(value, dict):
+                flat.update(AgentService._flatten_for_distinct_summary(value, path, depth + 1, max_depth))
+            elif not isinstance(value, list):
+                flat[path] = value
+        return flat
+
+    @staticmethod
+    def _distinct_value_summary(items: list[Any], max_distinct: int = 20) -> dict[str, dict[str, int]]:
+        """Owner decision, 2026-09-17: closes the sample-truncation false-
+        completeness gap (independent review, third pass, P2 #5) at the
+        data layer instead of the output layer -- see this method's own
+        caller for why. Computed from the FULL list this tool call
+        actually matched, *before* it gets capped to
+        `_V2_TOOL_RESULT_LIST_CAP` sample items, so a "how many distinct
+        X" question can be answered exhaustively even when the raw
+        per-item sample sent to the model is not.
+
+        For every dotted-path field found across all items (see
+        `_flatten_for_distinct_summary`), returns {value: count} -- but
+        only for fields whose distinct-value count is small (2..
+        max_distinct): a field with exactly one distinct value across
+        every item was never at risk from sampling (it would already
+        appear in any non-empty sample), and a field with more distinct
+        values than max_distinct is almost always a per-item identifier
+        (a GlobalId, an express_id), not a meaningful "type/size" a user
+        would ask to enumerate -- summarizing it would just be noise.
+        """
+        from collections import defaultdict
+
+        per_key: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            for key, value in AgentService._flatten_for_distinct_summary(item).items():
+                if value is None:
+                    continue
+                per_key[key][str(value)] += 1
+        return {key: dict(counts) for key, counts in per_key.items() if 1 < len(counts) <= max_distinct}
 
     @staticmethod
     def _entity_terms_for(entity_type: str | None) -> frozenset[str]:
