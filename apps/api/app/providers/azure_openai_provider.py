@@ -165,6 +165,7 @@ class AzureOpenAIProvider:
         # of arrival.
         pending_calls: dict[int, dict[str, Any]] = {}
         content_parts: list[str] = []
+        finish_reason: str | None = None
         async for chunk in stream:
             # Confirmed live against the real Azure OpenAI deployment,
             # 2026-09-16: Azure's own streaming endpoint sends at least one
@@ -185,6 +186,8 @@ class AzureOpenAIProvider:
             # above, not caught by that earlier fix.
             if delta is None:
                 continue
+            if chunk.choices[0].finish_reason:
+                finish_reason = chunk.choices[0].finish_reason
             if delta.content:
                 content_parts.append(delta.content)
                 yield AnswerChunkEvent(text=delta.content)
@@ -208,7 +211,7 @@ class AzureOpenAIProvider:
             ]
         else:
             raw_message["content"] = "".join(content_parts)
-        yield TurnCompleteEvent(tool_calls=tool_calls, raw_assistant_message=raw_message)
+        yield TurnCompleteEvent(tool_calls=tool_calls, raw_assistant_message=raw_message, finish_reason=finish_reason)
 
 
 class AzureOpenAIEmbeddingProvider:

@@ -94,7 +94,7 @@ def test_agent_service_answers_deterministically_with_zero_model_calls(tmp_path:
     assert fake.calls == []
     assert response.citations
     assert response.citations[0].locator["bbox"] is not None
-    assert response.verification.status == "passed"
+    assert response.verification.status == "verified"
 
 
 # --- item 16: Panel-A regressions (B5 -- target_board's regex never widened) -----------

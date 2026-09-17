@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any, AsyncIterator, Optional, TypedDict
+import time
+from typing import Any, AsyncIterator, Callable, Optional, TypedDict
 from uuid import uuid4
 
 from langgraph.graph import END, START, StateGraph
@@ -672,7 +673,7 @@ Return only a corrected MultiQueryPlan JSON object."""
             consistency,
         ])
         return {"tool_result": {
-            "answer": answer, "disposition": "answered" if status.status == "passed" else "error", "citations": citations,
+            "answer": answer, "disposition": "answered" if status.status == "verified" else "error", "citations": citations,
             "verification": status.model_dump(),
             "result_value": value,
             "context_update": {"active_source": SourceType.IFC.value, "active_entity_type": plan.entity_type, "active_filters": plan.filters, "previous_query_plan": plan.model_dump(), "evidence_refs": [item.id for item in result.evidence]},
@@ -713,12 +714,12 @@ Return only a corrected MultiQueryPlan JSON object."""
             reason = "Cross-source joins between drawing and IFC room-area data are outside this reference implementation. No numeric partial answer can be finalized."
             self._audit(state, "intent_coverage", "capability_gate_rejected", "Whole-intent coverage rejected a partial cross-source execution.", {"reason": "cross_source_join_unsupported"})
             return {"answer": reason, "disposition": "unsupported", "citations": [], "verification": VerificationStatus(status="not_applicable", reason=reason).model_dump(), "model_call_count": model_calls}
-        successful = [item for item in subresults if item.get("disposition") == "answered" and item.get("verification", {}).get("status") == "passed"]
+        successful = [item for item in subresults if item.get("disposition") == "answered" and item.get("verification", {}).get("status") == "verified"]
         unresolved = [item for item in subresults if item not in successful]
         citations = [citation for item in subresults for citation in item.get("citations", [])]
         answer = self._natural_answer(multi_plan, subresults)
         disposition = "answered" if successful and not unresolved else ("partially_answered" if successful else subresults[0].get("disposition", "refused"))
-        verification = VerificationStatus(status="passed" if disposition == "answered" else "not_applicable", reason=None if disposition == "answered" else "One or more subtasks were unresolved; successful subtasks remain independently verified.")
+        verification = VerificationStatus(status="verified" if disposition == "answered" else "not_applicable", reason=None if disposition == "answered" else "One or more subtasks were unresolved; successful subtasks remain independently verified.")
         self._audit(state, "synthesize", "synthesized", "Subplan outcomes synthesized without omitting partial results.", {"successful_subtasks": len(successful), "unresolved_subtasks": len(unresolved), "disposition": disposition})
         return {"answer": answer, "disposition": disposition, "citations": citations, "verification": verification.model_dump(), "model_call_count": model_calls}
 
@@ -927,7 +928,7 @@ Return only a corrected MultiQueryPlan JSON object."""
             f"**{counts['missing_in_pdf']} missing from the PDF**, **{counts['missing_in_ifc']} missing from the IFC model**."
         )
         citations = self._citations(evidence, state)
-        verification = VerificationStatus(status="passed", reason="Every item's status was independently derived from the source IFC quantities and the PDF's own table structure; no value was asserted without a matching or explicitly absent counterpart.")
+        verification = VerificationStatus(status="verified", reason="Every item's status was independently derived from the source IFC quantities and the PDF's own table structure; no value was asserted without a matching or explicitly absent counterpart.")
         self._audit(state, "execute_reconciliation", "synthesized", "Door/window IFC<->drawing reconciliation joined on Tag.", counts)
         return {
             "answer": answer, "disposition": "answered", "citations": citations,
@@ -1135,8 +1136,8 @@ Return only a corrected MultiQueryPlan JSON object."""
                 consistency,
             ])
             tool_result = {
-                "answer": answer if status.status == "passed" else "I could not safely finalize this answer because the execution result did not preserve the requested operation.",
-                "disposition": "answered" if status.status == "passed" else "error",
+                "answer": answer if status.status == "verified" else "I could not safely finalize this answer because the execution result did not preserve the requested operation.",
+                "disposition": "answered" if status.status == "verified" else "error",
                 "citations": citations,
                 "verification": status.model_dump(),
                 "result_value": result.value,
@@ -1684,7 +1685,7 @@ Return only a corrected MultiQueryPlan JSON object."""
             "answer": claim,
             "disposition": "answered",
             "citations": self._citations(evidence, state),
-            "verification": VerificationStatus(status="passed", verifier_results=[VerifierResult(verifier="same_snapshot_vision", passed=True, confidence=viewer_verification.confidence, reason=viewer_verification.rationale, supporting_evidence_ids=[evidence[0].id])], reason="Vision result was independently verified against the supplied snapshot.").model_dump(),
+            "verification": VerificationStatus(status="verified", verifier_results=[VerifierResult(verifier="same_snapshot_vision", passed=True, confidence=viewer_verification.confidence, reason=viewer_verification.rationale, supporting_evidence_ids=[evidence[0].id])], reason="Vision result was independently verified against the supplied snapshot.").model_dump(),
             "context_update": {"active_source": SourceType.VIEWER.value, "active_snapshot_id": viewer.get("snapshot_id")},
         }, "evidence": [item.model_dump() for item in evidence], "model_call_count": model_call_count}
 
@@ -1973,13 +1974,34 @@ Return only a corrected MultiQueryPlan JSON object."""
             return {
                 "tool_result": {"answer": result["answer"], "disposition": result["disposition"], "citations": result["citations"], "verification": result["verification"], "result_value": result.get("reconciliation_items")},
                 "evidence": result.get("evidence", []),
-                "tool_call_count": state.get("tool_call_count", 0) + result.get("tool_call_count_delta", 1),
+                # Independent-review finding, 2026-09-17: a *delta* (how
+                # many tool invocations this one dispatch made), not an
+                # absolute new total -- see the comment on the non-
+                # reconciliation branch below for why an absolute value
+                # computed here is unsafe under invoke_v2's own parallel
+                # dispatch via asyncio.gather.
+                "tool_call_delta": result.get("tool_call_count_delta", 1),
                 "plan": [sub.model_dump() for sub in multi_plan.subplans],
             }
         plan = build_plan_from_tool_call(tool_call.tool_name, tool_call.arguments)
         allowed, reason = capability_gate(plan)
         if not allowed:
-            return {"tool_result": {"answer": reason or "This request is outside the supported tool capabilities.", "disposition": "unsupported", "citations": [], "verification": VerificationStatus(status="not_applicable", reason="Rejected by the capability gate before execution.").model_dump(), "result_value": None}, "evidence": [], "tool_call_count": state.get("tool_call_count", 0), "plan": [plan.model_dump()]}
+            return {"tool_result": {"answer": reason or "This request is outside the supported tool capabilities.", "disposition": "unsupported", "citations": [], "verification": VerificationStatus(status="not_applicable", reason="Rejected by the capability gate before execution.").model_dump(), "result_value": None}, "evidence": [], "tool_call_delta": 0, "plan": [plan.model_dump()]}
+        # Independent-review finding, 2026-09-17: `_execute_ifc`/`_execute_pdf`/
+        # `_execute_viewer` are V1's own shared methods -- they return an
+        # *absolute* new `tool_call_count` (`state.get("tool_call_count", 0) + 1`),
+        # correct for V1's own sequential LangGraph execution (state is
+        # mutated between each node), but invoke_v2 dispatches multiple
+        # tool calls in *parallel* via `asyncio.gather`, all reading the
+        # *same* pre-dispatch `state` snapshot -- every concurrent call
+        # computes the same "+1" off the same baseline, so the last one
+        # processed silently overwrote the others' contribution instead of
+        # summing (confirmed live: two successful parallel tool calls
+        # reported tool_call_count=1, not 2). Converting to a delta here
+        # (this dispatch's own baseline vs. its own result) lets the
+        # caller sum deltas instead of trusting an absolute value computed
+        # from a stale, shared snapshot.
+        baseline = state.get("tool_call_count", 0)
         local_state: GraphState = {**state, "plan": plan.model_dump()}
         if plan.source == "ifc":
             result = self._execute_ifc(local_state)
@@ -1990,6 +2012,7 @@ Return only a corrected MultiQueryPlan JSON object."""
         else:
             result = {"tool_result": self._error_result(f"Unsupported tool source: {plan.source}")}
         result["plan"] = [plan.model_dump()]
+        result["tool_call_delta"] = result.get("tool_call_count", baseline) - baseline
         return result
 
     async def invoke_v2(
@@ -2000,6 +2023,8 @@ Return only a corrected MultiQueryPlan JSON object."""
         question: str,
         viewer_context: dict | None,
         recent_turns: list[dict[str, str]] | None = None,
+        deadline: float | None = None,
+        cancel_check: Callable[[], bool] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """SPEC-M16: V2's tool-calling agent loop, streamed.
 
@@ -2013,6 +2038,22 @@ Return only a corrected MultiQueryPlan JSON object."""
         every question from a clean start (SPEC-M16 OD-50: a full,
         standalone engine for a fair benchmark, never a fallback consulting
         V1's heuristics/semantic planner first).
+
+        `deadline`/`cancel_check` (independent-review finding, 2026-09-17):
+        V1's own request lifecycle (`chat()` in main.py) bounds the whole
+        turn by `request_timeout_seconds` and lets `/api/v1/requests/{id}/
+        cancel` interrupt it; V2's own `tool_calling_max_iterations` only
+        bounds *iteration count*, never wall-clock time, and V2 requests
+        were never registered in `app.state.requests` at all -- confirmed
+        live: a 30ms deadline with a 150ms-delayed fake model still
+        produced a normal `final` ~282ms later, no timeout, and the
+        cancel/status endpoints 404 for any V2 request_id. These are
+        optional (`None` = today's unbounded-by-time behavior, matching
+        every existing caller/test that doesn't pass them) so the web
+        layer (main.py's `_chat_v2`/`_v2_sse_stream`) can own the actual
+        policy (an absolute `time.perf_counter()` deadline and a
+        callable checking that caller's own request record) without this
+        method importing anything FastAPI/app.state-shaped.
         """
         thread_id = thread_id or str(uuid4())
         trace_id = str(uuid4())
@@ -2057,9 +2098,58 @@ Return only a corrected MultiQueryPlan JSON object."""
         all_evidence: list[dict[str, Any]] = []
         all_plans: list[dict[str, Any]] = []
         all_reconciliation_items: list[dict[str, Any]] = []
+        # Independent-review findings, 2026-09-17 -- both fed by the
+        # per-tool-call loop below:
+        # `subtask_dispositions`: one entry per dispatched tool call this
+        # whole turn, used to distinguish a fully successful turn from one
+        # where some subtask failed/was unsupported (previously collapsed
+        # into a flat "answered" as long as *any* call left a citation).
+        subtask_dispositions: list[str] = []
+        # `expected_numeric_facts`: one set of plausible number-strings per
+        # successful scalar/aggregate/group-by tool result this turn --
+        # this turn's own ground truth, independent of anything the model
+        # goes on to say. Used after the final answer is assembled to
+        # check the model's own narrated numbers actually came from a real
+        # tool result, not free-form invention on top of a real citation
+        # (a fake provider scripted to answer "99999" after a real
+        # count_elements call returning 4 previously still finalized as
+        # disposition=answered, verification=passed, since that check only
+        # ever looked at "did a tool call leave a citation this turn," not
+        # whether the model's own prose was consistent with it).
+        expected_numeric_facts: list[set[str]] = []
         answer_parts: list[str] = []
         max_iterations = self.settings.tool_calling_max_iterations
         for iteration in range(1, max_iterations + 1):
+            # Independent-review finding, 2026-09-17: checked once per
+            # iteration -- the same natural checkpoint tool_calling_max_iterations
+            # already uses -- rather than around each individual `await`,
+            # which would need weaving through provider.stream_turn's own
+            # internals. A slow deployment or a hung tool call can still
+            # run past `deadline`/past a cancel request until the *next*
+            # iteration boundary; this bounds it to "one more model+tool
+            # round trip," not "instantly," which is the same granularity
+            # V1's own cooperative cancellation (`task.cancel()` between
+            # awaits) already provides.
+            if deadline is not None and time.perf_counter() > deadline:
+                self._audit(state, "v2_turn_error", "timeout", "V2 agent exceeded its bounded wall-clock deadline.", {"iteration": iteration}, planning_mode="tool_calling")
+                response = AgentResponse(
+                    thread_id=thread_id, trace_id=trace_id, disposition=Disposition.TIMEOUT,
+                    answer_markdown="The request exceeded its time limit. Please retry with a narrower question.",
+                    verification=VerificationStatus(status="not_applicable", reason="Timed out before a final answer was reached."),
+                    execution_metadata={"engine": "v2", "model_call_count": state.get("model_call_count", 0), "tool_call_count": state.get("tool_call_count", 0), "iterations": iteration, "planning_mode": "tool_calling"},
+                )
+                yield {"type": "final", "response": response}
+                return
+            if cancel_check is not None and cancel_check():
+                self._audit(state, "v2_turn_error", "cancelled", "V2 agent turn was cancelled.", {"iteration": iteration}, planning_mode="tool_calling")
+                response = AgentResponse(
+                    thread_id=thread_id, trace_id=trace_id, disposition=Disposition.CANCELLED,
+                    answer_markdown="Request cancelled. No result was committed to the conversation context.",
+                    verification=VerificationStatus(status="not_applicable", reason="Cancelled before a final answer was reached."),
+                    execution_metadata={"engine": "v2", "model_call_count": state.get("model_call_count", 0), "tool_call_count": state.get("tool_call_count", 0), "iterations": iteration, "planning_mode": "tool_calling"},
+                )
+                yield {"type": "final", "response": response}
+                return
             if iteration > 1:
                 # Owner-reported, 2026-09-16: only the very first model call
                 # of a turn got its own audit event ("v2_turn_started"
@@ -2087,6 +2177,24 @@ Return only a corrected MultiQueryPlan JSON object."""
                     turn_complete = event
             messages.append(turn_complete.raw_assistant_message)
             if not turn_complete.tool_calls:
+                # Independent-review finding, 2026-09-17: a stream cut short
+                # by the model's own max-token limit or blocked mid-answer
+                # by content filtering was previously treated identically
+                # to a normal, complete "stop" -- a truncated narrative
+                # (half a sentence, a number with no unit) could finalize
+                # as disposition=answered with no indication anything was
+                # cut off. See TurnCompleteEvent.finish_reason's own
+                # docstring.
+                if turn_complete.finish_reason in {"length", "content_filter"}:
+                    self._audit(state, "v2_turn_finalized", "error", "V2's model turn ended abnormally before completing its answer.", {"iteration": iteration, "finish_reason": turn_complete.finish_reason}, planning_mode="tool_calling", actual_provider=provider.name, actual_model=provider.model)
+                    response = AgentResponse(
+                        thread_id=thread_id, trace_id=trace_id, disposition=Disposition.ERROR,
+                        answer_markdown=f"The request failed safely: the model's response was cut off ({turn_complete.finish_reason}) before it finished -- not shown as a complete answer.",
+                        verification=VerificationStatus(status="failed", reason=f"The model turn ended with finish_reason={turn_complete.finish_reason!r} instead of a normal stop."),
+                        execution_metadata={"engine": "v2", "model_call_count": model_call_count, "tool_call_count": state.get("tool_call_count", 0), "iterations": iteration, "planning_mode": "tool_calling", "actual_provider": provider.name, "actual_model": provider.model, "finish_reason": turn_complete.finish_reason},
+                    )
+                    yield {"type": "final", "response": response}
+                    return
                 self._audit(state, "v2_turn_finalized", "finalized", "V2 agent finished calling tools and produced its final answer.", {"iteration": iteration}, planning_mode="tool_calling", actual_provider=provider.name, actual_model=provider.model)
                 # Owner-reported, 2026-09-17: this was `"answered" if
                 # all_citations else "answered"` -- both branches identical,
@@ -2102,11 +2210,52 @@ Return only a corrected MultiQueryPlan JSON object."""
                 # type) -- never a case where V2 legitimately answered
                 # without needing any real data. Matches V1's own
                 # disposition for the identical situation.
-                disposition = "answered" if all_citations else "clarification_required"
-                verification = VerificationStatus(status="passed" if all_citations else "not_applicable", reason="Every stated fact came from a verified tool call this turn." if all_citations else "No tool call was made this turn -- nothing here is a claim of fact.")
+                # Independent-review finding, 2026-09-17: `subtask_dispositions`
+                # now distinguishes a turn where *every* dispatched tool
+                # call succeeded from one where only some did -- a
+                # capability-gate rejection or execution error on one
+                # parallel call no longer disappears behind another call's
+                # citations. Matches V1's own answered/partially_answered/
+                # unsupported/error vocabulary instead of a flat
+                # citations-only "answered."
+                if not subtask_dispositions:
+                    disposition = "answered" if all_citations else "clarification_required"
+                elif all(d == "answered" for d in subtask_dispositions):
+                    disposition = "answered"
+                elif any(d == "answered" for d in subtask_dispositions):
+                    disposition = "partially_answered"
+                elif "unsupported" in subtask_dispositions:
+                    disposition = "unsupported"
+                else:
+                    disposition = "error"
+                narrative = "".join(answer_parts)
+                # Independent-review finding, 2026-09-17: verification used
+                # to be `"passed" if all_citations else "not_applicable"` --
+                # true only of the *tool calls*, never checked against what
+                # the model's own final prose actually says. A fake
+                # provider scripted to answer "There are 99999 doors, all
+                # fire-certified for 120 minutes" after a real
+                # count_elements call returning 4 previously still
+                # produced verification.status="passed". See
+                # `_narrative_consistent_with_tool_facts`'s own docstring
+                # for this check's real, narrow scope (numeric only).
+                narrative_consistent = self._narrative_consistent_with_tool_facts(narrative, expected_numeric_facts)
+                if all_citations and not narrative_consistent:
+                    disposition = "error"
+                    verification = VerificationStatus(status="failed", reason="The final answer's own stated numbers could not be matched to any value this turn's tool calls actually returned.")
+                    narrative = "I could not safely finalize this answer: what I was about to say did not match the values the tools actually returned this turn."
+                    self._audit(state, "v2_narrative_consistency", "error", "V2's final narrative did not match this turn's own tool results; answer withheld.", {"expected_numeric_facts": [sorted(f) for f in expected_numeric_facts]}, planning_mode="tool_calling")
+                    # Real evidence must never sit alongside a withdrawn
+                    # claim it wasn't actually consistent with -- a client
+                    # rendering both together would read as "here's the
+                    # proof," exactly the false credibility this check
+                    # exists to prevent.
+                    all_citations = []
+                else:
+                    verification = VerificationStatus(status="verified" if all_citations else "not_applicable", reason="Every stated fact came from a verified tool call this turn." if all_citations else "No tool call was made this turn -- nothing here is a claim of fact.")
                 response = AgentResponse(
                     thread_id=thread_id, trace_id=trace_id, disposition=Disposition(disposition),
-                    answer_markdown="".join(answer_parts), citations=[Citation.model_validate(item) for item in all_citations],
+                    answer_markdown=narrative, citations=[Citation.model_validate(item) for item in all_citations],
                     verification=verification, execution_metadata={
                         "engine": "v2", "model_call_count": model_call_count, "tool_call_count": state.get("tool_call_count", 0),
                         "iterations": iteration, "planning_mode": "tool_calling", "actual_provider": provider.name, "actual_model": provider.model,
@@ -2129,7 +2278,25 @@ Return only a corrected MultiQueryPlan JSON object."""
             results = await asyncio.gather(*(asyncio.to_thread(self._v2_dispatch_tool, tool_call, state) for tool_call in turn_complete.tool_calls))
             for tool_call, result in zip(turn_complete.tool_calls, results):
                 tool_result = result.get("tool_result", {})
-                state["tool_call_count"] = result.get("tool_call_count", state.get("tool_call_count", 0))
+                # Independent-review finding, 2026-09-17: was
+                # `state["tool_call_count"] = result.get("tool_call_count", ...)`
+                # -- an *assignment*, not a sum, so parallel dispatches
+                # (asyncio.gather above) silently clobbered each other's
+                # contribution instead of accumulating. See
+                # _v2_dispatch_tool's own "tool_call_delta" comment.
+                state["tool_call_count"] = state.get("tool_call_count", 0) + result.get("tool_call_delta", 0)
+                # Independent-review finding, 2026-09-17: the turn's overall
+                # disposition used to be decided purely from "did *any*
+                # tool call this turn leave a citation," ignoring every
+                # other tool call's own outcome -- a request with one
+                # successful call and one capability-gate-rejected/errored
+                # call still finalized as a flat "answered," identical to a
+                # turn where everything succeeded. Recorded per-call here,
+                # summarized into partially_answered/unsupported/error
+                # below, matching V1's own subtask_summary discipline
+                # (_finalize's execution_metadata) instead of a single
+                # citations-only proxy.
+                subtask_dispositions.append(tool_result.get("disposition", "error"))
                 all_citations.extend(tool_result.get("citations", []))
                 all_evidence.extend(result.get("evidence", []))
                 all_plans.extend(result.get("plan", []))
@@ -2141,6 +2308,10 @@ Return only a corrected MultiQueryPlan JSON object."""
                 # tab (SPEC-M11) had anything to render, even though the
                 # underlying comparison ran and the answer text described it.
                 tool_result_value = tool_result.get("result_value")
+                if tool_result.get("disposition") == "answered":
+                    facts = self._numeric_tokens_from_result_value(tool_result_value)
+                    if facts:
+                        expected_numeric_facts.append(facts)
                 if tool_call.tool_name == "reconcile_doors_windows" and tool_result_value:
                     all_reconciliation_items.extend(tool_result_value)
                     # Owner-reported, 2026-09-16: this deployment's own real
@@ -2226,6 +2397,71 @@ Return only a corrected MultiQueryPlan JSON object."""
         if len(distinct_sources) > 1:
             return "multi_source"
         return None
+
+    @staticmethod
+    def _numeric_tokens_from_result_value(value: Any) -> set[str]:
+        """Independent-review finding, 2026-09-17: the numbers a *correct*
+        answer to this one tool call could truthfully state, extracted
+        from the tool's own real return value -- not from anything the
+        model goes on to say. Deliberately narrow in scope: this is a
+        mechanical, numeric-only cross-check (does at least one real
+        number this tool actually produced show up in the model's final
+        prose), not a semantic fact-checker -- it catches a wrong count or
+        measurement (the reported "99999 doors" case, a real tool call
+        returning 4), it does not and cannot catch a fabricated
+        *non-numeric* claim layered onto a correct number (e.g. an invented
+        fire-rating attached to a correct door count). That gap is real and
+        not closed here; see this method's own caller for how the result
+        is used.
+        """
+        tokens: set[str] = set()
+
+        def _add(number: float) -> None:
+            if number != number or number in (float("inf"), float("-inf")):  # noqa: PLR0124 (NaN check)
+                return
+            if float(number).is_integer():
+                tokens.add(str(int(number)))
+            else:
+                tokens.add(f"{number:.3f}".rstrip("0").rstrip("."))
+                tokens.add(f"{number:.2f}".rstrip("0").rstrip("."))
+                tokens.add(f"{number:.1f}".rstrip("0").rstrip("."))
+
+        if isinstance(value, bool):
+            return tokens
+        if isinstance(value, (int, float)):
+            _add(value)
+        elif isinstance(value, dict):
+            if "value_m" in value:  # aggregate_quantity's own shape -- the headline measurement
+                _add(value["value_m"])
+                for key in ("eligible_count", "total_entity_count"):
+                    if isinstance(value.get(key), (int, float)):
+                        _add(value[key])
+            elif value and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in value.values()):
+                # group_elements_by_storey's own shape: {storey_name: count}.
+                # Every bucket's own count is a number a correct answer
+                # could truthfully state (the total, the winning storey's
+                # count, or any single storey named in the question).
+                for sub_value in value.values():
+                    _add(sub_value)
+                _add(sum(value.values()))
+        return tokens
+
+    @staticmethod
+    def _narrative_consistent_with_tool_facts(answer_markdown: str, expected_numeric_facts: list[set[str]]) -> bool:
+        """Independent-review finding, 2026-09-17: this turn's own real
+        numbers (`expected_numeric_facts`, one set per successful tool
+        call) vs. what the model's final prose actually says. Every
+        *individual* tool call's own expected set must have at least one
+        of its numbers appear somewhere in the answer -- checking only
+        "any number from any call appears somewhere" would let a
+        multi-tool turn (e.g. "doors, windows, and walls") pass even if
+        two of the three were fabricated, as long as one real number
+        happened to survive.
+        """
+        import re
+
+        answer_numbers = set(re.findall(r"\d+(?:\.\d+)?", answer_markdown))
+        return all(expected & answer_numbers for expected in expected_numeric_facts)
 
     @staticmethod
     def _citations(evidence: list[Evidence], state: GraphState) -> list[dict]:

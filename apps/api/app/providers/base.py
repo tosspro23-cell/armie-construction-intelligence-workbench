@@ -49,6 +49,14 @@ class TurnCompleteEvent:
 
     tool_calls: list[ToolCallEvent] = field(default_factory=list)
     raw_assistant_message: dict[str, Any] = field(default_factory=dict)
+    # Independent-review finding, 2026-09-17: nothing previously checked
+    # *why* the stream ended -- a response cut short by the model's own
+    # max-token limit ("length") or blocked mid-answer by content
+    # filtering ("content_filter") was treated identically to a normal,
+    # complete "stop," so a truncated narrative could finalize as a
+    # confident, complete-looking answer. `None` means the underlying
+    # provider call didn't expose one (a fake/scripted provider in tests).
+    finish_reason: str | None = None
 
 
 class ModelProvider(Protocol):

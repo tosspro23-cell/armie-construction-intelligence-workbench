@@ -76,7 +76,7 @@ class EvidenceVerifier:
 def verification_status(results: list[VerifierResult]) -> VerificationStatus:
     passed = all(item.passed for item in results)
     return VerificationStatus(
-        status="passed" if passed else "failed",
+        status="verified" if passed else "failed",
         verifier_results=results,
         reason=None if passed else next(item.reason for item in results if not item.passed),
     )

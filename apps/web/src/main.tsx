@@ -243,6 +243,19 @@ function App() {
     event.preventDefault();
     if (!question.trim() || busy) return;
     const askedQuestion = question.trim();
+    // Independent-review finding, 2026-09-17: unlike submit() above,
+    // this never captured a switch-sequence snapshot or wired an
+    // AbortController -- switchProject's own `controllerRef.current?.abort()`
+    // call had nothing to abort, so a V2 response that was already on its
+    // way back from a project the user has since switched away from
+    // still landed: setThreadId, turns, and trace all applied
+    // unconditionally once the stream naturally finished. Sharing
+    // `controllerRef` with submit() is safe (the engine toggle plus
+    // `busy` gating means only one of the two is ever in flight), and is
+    // what lets switchProject's existing abort call reach this fetch too.
+    const switchSeqAtStart = switchSeqRef.current;
+    const controller = new AbortController();
+    controllerRef.current = controller;
     setBusy(true);
     setV2Error(null);
     setV2Streaming({ question: askedQuestion, statuses: [], answer: "" });
@@ -250,7 +263,29 @@ function App() {
     try {
       const response = await fetch("/api/v1/chat", withAuthHeader({
         method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ thread_id: threadId, project_id: projectId, question: askedQuestion, engine: "v2" }),
+        body: JSON.stringify({
+          thread_id: threadId, project_id: projectId, question: askedQuestion, engine: "v2",
+          // Independent-review finding, 2026-09-17: this request never
+          // carried viewer_context or source_preference at all (V1's own
+          // submit() above sends both) -- inspect_current_view had no
+          // selection/snapshot to work with even when the user had
+          // already selected an element or captured a view, and the
+          // Source control's own choice was silently not honored for V2.
+          source_preference: sourcePreference,
+          viewer_context: {
+            selected_global_ids: selected?.globalId ? [selected.globalId] : [],
+            selected_express_ids: selected?.expressId === undefined ? [] : [selected.expressId],
+            selected_entity_type: selected?.type || null, selected_display_name: selected?.name || null,
+            camera_pose: {}, snapshot_id: snapshot ? `snapshot-${Date.now()}` : null,
+            screenshot_base64: snapshot ? snapshot.split(",")[1] : null,
+            selection_cleared: selectionCleared,
+            snapshot_cleared: snapshotCleared,
+            target_global_id: selected?.globalId || null,
+            target_entity_type: selected?.type || null,
+            target_visible: selected?.type === "IfcStair" || selected?.type === "IfcStairFlight",
+          },
+        }),
+        signal: controller.signal,
       }));
       if (!response.ok || !response.body) throw new Error(`V2 request failed (${response.status}).`);
       const newThreadId = response.headers.get("X-Thread-Id") || threadId;
@@ -292,6 +327,14 @@ function App() {
         }
       }
       if (finalResponse) {
+        // Independent-review finding, 2026-09-17: applied unconditionally
+        // before this check existed -- a response that finished after the
+        // user had already switched projects (switchProject bumps
+        // switchSeqRef precisely so a stale response can be told apart
+        // from a current one) would still overwrite the *new* project's
+        // thread id and append its own turn/trace into the *new*
+        // project's conversation. Mirrors submit()'s own guard above.
+        if (switchSeqRef.current !== switchSeqAtStart) return;
         setThreadId(newThreadId || undefined);
         // Owner-reported, 2026-09-16: the Decision Trace panel showed
         // "No plan recorded"/empty Question/Execution detail for V2 turns
@@ -301,6 +344,7 @@ function App() {
         // submit()'s own V1 call to the same endpoint exactly.
         let responseTrace: TraceEvent[] = [];
         try { responseTrace = await api<TraceEvent[]>(`/api/v1/traces/${finalResponse.trace_id}`); } catch (error) { console.warn("V2 trace fetch failed", error); }
+        if (switchSeqRef.current !== switchSeqAtStart) return;
         setTurns((current) => [...current, {
           id: finalResponse!.trace_id, user: askedQuestion, assistant: finalResponse!,
           timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }), trace: responseTrace,
@@ -308,9 +352,12 @@ function App() {
         setTrace(responseTrace);
       }
     } catch (error) {
-      console.error(error);
-      setV2Error({ question: askedQuestion, message: (error as Error).message });
+      if ((error as Error).name !== "AbortError") {
+        console.error(error);
+        setV2Error({ question: askedQuestion, message: (error as Error).message });
+      }
     } finally {
+      controllerRef.current = null;
       setBusy(false);
       setV2Streaming(null);
     }

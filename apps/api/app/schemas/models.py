@@ -355,7 +355,15 @@ class VerifierResult(BaseModel):
 
 
 class VerificationStatus(BaseModel):
-    status: Literal["passed", "failed", "not_applicable"]
+    # Owner-requested, 2026-09-17: "passed" -> "verified" -- a GPT
+    # independent review noted "passed" reads as a weaker claim than what
+    # this status actually asserts (every stated fact traced to a real,
+    # checked source), and that ambiguity was part of why a purely
+    # structural check (a tool call happened) could be mistaken for actual
+    # content verification. Renamed the value everywhere it's constructed
+    # or compared -- schema, verifiers.py, graph.py, DecisionStory.tsx's
+    # CSS class, and every test asserting this literal.
+    status: Literal["verified", "failed", "not_applicable"]
     verifier_results: list[VerifierResult] = Field(default_factory=list)
     reason: str | None = None
 

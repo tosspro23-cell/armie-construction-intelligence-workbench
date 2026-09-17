@@ -131,10 +131,10 @@ def test_evidence_verifier_passes_none_confidence() -> None:
 
 # --- verification_status ----------------------------------------------------------------
 
-def test_verification_status_passed_when_all_verifiers_pass() -> None:
+def test_verification_status_verified_when_all_verifiers_pass() -> None:
     results = [VerifierResult(verifier="a", passed=True, reason="ok"), VerifierResult(verifier="b", passed=True, reason="ok")]
     status = verification_status(results)
-    assert status.status == "passed"
+    assert status.status == "verified"
     assert status.reason is None
 
 

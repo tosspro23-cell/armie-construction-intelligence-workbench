@@ -59,7 +59,12 @@ def test_v2_engine_answers_correctly_via_the_real_endpoint(tmp_path: Path) -> No
     settings = _settings(tmp_path)
     fake = FakeModelProvider()
     fake.script("v2_tool_turn", ScriptedToolCalls([("count_elements", {"entity_type": "IfcDoor"})]))
-    fake.script("v2_tool_turn", ScriptedAnswer(["The project has 6 doors."]))
+    # Independent-review finding, 2026-09-17: was "The project has 6
+    # doors." -- the real armie_demo.ifc fixture this test actually
+    # executes count_elements against has 4, not 6. Fixed to a real,
+    # consistent number now that invoke_v2 checks the final narrative
+    # against this turn's own tool results.
+    fake.script("v2_tool_turn", ScriptedAnswer(["The project has 4 doors."]))
     container, service = _build(settings, fake)
     main_module.app.state.container = container
     main_module.app.state.agent = service
@@ -74,7 +79,7 @@ def test_v2_engine_answers_correctly_via_the_real_endpoint(tmp_path: Path) -> No
     assert len(final_events) == 1
     final = final_events[0]["response"]
     assert final["disposition"] == "answered"
-    assert "6 doors" in final["answer_markdown"]
+    assert "4 doors" in final["answer_markdown"]
     assert final["execution_metadata"]["engine"] == "v2"
     assert final["execution_metadata"]["model_call_count"] == 2  # one to decide the tool call, one to answer
     assert len(final["citations"]) > 0
@@ -112,8 +117,16 @@ def test_v2_engine_recent_turn_memory_persists_and_is_reused(tmp_path: Path) -> 
     settings = _settings(tmp_path, conversation_memory_turns=6)
     fake = FakeModelProvider()
     fake.script("v2_tool_turn", ScriptedToolCalls([("count_elements", {"entity_type": "IfcDoor"})]))
-    fake.script("v2_tool_turn", ScriptedAnswer(["The project has 6 doors."]))
-    # Owner-reported, 2026-09-17: this second turn used to be scripted as
+    # Independent-review finding, 2026-09-17: this was scripted as "The
+    # project has 6 doors." -- the real armie_demo.ifc fixture this test
+    # actually executes count_elements against has 4, not 6. Invisible
+    # before invoke_v2's own narrative-vs-tool-result consistency check
+    # existed (added the same day the review found this); with that check
+    # in place, a scripted answer inconsistent with the real tool result
+    # now correctly finalizes as disposition=error instead of quietly
+    # passing under an unrelated assertion.
+    fake.script("v2_tool_turn", ScriptedAnswer(["The project has 4 doors."]))
+    # Owner-reported, 2026-09-16: this second turn used to be scripted as
     # a bare ScriptedAnswer with no tool call at all -- unrealistic (V2's
     # own system prompt requires a fresh tool call for every stated fact;
     # a real model asked "and the windows?" calls count_elements again, it
@@ -139,6 +152,6 @@ def test_v2_engine_recent_turn_memory_persists_and_is_reused(tmp_path: Path) -> 
 
     second_call_messages = fake.calls[-1].prompt  # str(messages) -- stream_turn's own RecordedCall.prompt
     assert QUESTION in second_call_messages
-    assert "6 doors" in second_call_messages
+    assert "4 doors" in second_call_messages
     final2 = [event for event in events2 if event["type"] == "final"][0]["response"]
     assert final2["disposition"] == "answered"

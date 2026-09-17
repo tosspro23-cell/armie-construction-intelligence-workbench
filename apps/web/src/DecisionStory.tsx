@@ -324,7 +324,7 @@ export function DecisionStory({ latest, trace, projectId, onOpenCitation }: {
 
       <li className="story-step">
         <StepHeader number={5} icon="✅" title="Verification" subtitle={[latest.verification.status, stepMs(stageTimings["Verification"])].filter(Boolean).join(" · ")} />
-        <p className={`story-step-body verification-reason ${latest.verification.status}`}>{latest.verification.reason || (latest.verification.status === "passed" ? "Every value was independently checked against its own source before being presented." : "—")}</p>
+        <p className={`story-step-body verification-reason ${latest.verification.status}`}>{latest.verification.reason || (latest.verification.status === "verified" ? "Every value was independently checked against its own source before being presented." : "—")}</p>
         <StepTrace events={byStage("Verification")} />
       </li>
 

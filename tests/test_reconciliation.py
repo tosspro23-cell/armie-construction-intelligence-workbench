@@ -348,7 +348,7 @@ def test_pdf_read_failure_is_reported_as_error_not_answered(tmp_path: Path, monk
     exception. Before the fix, `_reconciliation_pdf_items` silently turned
     that `None` into an empty mapping, and synthesis reported every IFC
     item as "checked, missing from the PDF" with disposition="answered"
-    and verification="passed" -- a fabricated result, since the schedule
+    and verification="verified" -- a fabricated result, since the schedule
     was never actually read. The IFC side succeeds normally; only the PDF
     read is broken.
     """

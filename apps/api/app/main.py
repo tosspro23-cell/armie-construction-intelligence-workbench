@@ -584,18 +584,33 @@ async def chat(request: ChatRequest, x_session_id: str | None = Header(default=N
     return _tag_span_with_trace_id(response)
 
 
-async def _v2_sse_stream(agent: AgentService, conversations: ConversationStore, *, project_resources, thread_id: str, question: str, viewer_context: dict | None, recent_turns: list[dict[str, str]], context: dict, memory_turns: int, request_id: str, started: float):
+async def _v2_sse_stream(agent: AgentService, conversations: ConversationStore, *, project_resources, thread_id: str, question: str, viewer_context: dict | None, recent_turns: list[dict[str, str]], context: dict, memory_turns: int, request_id: str, started: float, deadline: float, record: dict):
     """SPEC-M16 SS F: renders `AgentService.invoke_v2`'s event stream as
     Server-Sent Events. Each line is `data: <json>\\n\\n`, the format
     `EventSource`/a `ReadableStream` reader on the frontend can consume
     incrementally -- tool-use status and answer tokens are forwarded the
     moment they arrive, not buffered until the turn completes.
+
+    `deadline`/`record` (independent-review finding, 2026-09-17): V2
+    requests never shared V1's own request lifecycle at all -- not
+    registered in `app.state.requests`, so `/api/v1/requests/{id}` and its
+    `/cancel` counterpart 404 for any V2 request_id, and bounded only by
+    `tool_calling_max_iterations` (iteration count), never by
+    `request_timeout_seconds` (wall-clock time) the way V1's own
+    `asyncio.wait_for(agent.invoke, ...)` is. `record` is this request's
+    own entry in `app.state.requests` (created by `_chat_v2` below,
+    mirroring `chat()`'s own registration) -- read here for cancellation,
+    updated here with the real terminal status once the turn actually
+    finishes, matching what `chat()` already does for V1.
     """
     import json as _json
 
     final_response = None
     try:
-        async for event in agent.invoke_v2(project_resources=project_resources, thread_id=thread_id, question=question, viewer_context=viewer_context, recent_turns=recent_turns):
+        async for event in agent.invoke_v2(
+            project_resources=project_resources, thread_id=thread_id, question=question, viewer_context=viewer_context,
+            recent_turns=recent_turns, deadline=deadline, cancel_check=lambda: record.get("status") == "cancel_requested",
+        ):
             if event["type"] == "final":
                 # Owner-reported, 2026-09-16: V2 responses never carried a
                 # total latency (the Result step's "~X s" figure and the
@@ -605,34 +620,48 @@ async def _v2_sse_stream(agent: AgentService, conversations: ConversationStore, 
                 # but nothing ever used them. Mirrors chat()'s own
                 # post-`agent.invoke` enrichment above (D-023 addendum) so
                 # both engines' responses carry the same fields.
-                final_response = event["response"].model_copy(update={
-                    "execution_metadata": {
-                        **event["response"].execution_metadata,
-                        "request_id": request_id,
-                        "latency_ms": round((time.perf_counter() - started) * 1000, 1),
-                        "project_id": project_resources.manifest.project_id,
-                        "source_set_id": project_resources.manifest.source_set_id,
-                    }
-                })
+                final_response = event["response"]
+                execution_metadata = {
+                    **final_response.execution_metadata,
+                    "request_id": request_id,
+                    "latency_ms": round((time.perf_counter() - started) * 1000, 1),
+                    "project_id": project_resources.manifest.project_id,
+                    "source_set_id": project_resources.manifest.source_set_id,
+                }
+                # Independent-review finding, 2026-09-17: this used to run
+                # *after* the "final" SSE line was already yielded (a
+                # client already showing the answer, or one that
+                # disconnects the instant it has what it asked for, could
+                # both race past this) and any failure was a bare
+                # `except: pass` -- an already-delivered turn could
+                # silently fail to persist, and the *next* turn would
+                # appear to have forgotten it with zero diagnostic trail.
+                # Persisting before the response is finalized, and folding
+                # a failure into execution_metadata, mirrors exactly what
+                # chat()'s own `context_persist_error` (D-014) already does
+                # for V1's conversation-context writes.
+                context_persist_error: str | None = None
+                if final_response.disposition.value == "answered":
+                    updated_turns = (recent_turns + [{"question": question, "answer": final_response.answer_markdown}])[-memory_turns:]
+                    try:
+                        await asyncio.to_thread(conversations.set, thread_id, {**context, "v2_recent_turns": updated_turns})
+                    except Exception as error:
+                        context_persist_error = str(error)
+                if context_persist_error:
+                    execution_metadata["context_persist_error"] = context_persist_error
+                final_response = final_response.model_copy(update={"execution_metadata": execution_metadata})
+                record["status"] = "completed" if final_response.disposition.value not in {"timeout", "cancelled", "error"} else final_response.disposition.value
                 payload = {"type": "final", "response": _json.loads(final_response.model_dump_json())}
             else:
                 payload = event
             yield f"data: {_json.dumps(payload, default=str)}\n\n"
+    except asyncio.CancelledError:
+        record["status"] = "cancelled"
+        raise
     except Exception as error:
+        record.update(status="error", error=str(error))
         yield f"data: {_json.dumps({'type': 'error', 'message': f'The request failed safely: {error}'})}\n\n"
         return
-    if final_response is None:
-        return
-    # SPEC-M16 SS D: bounded recent-turn memory lives as an ordinary key
-    # inside the same context dict V1's own structured fields already
-    # share -- no schema migration needed, InMemoryConversationStore and
-    # PostgresConversationStore both already persist this dict verbatim.
-    if final_response.disposition.value == "answered":
-        updated_turns = (recent_turns + [{"question": question, "answer": final_response.answer_markdown}])[-memory_turns:]
-        try:
-            await asyncio.to_thread(conversations.set, thread_id, {**context, "v2_recent_turns": updated_turns})
-        except Exception:
-            pass  # SPEC-M16: a memory-persistence failure must not turn an already-delivered, already-streamed answer into a client-visible error.
 
 
 async def _chat_v2(request: ChatRequest, x_session_id: str | None):
@@ -649,33 +678,54 @@ async def _chat_v2(request: ChatRequest, x_session_id: str | None):
     container: ServiceContainer = app.state.container
     conversations: ConversationStore = container.conversation_store
     settings = container.settings
+    # Independent-review finding, 2026-09-17: V2 requests were never
+    # registered in `app.state.requests` at all -- confirmed live, both
+    # `/api/v1/requests/{id}` and its `/cancel` counterpart 404 for any V2
+    # request_id, and there was no overall wall-clock deadline covering
+    # the model/tool-execution portion of the turn (only project loading
+    # had one). Registered here the same way, and at the same point in
+    # the request's own lifecycle, as `chat()` already does for V1 --
+    # including the same request_id-reuse rejection (D-0xx, confirmed
+    # live 2026-09-13 for V1's own path).
+    request_id = request.request_id or str(uuid4())
+    if request_id in app.state.requests:
+        raise HTTPException(status_code=409, detail=f"Request id '{request_id}' is already in use.")
+    record = {"status": "running", "stage": "queued", "task": asyncio.current_task(), "trace_id": request_id, "session_id": x_session_id}
+    app.state.requests[request_id] = record
+    started = time.perf_counter()
+    deadline = started + settings.request_timeout_seconds
     thread_id = request.thread_id or str(uuid4())
     requested_project_id = request.project_id or "demo"
     try:
         bound_project_id = await asyncio.to_thread(conversations.bind_project, thread_id, requested_project_id)
     except Exception as error:
+        record.update(status="error", stage="project_bind_error", error=str(error))
         raise HTTPException(status_code=503, detail=f"Could not resolve project binding: {error}") from error
     if bound_project_id != requested_project_id:
+        record.update(status="error", stage="project_mismatch")
         raise HTTPException(status_code=409, detail=f"This thread is bound to project '{bound_project_id}', not '{requested_project_id}'. Start a new conversation to switch projects.")
-    started = time.perf_counter()
+    record["stage"] = "resolving_project"
     try:
         project_resources = await asyncio.wait_for(container.get_project(bound_project_id), timeout=settings.request_timeout_seconds)
     except ProjectNotFoundError:
+        record.update(status="error", stage="project_not_found")
         raise HTTPException(status_code=404, detail=f"Unknown project '{bound_project_id}'.") from None
     except asyncio.TimeoutError:
+        record.update(status="timeout", stage="project_load_timeout")
         raise HTTPException(status_code=504, detail="Loading the project's source files exceeded the bounded request deadline.") from None
     try:
         context = await asyncio.to_thread(conversations.get, thread_id) or {}
     except Exception as error:
+        record.update(status="error", stage="context_read_error")
         raise HTTPException(status_code=503, detail=f"Could not read conversation context: {error}") from error
     recent_turns = context.get("v2_recent_turns", [])[-settings.conversation_memory_turns:]
-    request_id = request.request_id or str(uuid4())
+    record["stage"] = "streaming"
     return StreamingResponse(
         _v2_sse_stream(
             agent, conversations, project_resources=project_resources, thread_id=thread_id, question=request.question,
             viewer_context=request.viewer_context.model_dump() if request.viewer_context else None,
             recent_turns=recent_turns, context=context, memory_turns=settings.conversation_memory_turns,
-            request_id=request_id, started=started,
+            request_id=request_id, started=started, deadline=deadline, record=record,
         ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Thread-Id": thread_id},
