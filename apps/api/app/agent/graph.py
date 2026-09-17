@@ -86,6 +86,24 @@ class GraphState(TypedDict, total=False):
     planner_error: str
 
 
+# SPEC-M16 V2: how many items of a list-shaped tool result get sent back
+# to the model verbatim before this system switches to a sample + count
+# (see invoke_v2's own use of this, right below the reconciliation-specific
+# version of the same idea). Not a scientifically tuned number -- chosen to
+# comfortably cover every single-tool-call representative-eval question
+# (the largest real list any of them returns is 4 items) while still
+# capping the kind of match-a-whole-category call that returns dozens.
+# Owner-reported, 2026-09-16, second pass: a first attempt at 15 made the
+# model repeatedly re-call the *same* tool hoping for a fuller answer to a
+# name/sub-category breakdown this system's tools cannot filter for at all
+# (e.g. "how many tables vs chairs" out of a generic IfcFurnishingElement
+# match) -- wasteful, not a correctness bug (the model never fabricated a
+# number; it just kept retrying an identically-capped result). Raised to
+# 40 so this only engages for genuinely large categories, and the system
+# prompt now tells the model explicitly not to retry when it does.
+_V2_TOOL_RESULT_LIST_CAP = 40
+
+
 class AgentService:
     """LangGraph orchestration for safe tool-routed project questions."""
 
@@ -1890,7 +1908,13 @@ Return only a corrected MultiQueryPlan JSON object."""
             "Respond in the same language as the user's latest message. "
             f"Valid entity_type values for every tool: {sorted(SUPPORTED_ENTITY_TYPES)}. "
             "reconcile_doors_windows only checks door/window width and height -- never claim it "
-            "checked any other attribute (fire rating, material, etc.)."
+            "checked any other attribute (fire rating, material, etc.). "
+            "Tools cannot filter by name or sub-category (e.g. there is no way to ask for only "
+            "'tables' out of IfcFurnishingElement) -- if a large result was capped to a sample plus "
+            "a total count, that is the most detail this system can give; do not call the same tool "
+            "again with the same or a differently-worded request hoping for a different or more "
+            "complete result. State the exact total, describe the sample honestly as partial, and "
+            "stop there rather than retrying."
         )
 
     def _v2_dispatch_tool(self, tool_call: ToolCallEvent, state: GraphState) -> dict[str, Any]:
@@ -2082,6 +2106,24 @@ Return only a corrected MultiQueryPlan JSON object."""
                     tool_result_value = {
                         "matched_count": matched_count,
                         "non_matched_items": [item for item in tool_result_value if item.get("status") != "matched"],
+                    }
+                elif isinstance(tool_result_value, list) and len(tool_result_value) > _V2_TOOL_RESULT_LIST_CAP:
+                    # Owner-reported, 2026-09-16 (found live: a real 429 on
+                    # this deployment's raised 30K-token/minute quota, after
+                    # just two turns): the same unbounded-payload problem
+                    # found in reconcile_doors_windows also applies to any
+                    # other tool whose result is naturally a per-element
+                    # list -- get_element_properties matching a whole
+                    # IfcFurnishingElement category (85 real elements in
+                    # this project) sent every one of their full property
+                    # dicts back into this same turn's next model call. The
+                    # tool's own prose `answer` already states the total;
+                    # the model gets a representative sample plus a count
+                    # for the rest instead of paying for the entire list.
+                    tool_result_value = {
+                        "total_count": len(tool_result_value),
+                        "sample_items": tool_result_value[:_V2_TOOL_RESULT_LIST_CAP],
+                        "note": f"{len(tool_result_value) - _V2_TOOL_RESULT_LIST_CAP} further item(s) omitted for brevity; the total_count above is exact.",
                     }
                 messages.append({
                     "role": "tool", "tool_call_id": tool_call.call_id,
