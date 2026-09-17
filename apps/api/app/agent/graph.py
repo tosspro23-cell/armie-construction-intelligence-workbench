@@ -2399,7 +2399,7 @@ Return only a corrected MultiQueryPlan JSON object."""
         return None
 
     @staticmethod
-    def _numeric_tokens_from_result_value(value: Any) -> set[str]:
+    def _numeric_tokens_from_result_value(value: Any) -> set[float]:
         """Independent-review finding, 2026-09-17: the numbers a *correct*
         answer to this one tool call could truthfully state, extracted
         from the tool's own real return value -- not from anything the
@@ -2413,25 +2413,30 @@ Return only a corrected MultiQueryPlan JSON object."""
         fire-rating attached to a correct door count). That gap is real and
         not closed here; see this method's own caller for how the result
         is used.
+
+        Owner-reported, 2026-09-17 (found live: a real space_distance
+        answer, e.g. a real 5.234 m centroid distance, phrased by the
+        model with different rounding -- "5.23 m" -- than this method's
+        first version pre-formatted): returns raw floats now, not
+        pre-rounded strings, so the caller can compare with a tolerance
+        instead of requiring an exact string match against one of a fixed
+        handful of decimal-place guesses. A real fabrication (99999 vs 4)
+        is nowhere near any reasonable tolerance; a model's own natural
+        rounding of a real measurement is.
         """
-        tokens: set[str] = set()
+        numbers: set[float] = set()
 
         def _add(number: float) -> None:
             if number != number or number in (float("inf"), float("-inf")):  # noqa: PLR0124 (NaN check)
                 return
-            if float(number).is_integer():
-                tokens.add(str(int(number)))
-            else:
-                tokens.add(f"{number:.3f}".rstrip("0").rstrip("."))
-                tokens.add(f"{number:.2f}".rstrip("0").rstrip("."))
-                tokens.add(f"{number:.1f}".rstrip("0").rstrip("."))
+            numbers.add(float(number))
 
         if isinstance(value, bool):
-            return tokens
+            return numbers
         if isinstance(value, (int, float)):
             _add(value)
         elif isinstance(value, dict):
-            if "value_m" in value:  # aggregate_quantity's own shape -- the headline measurement
+            if "value_m" in value:  # aggregate_quantity/space_distance's own shape -- the headline measurement
                 _add(value["value_m"])
                 for key in ("eligible_count", "total_entity_count"):
                     if isinstance(value.get(key), (int, float)):
@@ -2444,24 +2449,40 @@ Return only a corrected MultiQueryPlan JSON object."""
                 for sub_value in value.values():
                     _add(sub_value)
                 _add(sum(value.values()))
-        return tokens
+        return numbers
 
     @staticmethod
-    def _narrative_consistent_with_tool_facts(answer_markdown: str, expected_numeric_facts: list[set[str]]) -> bool:
+    def _narrative_consistent_with_tool_facts(answer_markdown: str, expected_numeric_facts: list[set[float]]) -> bool:
         """Independent-review finding, 2026-09-17: this turn's own real
         numbers (`expected_numeric_facts`, one set per successful tool
         call) vs. what the model's final prose actually says. Every
         *individual* tool call's own expected set must have at least one
-        of its numbers appear somewhere in the answer -- checking only
-        "any number from any call appears somewhere" would let a
-        multi-tool turn (e.g. "doors, windows, and walls") pass even if
-        two of the three were fabricated, as long as one real number
-        happened to survive.
+        of its numbers appear (within tolerance) somewhere in the answer
+        -- checking only "any number from any call appears somewhere"
+        would let a multi-tool turn (e.g. "doors, windows, and walls")
+        pass even if two of the three were fabricated, as long as one real
+        number happened to survive.
+
+        A whole-number expectation (a count) must match exactly -- "4
+        doors" vs "5 doors" is a real, meaningful discrepancy, not
+        rounding. A fractional expectation (a measurement) matches within
+        a small absolute tolerance, since a model naturally rounds a real
+        5.234 m distance to "5.23 m" or "5.2 m" when composing prose; that
+        is not fabrication and this check must not treat it as such.
         """
         import re
 
-        answer_numbers = set(re.findall(r"\d+(?:\.\d+)?", answer_markdown))
-        return all(expected & answer_numbers for expected in expected_numeric_facts)
+        answer_numbers = [float(match) for match in re.findall(r"\d+(?:\.\d+)?", answer_markdown)]
+
+        def _matches(expected: float, actual: float) -> bool:
+            if float(expected).is_integer():
+                return actual == expected
+            return abs(actual - expected) < 0.05
+
+        return all(
+            any(_matches(expected, actual) for expected in expected_set for actual in answer_numbers)
+            for expected_set in expected_numeric_facts
+        )
 
     @staticmethod
     def _citations(evidence: list[Evidence], state: GraphState) -> list[dict]:

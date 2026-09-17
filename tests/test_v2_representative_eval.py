@@ -196,6 +196,27 @@ def test_v2_rejects_narrative_that_contradicts_its_own_tool_result(tmp_path: Pat
     assert response.citations == []  # real evidence must not sit alongside a withdrawn, inconsistent claim
 
 
+def test_narrative_consistency_check_tolerates_natural_rounding_of_a_measurement() -> None:
+    """Owner-reported, 2026-09-17 (found live): a real space_distance call
+    returning {"value_m": 5.234, ...} (the same shape aggregate_quantity
+    uses) was phrased by the model as "5.23 m" -- a natural, honest
+    rounding choice, not fabrication -- and the check's first version
+    (exact string match against 3 pre-formatted decimal-place guesses)
+    rejected it as inconsistent, turning a correct answer into a false
+    disposition=error. A count (whole number) still requires an exact
+    match: "4 doors" vs "5 doors" is a real discrepancy, not rounding.
+    """
+    facts = AgentService._numeric_tokens_from_result_value({"value_m": 5.234, "from_space": "B204", "to_space": "B202"})
+    assert AgentService._narrative_consistent_with_tool_facts("B204 到 B202 的距离约为 5.23 米。", [facts])
+    assert AgentService._narrative_consistent_with_tool_facts("The distance is 5.2 m.", [facts])
+    assert AgentService._narrative_consistent_with_tool_facts("The distance is 5.234 m.", [facts])
+    assert not AgentService._narrative_consistent_with_tool_facts("The distance is 12 m.", [facts])
+
+    door_count_facts = AgentService._numeric_tokens_from_result_value(4)
+    assert AgentService._narrative_consistent_with_tool_facts("There are 4 doors.", [door_count_facts])
+    assert not AgentService._narrative_consistent_with_tool_facts("There are 5 doors.", [door_count_facts])
+
+
 def test_v2_respects_an_expired_deadline(tmp_path: Path) -> None:
     """Independent-review finding, 2026-09-17: V2 was bounded only by
     `tool_calling_max_iterations` (iteration *count*), never wall-clock
