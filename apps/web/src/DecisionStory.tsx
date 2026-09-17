@@ -32,9 +32,31 @@ function auditStage(event: TraceEvent): Stage {
   const type = event.event_type.toLowerCase();
   if (step.includes("resolve") || type.includes("context") || type.includes("selection")) return "Intent Understanding";
   if (type.includes("coverage") || type.includes("canonical") || type.includes("normalize") || type.includes("delta") || type.includes("precedence")) return "Normalization";
-  if (step.includes("route") || step.includes("plan") || type.includes("semantic") || type.includes("repair")) return "Planning";
+  // "v2_turn_started" (SPEC-M16): V2 has no separate context-resolution/
+  // normalization phase -- its first model round trip (deciding tool
+  // calls) *is* "Planning" (its own Plan step subtitle already reads
+  // "tool_calling planning"). Owner-reported, 2026-09-16: without this,
+  // the event fell through to the unused "Final Response" bucket and V2's
+  // Question/Plan steps showed no time at all.
+  if (step.includes("route") || step.includes("plan") || type.includes("semantic") || type.includes("repair") || step.startsWith("v2_turn_started")) return "Planning";
   if (step.includes("execute") || type.includes("tool") || type.includes("subplan")) return "Execution";
-  if (step.includes("verif") || type.includes("verif") || type.includes("evidence")) return "Verification";
+  // type.includes("consistency") (owner-reported, 2026-09-16): a plain
+  // "execution_consistency" event_type/step (emitted by the same shared
+  // _execute_ifc consistency check both V1 and V2 use) doesn't contain
+  // "verif", so it fell through to "Final Response" -- an unused bucket --
+  // instead of Verification, alongside its sibling result_shape_verification
+  // event which already matched. Affects both engines equally; not V2-only.
+  if (step.includes("verif") || type.includes("verif") || type.includes("evidence") || type.includes("consistency")) return "Verification";
+  // "v2_turn_continued" deliberately falls through to here, not Planning
+  // (owner-reported, 2026-09-16, second pass): stageTimingsMs below keeps
+  // only the *first* timestamp seen per stage, so tagging this the same
+  // as "v2_turn_started" would not add a new boundary -- Planning's own
+  // firstSeen would still be the earlier v2_turn_started event, and this
+  // whole (often multi-second, LLM-generated-answer) call would keep
+  // bleeding into Verification's window exactly as before. Landing it in
+  // "Final Response" instead -- a stage with no earlier event of its own
+  // this turn -- gives it a real boundary, so Verification's number
+  // finally reflects only its own near-instant, no-model-call checks.
   return "Final Response";
 }
 
@@ -302,7 +324,7 @@ export function DecisionStory({ latest, trace, projectId, onOpenCitation }: {
 
       <li className="story-step">
         <StepHeader number={5} icon="✅" title="Verification" subtitle={[latest.verification.status, stepMs(stageTimings["Verification"])].filter(Boolean).join(" · ")} />
-        <p className={`story-step-body verification-reason ${latest.verification.status}`}>{latest.verification.reason || (latest.verification.status === "passed" ? "Every value was independently checked against its own source before being presented." : "—")}</p>
+        <p className={`story-step-body verification-reason ${latest.verification.status}`}>{latest.verification.reason || (latest.verification.status === "verified" ? "Every value was independently checked against its own source before being presented." : "—")}</p>
         <StepTrace events={byStage("Verification")} />
       </li>
 

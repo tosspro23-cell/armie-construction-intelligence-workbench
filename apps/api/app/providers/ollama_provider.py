@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from typing import TypeVar
+from typing import Any, AsyncIterator, TypeVar
 
 import httpx
 from pydantic import BaseModel
+
+from app.providers.base import AnswerChunkEvent, ToolCallEvent, TurnCompleteEvent
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -85,3 +87,14 @@ class OllamaProvider:
         body = response.json()
         content = body.get("response") or body.get("thinking")
         return response_model.model_validate_json(_extract_json(content))
+
+    def stream_turn(
+        self, *, messages: list[dict[str, Any]], tools: list[dict[str, Any]], purpose: str,
+    ) -> AsyncIterator[AnswerChunkEvent | ToolCallEvent | TurnCompleteEvent]:
+        """SPEC-M16, Explicitly excluded scope: Ollama tool-calling support is
+        model-dependent and not verified live for any model this project
+        currently uses. Raising here is the honest behavior -- V2 is simply
+        unavailable against this provider in this phase, not silently
+        degraded or incorrect.
+        """
+        raise NotImplementedError("Ollama tool-calling (SPEC-M16 V2) is not supported in this phase -- see the spec's Explicitly excluded scope.")

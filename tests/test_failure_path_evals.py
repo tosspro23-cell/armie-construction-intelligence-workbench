@@ -74,7 +74,7 @@ def test_f1_malformed_output_repair_succeeds(tmp_path: Path) -> None:
     response = service.invoke(project_resources=_demo(container), thread_id="f1", question=QUESTION, viewer_context=None)
 
     assert response.disposition.value == "answered"
-    assert response.verification.status == "passed"
+    assert response.verification.status == "verified"
     trace = container.audit_store.by_trace(response.trace_id)
     repair_events = [event for event in trace if event.step == "semantic_repair" and event.event_type == "semantic_repair"]
     assert any("repair completed" in event.summary.lower() for event in repair_events)
@@ -99,7 +99,7 @@ def test_f2_malformed_output_repair_also_fails(tmp_path: Path) -> None:
     response = service.invoke(project_resources=_demo(container), thread_id="f2", question=QUESTION, viewer_context=None)
 
     assert response.disposition.value == "error"
-    assert response.verification.status != "passed"
+    assert response.verification.status != "verified"
     assert not any(char.isdigit() for char in response.answer_markdown)
 
 
@@ -237,7 +237,7 @@ def test_f6_transport_error_produces_a_safe_non_answer(tmp_path: Path) -> None:
     response = service.invoke(project_resources=_demo(container), thread_id="f6", question=QUESTION, viewer_context=None)
 
     assert response.disposition.value == "error"
-    assert response.verification.status != "passed"
+    assert response.verification.status != "verified"
     assert not any(char.isdigit() for char in response.answer_markdown)
 
 
@@ -352,7 +352,7 @@ def test_f11_result_shape_mismatch_is_not_answered(tmp_path: Path) -> None:
 
     assert response.disposition.value == "error"
     assert response.disposition.value != "answered"
-    assert response.verification.status != "passed"
+    assert response.verification.status != "verified"
 
 
 # --- F12: PDF vision path fails / returns low-confidence evidence -------------------

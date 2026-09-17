@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Optional, TypedDict
+import json
+import time
+from typing import Any, AsyncIterator, Callable, Optional, TypedDict
 from uuid import uuid4
 
 from langgraph.graph import END, START, StateGraph
@@ -15,6 +17,7 @@ from app.agent.plan_validation import (
     verify_execution_consistency,
 )
 from app.agent.router import (
+    SUPPORTED_ENTITY_TYPES,
     capability_gate,
     cross_source_join_requested,
     fast_path_coverage,
@@ -27,7 +30,9 @@ from app.agent.router import (
     resolve_reference,
     selected_element_plan,
 )
+from app.agent.tools import TOOL_DEFINITIONS, build_plan_from_tool_call
 from app.config import Settings
+from app.providers.base import AnswerChunkEvent, ToolCallEvent, TurnCompleteEvent
 from app.schemas.models import (
     AgentResponse,
     AuditEvent,
@@ -80,6 +85,24 @@ class GraphState(TypedDict, total=False):
     tool_call_count: int
     unsupported_reason: str
     planner_error: str
+
+
+# SPEC-M16 V2: how many items of a list-shaped tool result get sent back
+# to the model verbatim before this system switches to a sample + count
+# (see invoke_v2's own use of this, right below the reconciliation-specific
+# version of the same idea). Not a scientifically tuned number -- chosen to
+# comfortably cover every single-tool-call representative-eval question
+# (the largest real list any of them returns is 4 items) while still
+# capping the kind of match-a-whole-category call that returns dozens.
+# Owner-reported, 2026-09-16, second pass: a first attempt at 15 made the
+# model repeatedly re-call the *same* tool hoping for a fuller answer to a
+# name/sub-category breakdown this system's tools cannot filter for at all
+# (e.g. "how many tables vs chairs" out of a generic IfcFurnishingElement
+# match) -- wasteful, not a correctness bug (the model never fabricated a
+# number; it just kept retrying an identically-capped result). Raised to
+# 40 so this only engages for genuinely large categories, and the system
+# prompt now tells the model explicitly not to retry when it does.
+_V2_TOOL_RESULT_LIST_CAP = 40
 
 
 class AgentService:
@@ -650,7 +673,7 @@ Return only a corrected MultiQueryPlan JSON object."""
             consistency,
         ])
         return {"tool_result": {
-            "answer": answer, "disposition": "answered" if status.status == "passed" else "error", "citations": citations,
+            "answer": answer, "disposition": "answered" if status.status == "verified" else "error", "citations": citations,
             "verification": status.model_dump(),
             "result_value": value,
             "context_update": {"active_source": SourceType.IFC.value, "active_entity_type": plan.entity_type, "active_filters": plan.filters, "previous_query_plan": plan.model_dump(), "evidence_refs": [item.id for item in result.evidence]},
@@ -691,12 +714,12 @@ Return only a corrected MultiQueryPlan JSON object."""
             reason = "Cross-source joins between drawing and IFC room-area data are outside this reference implementation. No numeric partial answer can be finalized."
             self._audit(state, "intent_coverage", "capability_gate_rejected", "Whole-intent coverage rejected a partial cross-source execution.", {"reason": "cross_source_join_unsupported"})
             return {"answer": reason, "disposition": "unsupported", "citations": [], "verification": VerificationStatus(status="not_applicable", reason=reason).model_dump(), "model_call_count": model_calls}
-        successful = [item for item in subresults if item.get("disposition") == "answered" and item.get("verification", {}).get("status") == "passed"]
+        successful = [item for item in subresults if item.get("disposition") == "answered" and item.get("verification", {}).get("status") == "verified"]
         unresolved = [item for item in subresults if item not in successful]
         citations = [citation for item in subresults for citation in item.get("citations", [])]
         answer = self._natural_answer(multi_plan, subresults)
         disposition = "answered" if successful and not unresolved else ("partially_answered" if successful else subresults[0].get("disposition", "refused"))
-        verification = VerificationStatus(status="passed" if disposition == "answered" else "not_applicable", reason=None if disposition == "answered" else "One or more subtasks were unresolved; successful subtasks remain independently verified.")
+        verification = VerificationStatus(status="verified" if disposition == "answered" else "not_applicable", reason=None if disposition == "answered" else "One or more subtasks were unresolved; successful subtasks remain independently verified.")
         self._audit(state, "synthesize", "synthesized", "Subplan outcomes synthesized without omitting partial results.", {"successful_subtasks": len(successful), "unresolved_subtasks": len(unresolved), "disposition": disposition})
         return {"answer": answer, "disposition": disposition, "citations": citations, "verification": verification.model_dump(), "model_call_count": model_calls}
 
@@ -905,7 +928,7 @@ Return only a corrected MultiQueryPlan JSON object."""
             f"**{counts['missing_in_pdf']} missing from the PDF**, **{counts['missing_in_ifc']} missing from the IFC model**."
         )
         citations = self._citations(evidence, state)
-        verification = VerificationStatus(status="passed", reason="Every item's status was independently derived from the source IFC quantities and the PDF's own table structure; no value was asserted without a matching or explicitly absent counterpart.")
+        verification = VerificationStatus(status="verified", reason="Every item's status was independently derived from the source IFC quantities and the PDF's own table structure; no value was asserted without a matching or explicitly absent counterpart.")
         self._audit(state, "execute_reconciliation", "synthesized", "Door/window IFC<->drawing reconciliation joined on Tag.", counts)
         return {
             "answer": answer, "disposition": "answered", "citations": citations,
@@ -1113,11 +1136,23 @@ Return only a corrected MultiQueryPlan JSON object."""
                 consistency,
             ])
             tool_result = {
-                "answer": answer if status.status == "passed" else "I could not safely finalize this answer because the execution result did not preserve the requested operation.",
-                "disposition": "answered" if status.status == "passed" else "error",
+                "answer": answer if status.status == "verified" else "I could not safely finalize this answer because the execution result did not preserve the requested operation.",
+                "disposition": "answered" if status.status == "verified" else "error",
                 "citations": citations,
                 "verification": status.model_dump(),
                 "result_value": result.value,
+                # Owner-reported, 2026-09-17: the repository layer already
+                # computes this (e.g. "No IFC elements matched the query."
+                # -- exactly what a mistranslated/nonexistent storey filter
+                # like "第二层" instead of "Level 2" produces: a faithfully
+                # correct zero for a bad filter, not a fabrication, but
+                # presented with no hint anything was off) -- it was simply
+                # never read by any caller. V1 doesn't need it (not
+                # agentic); V2 does, since invoke_v2 forwards this straight
+                # back to the model as this tool's own result, giving it a
+                # chance to notice and retry with a corrected filter rather
+                # than confidently reporting a wrong zero.
+                "warnings": result.warnings,
                 "context_update": {
                     "active_source": SourceType.IFC.value,
                     "active_entity_type": plan.entity_type,
@@ -1650,7 +1685,7 @@ Return only a corrected MultiQueryPlan JSON object."""
             "answer": claim,
             "disposition": "answered",
             "citations": self._citations(evidence, state),
-            "verification": VerificationStatus(status="passed", verifier_results=[VerifierResult(verifier="same_snapshot_vision", passed=True, confidence=viewer_verification.confidence, reason=viewer_verification.rationale, supporting_evidence_ids=[evidence[0].id])], reason="Vision result was independently verified against the supplied snapshot.").model_dump(),
+            "verification": VerificationStatus(status="verified", verifier_results=[VerifierResult(verifier="same_snapshot_vision", passed=True, confidence=viewer_verification.confidence, reason=viewer_verification.rationale, supporting_evidence_ids=[evidence[0].id])], reason="Vision result was independently verified against the supplied snapshot.").model_dump(),
             "context_update": {"active_source": SourceType.VIEWER.value, "active_snapshot_id": viewer.get("snapshot_id")},
         }, "evidence": [item.model_dump() for item in evidence], "model_call_count": model_call_count}
 
@@ -1864,6 +1899,1082 @@ Return only a corrected MultiQueryPlan JSON object."""
         }
         outcome = self.graph.invoke(initial)
         return AgentResponse.model_validate(outcome["final_response"])
+
+    @staticmethod
+    def _v2_system_prompt(storey_names: list[str] | None = None, source_preference: str = "auto") -> str:
+        """SPEC-M16: V2's own system prompt.
+
+        Deliberately restates the same honesty invariant every part of V1
+        already enforces structurally (D-001): the model's role is
+        deciding *which* tool(s) answer a question, never stating a fact
+        without one. Nothing here asks the model to compute, estimate, or
+        recall a construction fact from its own training -- only to call a
+        tool and then describe that tool's real, verified return value.
+
+        `source_preference` (independent-review finding, 2026-09-17): the
+        workbench's own Source control (auto/ifc/pdf/viewer_snapshot)
+        reached V1's `agent.invoke` but was never even threaded into
+        `_chat_v2`/`invoke_v2` at all for V2 -- confirmed live: setting it
+        to "pdf" and asking a question the model could answer via either
+        source still ran the IFC tool. V2 has no routing-layer concept of
+        "source" the way V1's own heuristic router does (the model picks
+        a *tool*, not a *source*, and several tools are IFC-only or
+        PDF-only with no overlap at all) -- a prompt-level steer for the
+        genuinely ambiguous cases is the honest integration point this
+        architecture actually has, not a hard routing gate.
+        """
+        storey_guidance = (
+            f"This project's real storey names are exactly: {storey_names} -- always pass one of "
+            "these exact strings as a storey filter, never a translation, abbreviation, or ordinal "
+            "guess (e.g. \"第二层\" or \"2nd floor\") of the storey the user meant. "
+        ) if storey_names else ""
+        source_guidance = {
+            "ifc": "The user has set a source preference of 'ifc' -- when a question could plausibly be answered from either the IFC model or the PDF drawings, prefer the IFC-based tools (count_elements, group_elements_by_storey, get_element_properties, aggregate_quantity, space_distance) over extract_pdf_field, unless the question is unambiguously about the PDF schedule itself. ",
+            "pdf": "The user has set a source preference of 'pdf' -- when a question could plausibly be answered from either the IFC model or the PDF drawings, prefer extract_pdf_field over the IFC-based tools, unless the question is unambiguously about the 3D model itself. ",
+            "viewer_snapshot": "The user has set a source preference of 'viewer_snapshot' -- prefer inspect_current_view over other tools when the question could plausibly be about what is currently shown in the 3D viewer. ",
+        }.get(source_preference, "")
+        return (
+            "You are a construction/BIM assistant with tools to query a real IFC building model "
+            "and its PDF drawings/schedules. Decide which tool(s) answer the user's question, call "
+            "them (several independent ones in the same turn if the question needs them), then "
+            "answer using ONLY the values those tools actually returned this turn. Never state a "
+            "count, measurement, or property value you did not just receive from a tool call -- if "
+            "no tool can answer part of the question, say so honestly rather than guessing. "
+            "Respond in the same language as the user's latest message. "
+            f"{storey_guidance}"
+            f"{source_guidance}"
+            "If a tool result includes a non-empty 'warnings' field (e.g. a storey filter matched "
+            "zero elements), that is a signal your filter value may be wrong, not proof the true "
+            "count is zero -- reconsider the filter (check it against the real storey names above) "
+            "before reporting a zero as fact. "
+            f"Valid entity_type values for every tool: {sorted(SUPPORTED_ENTITY_TYPES)}. "
+            "reconcile_doors_windows only checks door/window width and height -- never claim it "
+            "checked any other attribute (fire rating, material, etc.). "
+            "When a question asks about ONE specific storey (e.g. 'how many doors on Level 2'), "
+            "call count_elements with that storey filter, not group_elements_by_storey -- both "
+            "give a correct number, but group_elements_by_storey's own evidence necessarily covers "
+            "every storey, not just the one asked about, which is needlessly broad for a "
+            "single-storey question. Reserve group_elements_by_storey for questions that are "
+            "themselves about comparing or ranking storeys (e.g. 'which floor has the most'). "
+            "Tools cannot filter by name or sub-category (e.g. there is no way to ask for only "
+            "'tables' out of IfcFurnishingElement) -- if a large result was capped to a sample plus "
+            "a total count, that is the most detail this system can give; do not call the same tool "
+            "again with the same or a differently-worded request hoping for a different or more "
+            "complete result. State the exact total, describe the sample honestly as partial, and "
+            "stop there rather than retrying. "
+            # Independent-review finding, 2026-09-17, third pass, resolved
+            # at the data layer rather than by restricting what the model
+            # is allowed to say (owner decision, 2026-09-17: V2 exists
+            # specifically so the model can freely synthesize over tool
+            # results instead of being limited to a closed, pre-built set
+            # of operations -- capping the *output* to only ever restate
+            # bound fields, as a stricter fact-binding architecture would,
+            # would reintroduce exactly the ceiling V2 was built to avoid.
+            # Enriching the *input* with complete information costs
+            # nothing in generalization and closes the same gap at its
+            # actual root cause: the model not having complete data, not
+            # a rendering problem). A sample cap is safe for a total
+            # *count* (exact regardless of sampling) but was not safe for
+            # a claim about *how many distinct values/types* exist -- "how
+            # many distinct window sizes" answered from only the first 40
+            # of 85 elements could truthfully report 3 distinct sizes in
+            # the sample while a 4th existed only among the omitted ones.
+            # `distinct_value_summary` below is computed from the FULL,
+            # untruncated list before capping, so it is exhaustive even
+            # when sample_items is not.
+            "If a result was capped to a sample plus a total count, do not infer how many *distinct* "
+            "values, types, or sizes exist from sample_items alone -- it is only a partial sample. "
+            "When the tool result includes a distinct_value_summary field, it is computed from ALL "
+            "items (not just the sample) and is the exact, exhaustive answer for how many distinct "
+            "values exist for that field; use it instead of counting from sample_items."
+        )
+
+    def _v2_dispatch_tool(self, tool_call: ToolCallEvent, state: GraphState) -> dict[str, Any]:
+        """SPEC-M16: execute one V2-requested tool call, synchronously.
+
+        Called via `asyncio.to_thread` from the async V2 loop (this is the
+        same blocking IfcOpenShell/file-bound work V1's own `_execute_ifc`/
+        `_execute_pdf`/`_execute_viewer` already do -- offloading it here
+        keeps the event loop free for other requests/streaming exactly the
+        way V1's own `asyncio.to_thread(agent.invoke, ...)` call in
+        `main.py` already does for the whole V1 turn).
+
+        Reuses V1's own execution/verification/evidence methods completely
+        unchanged (this module's own established contract) -- no new
+        computation logic exists for V2 anywhere in this codebase.
+        """
+        if tool_call.tool_name == "reconcile_doors_windows":
+            reason = "V2 tool call: door/window width/height reconciliation against the PDF schedule."
+            multi_plan = MultiQueryPlan(
+                intent="reconciliation", response_language="en", raw_user_message=state["question"],
+                normalized_request=state["question"], interpretation_confidence="high", rationale=reason,
+                subplans=[
+                    QueryPlan(subtask_id="task_1", source="ifc", intent="reconciliation", operation="list", entity_type=None, filters={}, group_by="none", expected_result_shape="list", rationale=reason, planning_mode="tool_calling", rule_id="tool:reconcile_doors_windows", matched_signals=["intent:reconciliation"], match_status="complete"),
+                    QueryPlan(subtask_id="task_2", source="pdf", intent="reconciliation", operation="extract_field", filters={"page_hint": 2}, group_by="none", expected_result_shape="list", rationale=reason, planning_mode="tool_calling", rule_id="tool:reconcile_doors_windows", matched_signals=["intent:reconciliation"], match_status="complete"),
+                ],
+            )
+            result = self._synthesize_reconciliation_response(state, multi_plan)
+            return {
+                "tool_result": {"answer": result["answer"], "disposition": result["disposition"], "citations": result["citations"], "verification": result["verification"], "result_value": result.get("reconciliation_items")},
+                "evidence": result.get("evidence", []),
+                # Independent-review finding, 2026-09-17: a *delta* (how
+                # many tool invocations this one dispatch made), not an
+                # absolute new total -- see the comment on the non-
+                # reconciliation branch below for why an absolute value
+                # computed here is unsafe under invoke_v2's own parallel
+                # dispatch via asyncio.gather.
+                "tool_call_delta": result.get("tool_call_count_delta", 1),
+                "plan": [sub.model_dump() for sub in multi_plan.subplans],
+            }
+        plan = build_plan_from_tool_call(tool_call.tool_name, tool_call.arguments)
+        allowed, reason = capability_gate(plan)
+        if not allowed:
+            return {"tool_result": {"answer": reason or "This request is outside the supported tool capabilities.", "disposition": "unsupported", "citations": [], "verification": VerificationStatus(status="not_applicable", reason="Rejected by the capability gate before execution.").model_dump(), "result_value": None}, "evidence": [], "tool_call_delta": 0, "plan": [plan.model_dump()]}
+        # Independent-review finding, 2026-09-17: `_execute_ifc`/`_execute_pdf`/
+        # `_execute_viewer` are V1's own shared methods -- they return an
+        # *absolute* new `tool_call_count` (`state.get("tool_call_count", 0) + 1`),
+        # correct for V1's own sequential LangGraph execution (state is
+        # mutated between each node), but invoke_v2 dispatches multiple
+        # tool calls in *parallel* via `asyncio.gather`, all reading the
+        # *same* pre-dispatch `state` snapshot -- every concurrent call
+        # computes the same "+1" off the same baseline, so the last one
+        # processed silently overwrote the others' contribution instead of
+        # summing (confirmed live: two successful parallel tool calls
+        # reported tool_call_count=1, not 2). Converting to a delta here
+        # (this dispatch's own baseline vs. its own result) lets the
+        # caller sum deltas instead of trusting an absolute value computed
+        # from a stale, shared snapshot.
+        baseline = state.get("tool_call_count", 0)
+        local_state: GraphState = {**state, "plan": plan.model_dump()}
+        if plan.source == "ifc":
+            result = self._execute_ifc(local_state)
+        elif plan.source == "pdf":
+            result = self._execute_pdf(local_state)
+        elif plan.source == "viewer_snapshot":
+            result = self._execute_viewer(local_state)
+        else:
+            result = {"tool_result": self._error_result(f"Unsupported tool source: {plan.source}")}
+        result["plan"] = [plan.model_dump()]
+        result["tool_call_delta"] = result.get("tool_call_count", baseline) - baseline
+        return result
+
+    async def invoke_v2(
+        self,
+        *,
+        project_resources: ProjectResources,
+        thread_id: str | None,
+        question: str,
+        viewer_context: dict | None,
+        recent_turns: list[dict[str, str]] | None = None,
+        deadline: float | None = None,
+        cancel_check: Callable[[], bool] | None = None,
+        source_preference: str = "auto",
+    ) -> AsyncIterator[dict[str, Any]]:
+        """SPEC-M16: V2's tool-calling agent loop, streamed.
+
+        Yields plain dicts for the caller (an SSE endpoint, or a test
+        harness collecting them into a list) to forward:
+        - {"type": "tool_status", "tool_name": ..., "call_id": ..., "status": "started"|"completed"}
+        - {"type": "answer_chunk", "text": ...}
+        - {"type": "final", "response": AgentResponse}  -- always the last event
+
+        Runs independently of V1's LangGraph `StateGraph` -- V2 attempts
+        every question from a clean start (SPEC-M16 OD-50: a full,
+        standalone engine for a fair benchmark, never a fallback consulting
+        V1's heuristics/semantic planner first).
+
+        `deadline`/`cancel_check` (independent-review finding, 2026-09-17):
+        V1's own request lifecycle (`chat()` in main.py) bounds the whole
+        turn by `request_timeout_seconds` and lets `/api/v1/requests/{id}/
+        cancel` interrupt it; V2's own `tool_calling_max_iterations` only
+        bounds *iteration count*, never wall-clock time, and V2 requests
+        were never registered in `app.state.requests` at all -- confirmed
+        live: a 30ms deadline with a 150ms-delayed fake model still
+        produced a normal `final` ~282ms later, no timeout, and the
+        cancel/status endpoints 404 for any V2 request_id. These are
+        optional (`None` = today's unbounded-by-time behavior, matching
+        every existing caller/test that doesn't pass them) so the web
+        layer (main.py's `_chat_v2`/`_v2_sse_stream`) can own the actual
+        policy (an absolute `time.perf_counter()` deadline and a
+        callable checking that caller's own request record) without this
+        method importing anything FastAPI/app.state-shaped.
+        """
+        thread_id = thread_id or str(uuid4())
+        trace_id = str(uuid4())
+        state: GraphState = {
+            "project_resources": project_resources, "thread_id": thread_id, "trace_id": trace_id,
+            "question": question, "viewer_context": viewer_context or {}, "conversation_context": {},
+            "tool_call_count": 0, "model_call_count": 0,
+        }
+        provider = self.container.text_provider_factory(self.settings)
+        # Owner-reported, 2026-09-17: a Chinese storey phrase ("第二层")
+        # passed straight through as a filter value, never translated to
+        # this project's own English storey names, matched zero real
+        # elements -- a faithfully-executed but wrong filter, reported as
+        # a confident (wrong) zero. Giving the model the real names up
+        # front removes the guess entirely for any project that has an
+        # IFC source at all (PDF-only projects have none to give).
+        try:
+            storey_names = [
+                storey["name"] for storey in project_resources.ifc_repository.metadata().get("storeys", []) if storey.get("name")
+            ]
+        except Exception:
+            storey_names = []
+        messages: list[dict[str, Any]] = [{"role": "system", "content": self._v2_system_prompt(storey_names, source_preference)}]
+        for turn in recent_turns or []:
+            messages.append({"role": "user", "content": turn["question"]})
+            messages.append({"role": "assistant", "content": turn["answer"]})
+        messages.append({"role": "user", "content": question})
+
+        self._audit(state, "v2_turn_started", "model_called", "V2 tool-calling agent turn started.", {"question": question, "recent_turn_count": len(recent_turns or [])}, planning_mode="tool_calling")
+        # SPEC-M16 SS E: real, measured latency (see the live benchmark
+        # report) found that most of a turn's wall time is a single,
+        # invisible-to-the-user model round trip deciding which tool(s) to
+        # call, *before* anything streams -- a genuine architectural limit
+        # of tool-calling (the decision round cannot itself be streamed;
+        # see stream_turn's own docstring), not something this phase's
+        # design can eliminate. This is the honest mitigation available
+        # now: an immediate signal that the agent has started working,
+        # rather than several seconds of visible silence.
+        yield {"type": "thinking"}
+
+        all_citations: list[dict[str, Any]] = []
+        all_evidence: list[dict[str, Any]] = []
+        all_plans: list[dict[str, Any]] = []
+        all_reconciliation_items: list[dict[str, Any]] = []
+        # Independent-review findings, 2026-09-17 -- both fed by the
+        # per-tool-call loop below:
+        # `subtask_dispositions`: one entry per dispatched tool call this
+        # whole turn, used to distinguish a fully successful turn from one
+        # where some subtask failed/was unsupported (previously collapsed
+        # into a flat "answered" as long as *any* call left a citation).
+        subtask_dispositions: list[str] = []
+        # `expected_numeric_facts`: one (entity_terms, expected_numbers) pair
+        # per successful scalar/aggregate/group-by tool result this turn --
+        # this turn's own ground truth, independent of anything the model
+        # goes on to say. Used after the final answer is assembled to check
+        # the model's own narrated numbers actually came from a real tool
+        # result, not free-form invention on top of a real citation (a fake
+        # provider scripted to answer "99999" after a real count_elements
+        # call returning 4 previously still finalized as disposition=answered,
+        # verification=passed/verified, since that check only ever looked at
+        # "did a tool call leave a citation this turn," not whether the
+        # model's own prose was consistent with it -- and even the first
+        # numeric-only version of this check was itself bypassable by
+        # mentioning the *real* number in an unrelated aside while stating a
+        # *fabricated* one as the actual claim; entity_terms lets the check
+        # bind a number to what it's actually claimed to describe).
+        expected_numeric_facts: list[tuple[frozenset[str], set[float]]] = []
+        answer_parts: list[str] = []
+        max_iterations = self.settings.tool_calling_max_iterations
+        for iteration in range(1, max_iterations + 1):
+            # Independent-review finding, 2026-09-17: checked once per
+            # iteration -- the same natural checkpoint tool_calling_max_iterations
+            # already uses -- rather than around each individual `await`,
+            # which would need weaving through provider.stream_turn's own
+            # internals. A slow deployment or a hung tool call can still
+            # run past `deadline`/past a cancel request until the *next*
+            # iteration boundary; this bounds it to "one more model+tool
+            # round trip," not "instantly," which is the same granularity
+            # V1's own cooperative cancellation (`task.cancel()` between
+            # awaits) already provides.
+            if deadline is not None and time.perf_counter() > deadline:
+                self._audit(state, "v2_turn_error", "timeout", "V2 agent exceeded its bounded wall-clock deadline.", {"iteration": iteration}, planning_mode="tool_calling")
+                response = AgentResponse(
+                    thread_id=thread_id, trace_id=trace_id, disposition=Disposition.TIMEOUT,
+                    answer_markdown="The request exceeded its time limit. Please retry with a narrower question.",
+                    verification=VerificationStatus(status="not_applicable", reason="Timed out before a final answer was reached."),
+                    execution_metadata={"engine": "v2", "model_call_count": state.get("model_call_count", 0), "tool_call_count": state.get("tool_call_count", 0), "iterations": iteration, "planning_mode": "tool_calling"},
+                )
+                yield {"type": "final", "response": response}
+                return
+            if cancel_check is not None and cancel_check():
+                self._audit(state, "v2_turn_error", "cancelled", "V2 agent turn was cancelled.", {"iteration": iteration}, planning_mode="tool_calling")
+                response = AgentResponse(
+                    thread_id=thread_id, trace_id=trace_id, disposition=Disposition.CANCELLED,
+                    answer_markdown="Request cancelled. No result was committed to the conversation context.",
+                    verification=VerificationStatus(status="not_applicable", reason="Cancelled before a final answer was reached."),
+                    execution_metadata={"engine": "v2", "model_call_count": state.get("model_call_count", 0), "tool_call_count": state.get("tool_call_count", 0), "iterations": iteration, "planning_mode": "tool_calling"},
+                )
+                yield {"type": "final", "response": response}
+                return
+            if iteration > 1:
+                # Owner-reported, 2026-09-16: only the very first model call
+                # of a turn got its own audit event ("v2_turn_started"
+                # above) -- a later iteration's call (the one that reads
+                # tool results back and composes the final natural-language
+                # answer) had no start marker of its own. DecisionStory.tsx's
+                # client-side stage-timing approximation charges the gap
+                # between two audit events to whichever stage the first one
+                # belongs to, so with no marker here that entire
+                # answer-composition call silently got folded into
+                # "Verification" (whatever the last verification-tagged
+                # event happened to be) -- making Verification's reported
+                # latency mostly someone else's cost, not its own. This
+                # gives the second (and any later) model call its own
+                # Planning-bucketed start, same as the first.
+                self._audit(state, "v2_turn_continued", "model_called", "V2 agent requested another model turn using this iteration's tool results.", {"iteration": iteration}, planning_mode="tool_calling")
+            model_call_count = state.get("model_call_count", 0) + 1
+            state["model_call_count"] = model_call_count
+            # Independent-review finding, 2026-09-17, second pass: without
+            # some signal here, an iteration composing a long answer would
+            # go visibly silent for its whole duration before the first
+            # token arrives. Re-uses the same "thinking" signal SPEC-M16
+            # SS E already established for the first call's own silent
+            # decision round trip (which already gets it once, before
+            # this loop starts -- only re-sent for iteration > 1 so it
+            # isn't emitted twice back-to-back for the first).
+            if iteration > 1:
+                yield {"type": "thinking"}
+            turn_complete = None
+            this_iteration_answer_parts: list[str] = []
+            # Independent-review finding, 2026-09-17, second pass: the
+            # per-iteration deadline/cancel checks above only run
+            # *between* iterations -- a single iteration's own model call
+            # sleeping/hanging past `deadline` was never interrupted,
+            # confirmed live: deadline=50ms, a 200ms-delayed fake model,
+            # turn still finalized normally ~200ms later with no timeout.
+            # Now wrapped with `asyncio.wait_for` per received event, so a
+            # slow *individual* call is bounded too, not just cumulative
+            # iteration count.
+            #
+            # Owner decision, 2026-09-17: `AnswerChunkEvent`s are streamed
+            # live again (yielded the instant each token arrives), not
+            # buffered-then-replayed. They were buffered for two rounds
+            # (SPEC-M16 SS E, second pass) specifically so a narrative
+            # later caught as inconsistent with this turn's own tool
+            # results could be fully withheld before ever reaching the
+            # client. That reason no longer applies: an inconsistent
+            # narrative is no longer withheld (see the consistency check
+            # below) -- it is shown with a caveat instead, since every
+            # *confirmed* catch of that check across three rounds of
+            # independent review was against a deliberately scripted
+            # adversarial test, never a real fabrication from the actual
+            # model in live use, while the check's own false-positive rate
+            # against real live usage was confirmed twice. Buffering had
+            # a real, felt UX cost with no corresponding real-world
+            # benefit: the model's own answer-composition call is most of
+            # a turn's wall time, and buffering meant the client saw
+            # nothing (just a static "thinking" indicator) for that whole
+            # duration before every token appeared at once in a burst. A
+            # truncated/content-filtered response (finish_reason below) is
+            # a different, non-probabilistic case where the response
+            # really is incomplete -- but since it can only be detected
+            # *after* the stream ends, and the (real, if incomplete) text
+            # has already been streamed live by then, that path now
+            # appends a clear caveat to what was actually shown rather
+            # than trying to retroactively hide it.
+            stream_iter = provider.stream_turn(messages=messages, tools=TOOL_DEFINITIONS, purpose="v2_tool_turn").__aiter__()
+            while True:
+                remaining = (deadline - time.perf_counter()) if deadline is not None else None
+                if remaining is not None and remaining <= 0:
+                    self._audit(state, "v2_turn_error", "timeout", "V2 agent exceeded its bounded wall-clock deadline mid-model-call.", {"iteration": iteration}, planning_mode="tool_calling")
+                    response = AgentResponse(
+                        thread_id=thread_id, trace_id=trace_id, disposition=Disposition.TIMEOUT,
+                        answer_markdown="The request exceeded its time limit. Please retry with a narrower question.",
+                        verification=VerificationStatus(status="not_applicable", reason="Timed out before a final answer was reached."),
+                        execution_metadata={"engine": "v2", "model_call_count": state.get("model_call_count", 0), "tool_call_count": state.get("tool_call_count", 0), "iterations": iteration, "planning_mode": "tool_calling"},
+                    )
+                    yield {"type": "final", "response": response}
+                    return
+                try:
+                    event = await (asyncio.wait_for(stream_iter.__anext__(), timeout=remaining) if remaining is not None else stream_iter.__anext__())
+                except StopAsyncIteration:
+                    break
+                except asyncio.TimeoutError:
+                    self._audit(state, "v2_turn_error", "timeout", "V2 agent's model call itself exceeded the bounded wall-clock deadline.", {"iteration": iteration}, planning_mode="tool_calling")
+                    response = AgentResponse(
+                        thread_id=thread_id, trace_id=trace_id, disposition=Disposition.TIMEOUT,
+                        answer_markdown="The request exceeded its time limit. Please retry with a narrower question.",
+                        verification=VerificationStatus(status="not_applicable", reason="Timed out before a final answer was reached."),
+                        execution_metadata={"engine": "v2", "model_call_count": state.get("model_call_count", 0), "tool_call_count": state.get("tool_call_count", 0), "iterations": iteration, "planning_mode": "tool_calling"},
+                    )
+                    yield {"type": "final", "response": response}
+                    return
+                if isinstance(event, AnswerChunkEvent):
+                    this_iteration_answer_parts.append(event.text)
+                    yield {"type": "answer_chunk", "text": event.text}
+                elif isinstance(event, TurnCompleteEvent):
+                    turn_complete = event
+            messages.append(turn_complete.raw_assistant_message)
+            answer_parts.extend(this_iteration_answer_parts)
+            if not turn_complete.tool_calls:
+                # Independent-review finding, 2026-09-17: a stream cut short
+                # by the model's own max-token limit or blocked mid-answer
+                # by content filtering was previously treated identically
+                # to a normal, complete "stop" -- a truncated narrative
+                # (half a sentence, a number with no unit) could finalize
+                # as disposition=answered with no indication anything was
+                # cut off. See TurnCompleteEvent.finish_reason's own
+                # docstring.
+                if turn_complete.finish_reason in {"length", "content_filter"}:
+                    self._audit(state, "v2_turn_finalized", "error", "V2's model turn ended abnormally before completing its answer.", {"iteration": iteration, "finish_reason": turn_complete.finish_reason}, planning_mode="tool_calling", actual_provider=provider.name, actual_model=provider.model)
+                    # Owner decision, 2026-09-17: appends a caveat to the
+                    # text actually shown instead of replacing it with a
+                    # generic templated message. Now that AnswerChunkEvents
+                    # stream live (see the loop above), whatever partial
+                    # text the model produced before being cut off has
+                    # already reached the client by the time finish_reason
+                    # is known -- swapping in different text here would
+                    # make the client-rendered stream and the saved
+                    # "final" response disagree about what was actually
+                    # said, which is worse than showing the real (if
+                    # incomplete) text with an honest note that it was cut
+                    # off. Citations gathered from any prior iteration's
+                    # tool calls are kept for the same reason: they are
+                    # real, not invalidated by this iteration's own
+                    # truncation.
+                    narrative = "".join(answer_parts) + f"\n\n⚠️ This response was cut off ({turn_complete.finish_reason}) before it finished -- treat it as incomplete."
+                    response = AgentResponse(
+                        thread_id=thread_id, trace_id=trace_id, disposition=Disposition.ERROR,
+                        answer_markdown=narrative, citations=[Citation.model_validate(item) for item in all_citations],
+                        verification=VerificationStatus(status="failed", reason=f"The model turn ended with finish_reason={turn_complete.finish_reason!r} instead of a normal stop."),
+                        execution_metadata={"engine": "v2", "model_call_count": model_call_count, "tool_call_count": state.get("tool_call_count", 0), "iterations": iteration, "planning_mode": "tool_calling", "actual_provider": provider.name, "actual_model": provider.model, "finish_reason": turn_complete.finish_reason},
+                    )
+                    yield {"type": "final", "response": response}
+                    return
+                self._audit(state, "v2_turn_finalized", "finalized", "V2 agent finished calling tools and produced its final answer.", {"iteration": iteration}, planning_mode="tool_calling", actual_provider=provider.name, actual_model=provider.model)
+                # Owner-reported, 2026-09-17: this was `"answered" if
+                # all_citations else "answered"` -- both branches identical,
+                # so the condition was dead code and every zero-tool-call
+                # turn (already flagged as a known gap in the original
+                # SPEC-M16 benchmark report, question 10) was mislabeled
+                # "answered". A 24-question EN/ZH domain sweep confirmed
+                # this is a broader, reproducible pattern, not an edge
+                # case: every one of 5 zero-tool-call turns in that sweep
+                # was genuinely a clarification request or an honest
+                # capability-limit explanation (an ambiguous storey name, a
+                # vague entity, a nonexistent storey, an unmodeled entity
+                # type) -- never a case where V2 legitimately answered
+                # without needing any real data. Matches V1's own
+                # disposition for the identical situation.
+                # Independent-review finding, 2026-09-17: `subtask_dispositions`
+                # now distinguishes a turn where *every* dispatched tool
+                # call succeeded from one where only some did -- a
+                # capability-gate rejection or execution error on one
+                # parallel call no longer disappears behind another call's
+                # citations. Matches V1's own answered/partially_answered/
+                # unsupported/error vocabulary instead of a flat
+                # citations-only "answered."
+                if not subtask_dispositions:
+                    disposition = "answered" if all_citations else "clarification_required"
+                elif all(d == "answered" for d in subtask_dispositions):
+                    disposition = "answered"
+                elif any(d == "answered" for d in subtask_dispositions):
+                    disposition = "partially_answered"
+                # Independent-review finding, 2026-09-17, second pass: a
+                # turn whose *only* dispatched tool call came back
+                # disposition="clarification_required" (e.g. extract_pdf_field
+                # matching more than one configured document, genuinely
+                # asking the user to disambiguate, not failing) fell
+                # through every named branch straight to the generic
+                # "error" catch-all below -- a normal, honest clarification
+                # request was misreported as a system failure. Checked
+                # before "unsupported": asking the user something
+                # actionable is a better outcome to surface than a flat
+                # "not supported" when both are present in the same turn.
+                elif "clarification_required" in subtask_dispositions:
+                    disposition = "clarification_required"
+                elif "unsupported" in subtask_dispositions:
+                    disposition = "unsupported"
+                else:
+                    disposition = "error"
+                narrative = "".join(answer_parts)
+                # Independent-review finding, 2026-09-17: verification used
+                # to be `"passed" if all_citations else "not_applicable"` --
+                # true only of the *tool calls*, never checked against what
+                # the model's own final prose actually says. A fake
+                # provider scripted to answer "There are 99999 doors, all
+                # fire-certified for 120 minutes" after a real
+                # count_elements call returning 4 previously still
+                # produced verification.status="passed". See
+                # `_narrative_consistent_with_tool_facts`'s own docstring
+                # for this check's real, narrow scope (numeric only).
+                narrative_consistent = self._narrative_consistent_with_tool_facts(narrative, expected_numeric_facts)
+                # Owner decision, 2026-09-17: an inconsistent narrative is
+                # now flagged, not withheld. It used to hard-fail the
+                # whole turn (disposition=error, real narrative replaced
+                # with a generic withdrawal message, citations dropped) --
+                # but across three rounds of independent review, every
+                # *confirmed* catch of this check was against a
+                # deliberately scripted adversarial test double, never a
+                # real fabrication from the actual model in live use,
+                # while the check's own false-positive rate against real
+                # live usage was confirmed twice (a natural rounding of a
+                # real measurement, and a correct sum of this turn's own
+                # real counts -- see `_narrative_consistent_with_tool_facts`'s
+                # own docstring). For a decision-support tool where the
+                # user shares final responsibility for judgment calls (see
+                # project memory), disclosing an unconfirmed claim serves
+                # better than silently discarding a likely-correct answer.
+                # `disposition` is left as whatever the tool-call outcomes
+                # above already earned; only `verification.status` reflects
+                # this check's own result, and citations/narrative are
+                # both kept exactly as produced.
+                if all_citations and not narrative_consistent:
+                    verification = VerificationStatus(status="unverified", reason="The final answer's own stated numbers could not be matched to any value this turn's tool calls actually returned; shown with a caveat rather than withheld.")
+                    self._audit(state, "v2_narrative_consistency", "verification_completed", "V2's final narrative did not match this turn's own tool results; shown to the user with a caveat, not withheld.", {"expected_numeric_facts": [{"entity_terms": sorted(terms), "numbers": sorted(numbers)} for terms, numbers in expected_numeric_facts]}, planning_mode="tool_calling")
+                else:
+                    verification = VerificationStatus(status="verified" if all_citations else "not_applicable", reason="Every stated fact came from a verified tool call this turn." if all_citations else "No tool call was made this turn -- nothing here is a claim of fact.")
+                response = AgentResponse(
+                    thread_id=thread_id, trace_id=trace_id, disposition=Disposition(disposition),
+                    answer_markdown=narrative, citations=[Citation.model_validate(item) for item in all_citations],
+                    verification=verification, execution_metadata={
+                        "engine": "v2", "model_call_count": model_call_count, "tool_call_count": state.get("tool_call_count", 0),
+                        "iterations": iteration, "planning_mode": "tool_calling", "actual_provider": provider.name, "actual_model": provider.model,
+                        # Owner-reported, 2026-09-16: DecisionStory.tsx's Question/Plan
+                        # steps read these three keys directly from execution_metadata
+                        # (they were never set for V2 turns, unlike V1's own
+                        # heuristic/LLM planning path -- see _synthesize_reconciliation_response's
+                        # sibling execution_metadata construction above, which sets the same
+                        # "source" convention this mirrors).
+                        "normalized_request": question, "subplans": all_plans, "source": self._v2_source_label(all_plans),
+                    },
+                    reconciliation_items=[ReconciliationItem.model_validate(item) for item in all_reconciliation_items],
+                )
+                if response.reconciliation_items:
+                    self._upsert_findings_from_reconciliation(state, response)
+                yield {"type": "final", "response": response}
+                return
+            for tool_call in turn_complete.tool_calls:
+                # Owner-reported, 2026-09-17: with several *same-named*
+                # tool calls in one turn (e.g. group_elements_by_storey
+                # called once per entity type -- a real, common shape),
+                # the client had only `tool_name` to key a status update
+                # by, so a single "completed" event flipped *every*
+                # matching "Calling X…" line to "X ✓" at once, regardless
+                # of which specific call actually finished. `call_id` (already
+                # unique per `ToolCallEvent`) lets the client match a
+                # status transition to the exact call it belongs to.
+                yield {"type": "tool_status", "tool_name": tool_call.tool_name, "call_id": tool_call.call_id, "status": "started"}
+            # Independent-review finding, 2026-09-17, third pass: the
+            # deadline/cancel machinery above only ever bounded the
+            # *model's* own stream_turn call -- confirmed live with a
+            # 50ms deadline and a 200ms delay injected into tool dispatch
+            # instead of the model stream: this asyncio.gather ran to
+            # completion regardless, ~210ms elapsed against the 50ms
+            # budget. A hung or slow tool call (a stuck DB read, a slow
+            # IFC query) was never actually interruptible, only the model
+            # round trip was.
+            #
+            # A deadline that has already passed is caught before dispatch
+            # even starts. For the dispatch itself: `asyncio.wait_for`
+            # (used for the model stream above) does NOT work here --
+            # `_v2_dispatch_tool` runs in a real OS thread via
+            # `asyncio.to_thread`, and a thread already executing blocking
+            # work cannot actually be cancelled; `wait_for` calls `cancel()`
+            # on timeout and then *awaits that cancellation completing*,
+            # which for an uncancellable thread means it silently blocks
+            # until the thread finishes anyway (confirmed live: still ~207ms
+            # elapsed against a 50ms deadline, `wait_for` in name only).
+            # `asyncio.wait(..., timeout=...)` instead returns as soon as
+            # the timeout elapses regardless of whether the still-running
+            # tasks ever finish -- the orphaned thread keeps running to
+            # completion in the background (harmless: these are read-only
+            # queries) but this turn stops waiting on it and reports the
+            # timeout promptly, matching the model-stream path's own
+            # promptness.
+            dispatch_remaining = (deadline - time.perf_counter()) if deadline is not None else None
+            if dispatch_remaining is not None and dispatch_remaining <= 0:
+                self._audit(state, "v2_turn_error", "timeout", "V2 agent exceeded its bounded wall-clock deadline before tool dispatch.", {"iteration": iteration}, planning_mode="tool_calling")
+                response = AgentResponse(
+                    thread_id=thread_id, trace_id=trace_id, disposition=Disposition.TIMEOUT,
+                    answer_markdown="The request exceeded its time limit. Please retry with a narrower question.",
+                    verification=VerificationStatus(status="not_applicable", reason="Timed out before a final answer was reached."),
+                    execution_metadata={"engine": "v2", "model_call_count": state.get("model_call_count", 0), "tool_call_count": state.get("tool_call_count", 0), "iterations": iteration, "planning_mode": "tool_calling"},
+                )
+                yield {"type": "final", "response": response}
+                return
+            dispatch_tasks = [asyncio.ensure_future(asyncio.to_thread(self._v2_dispatch_tool, tool_call, state)) for tool_call in turn_complete.tool_calls]
+            if dispatch_remaining is not None:
+                _done, pending = await asyncio.wait(dispatch_tasks, timeout=dispatch_remaining)
+                if pending:
+                    for task in pending:
+                        task.cancel()  # best-effort only -- cannot stop an already-running thread, just detaches from it
+                    self._audit(state, "v2_turn_error", "timeout", "V2 agent's tool dispatch itself exceeded the bounded wall-clock deadline.", {"iteration": iteration}, planning_mode="tool_calling")
+                    response = AgentResponse(
+                        thread_id=thread_id, trace_id=trace_id, disposition=Disposition.TIMEOUT,
+                        answer_markdown="The request exceeded its time limit. Please retry with a narrower question.",
+                        verification=VerificationStatus(status="not_applicable", reason="Timed out before a final answer was reached."),
+                        execution_metadata={"engine": "v2", "model_call_count": state.get("model_call_count", 0), "tool_call_count": state.get("tool_call_count", 0), "iterations": iteration, "planning_mode": "tool_calling"},
+                    )
+                    yield {"type": "final", "response": response}
+                    return
+            results = await asyncio.gather(*dispatch_tasks)
+            for tool_call, result in zip(turn_complete.tool_calls, results):
+                tool_result = result.get("tool_result", {})
+                # Independent-review finding, 2026-09-17: was
+                # `state["tool_call_count"] = result.get("tool_call_count", ...)`
+                # -- an *assignment*, not a sum, so parallel dispatches
+                # (asyncio.gather above) silently clobbered each other's
+                # contribution instead of accumulating. See
+                # _v2_dispatch_tool's own "tool_call_delta" comment.
+                state["tool_call_count"] = state.get("tool_call_count", 0) + result.get("tool_call_delta", 0)
+                # Independent-review finding, 2026-09-17: the turn's overall
+                # disposition used to be decided purely from "did *any*
+                # tool call this turn leave a citation," ignoring every
+                # other tool call's own outcome -- a request with one
+                # successful call and one capability-gate-rejected/errored
+                # call still finalized as a flat "answered," identical to a
+                # turn where everything succeeded. Recorded per-call here,
+                # summarized into partially_answered/unsupported/error
+                # below, matching V1's own subtask_summary discipline
+                # (_finalize's execution_metadata) instead of a single
+                # citations-only proxy.
+                subtask_dispositions.append(tool_result.get("disposition", "error"))
+                all_citations.extend(tool_result.get("citations", []))
+                all_evidence.extend(result.get("evidence", []))
+                all_plans.extend(result.get("plan", []))
+                # Owner-reported, 2026-09-16: reconcile_doors_windows's own
+                # per-tag matched/mismatch breakdown (computed in
+                # _v2_dispatch_tool's reconciliation branch, same as V1's)
+                # never reached the final AgentResponse for V2 -- neither
+                # DecisionStory.tsx's reconciliation table nor the Findings
+                # tab (SPEC-M11) had anything to render, even though the
+                # underlying comparison ran and the answer text described it.
+                tool_result_value = tool_result.get("result_value")
+                if tool_result.get("disposition") == "answered":
+                    facts = self._numeric_tokens_from_result_value(tool_result_value)
+                    if facts:
+                        # Independent-review finding, 2026-09-17, third
+                        # pass: "does at least one real number appear
+                        # *somewhere* in the answer" was itself bypassable
+                        # -- confirmed live: a fake model answering "4
+                        # records were checked. There are 99999 doors, all
+                        # certified for 120 minutes" after a real
+                        # count_elements call returning 4 still passed,
+                        # since "4" is genuinely present, just not as the
+                        # actual claim about doors. Recording this tool
+                        # call's own entity terms alongside its expected
+                        # numbers lets the check additionally require that
+                        # wherever the answer names *this* entity next to a
+                        # number, that number is a real one -- not just
+                        # that a real number exists in the text somewhere.
+                        entity_terms = self._entity_terms_for(result.get("plan", [{}])[0].get("entity_type"))
+                        expected_numeric_facts.append((entity_terms, facts))
+                if tool_call.tool_name == "reconcile_doors_windows" and tool_result_value:
+                    all_reconciliation_items.extend(tool_result_value)
+                    # Owner-reported, 2026-09-16: this deployment's own real
+                    # quota is a modest 10 requests / 10,000 tokens per
+                    # minute (confirmed via `az cognitiveservices account
+                    # deployment list` -- GlobalStandard capacity=10) --
+                    # a real building's reconciliation can have several
+                    # dozen compared tags, and every one of them, matched
+                    # items included, was feeding straight back into this
+                    # same turn's *next* model call (the one composing the
+                    # final answer) as this tool's own result. The prose
+                    # `answer` this tool already produced faithfully
+                    # summarizes matched/mismatched counts; the model only
+                    # needs each *non-matched* item's own detail to phrase a
+                    # specific, correct answer, so only those are sent back
+                    # in full, with a bare count standing in for the rest.
+                    matched_count = sum(1 for item in tool_result_value if item.get("status") == "matched")
+                    tool_result_value = {
+                        "matched_count": matched_count,
+                        "non_matched_items": [item for item in tool_result_value if item.get("status") != "matched"],
+                    }
+                elif isinstance(tool_result_value, list) and len(tool_result_value) > _V2_TOOL_RESULT_LIST_CAP:
+                    # Owner-reported, 2026-09-16 (found live: a real 429 on
+                    # this deployment's raised 30K-token/minute quota, after
+                    # just two turns): the same unbounded-payload problem
+                    # found in reconcile_doors_windows also applies to any
+                    # other tool whose result is naturally a per-element
+                    # list -- get_element_properties matching a whole
+                    # IfcFurnishingElement category (85 real elements in
+                    # this project) sent every one of their full property
+                    # dicts back into this same turn's next model call. The
+                    # tool's own prose `answer` already states the total;
+                    # the model gets a representative sample plus a count
+                    # for the rest instead of paying for the entire list.
+                    # Owner decision, 2026-09-17: closes the same gap a
+                    # structured fact-binding rewrite would have (a
+                    # distinct-value/type/size claim drawn from only the
+                    # sample could be wrong even though sample_items and
+                    # total_count are each individually correct) -- but at
+                    # the data layer, not the output layer. V2 exists
+                    # specifically so the model can freely synthesize over
+                    # tool results rather than being limited to a closed,
+                    # pre-built set of operations; restricting the model's
+                    # *output* to only ever restate bound fields (as a
+                    # stricter fact-binding architecture would) would
+                    # reintroduce that same ceiling one layer up. Computed
+                    # from the full, untruncated list before capping, so
+                    # it stays exhaustive even when sample_items isn't.
+                    distinct_value_summary = self._distinct_value_summary(tool_result_value)
+                    tool_result_value = {
+                        "total_count": len(tool_result_value),
+                        "sample_items": tool_result_value[:_V2_TOOL_RESULT_LIST_CAP],
+                        "distinct_value_summary": distinct_value_summary,
+                        "note": (
+                            f"{len(tool_result_value) - _V2_TOOL_RESULT_LIST_CAP} further item(s) omitted for brevity; the total_count above is exact. "
+                            "sample_items is only a partial sample -- do not infer a distinct-value/type/size count from it alone. "
+                            "distinct_value_summary is computed from ALL items (not just the sample) and is the exact, exhaustive "
+                            "count of distinct values for fields with a small number of distinct values -- use it, not "
+                            "sample_items, whenever the question is about how many distinct values/types/sizes exist."
+                        ),
+                    }
+                messages.append({
+                    "role": "tool", "tool_call_id": tool_call.call_id,
+                    "content": json.dumps({
+                        "disposition": tool_result.get("disposition"), "answer": tool_result.get("answer"),
+                        "result_value": tool_result_value,
+                        # Owner-reported, 2026-09-17: e.g. a storey filter of
+                        # "第二层" (never translated to the model's own
+                        # "Level 2" naming) matched zero real elements --
+                        # correctly executed, but a bad filter, not a real
+                        # zero. Surfacing this warning gives the model a
+                        # chance to notice and retry with a corrected
+                        # filter instead of confidently reporting a wrong
+                        # count.
+                        "warnings": tool_result.get("warnings") or [],
+                    }, default=str),
+                })
+                yield {"type": "tool_status", "tool_name": tool_call.tool_name, "call_id": tool_call.call_id, "status": "completed"}
+        # SPEC-M16 Invariants: a hard, enforced cap -- never an unbounded loop.
+        self._audit(state, "v2_turn_error", "error", "V2 agent exceeded its bounded tool-call iteration limit without finalizing.", {"max_iterations": max_iterations}, planning_mode="tool_calling")
+        response = AgentResponse(
+            thread_id=thread_id, trace_id=trace_id, disposition=Disposition.ERROR,
+            answer_markdown=f"The request failed safely: exceeded the maximum of {max_iterations} tool-call rounds without reaching a final answer.",
+            verification=VerificationStatus(status="not_applicable", reason="Iteration limit exceeded before a final answer was reached."),
+            execution_metadata={
+                "engine": "v2", "model_call_count": state.get("model_call_count", 0), "tool_call_count": state.get("tool_call_count", 0),
+                "iterations": max_iterations, "planning_mode": "tool_calling",
+                "normalized_request": question, "subplans": all_plans, "source": self._v2_source_label(all_plans),
+            },
+        )
+        yield {"type": "final", "response": response}
+
+    @staticmethod
+    def _v2_source_label(all_plans: list[dict[str, Any]]) -> str | None:
+        """SPEC-M16 Decision Trace fix (owner-reported, 2026-09-16): mirrors
+        the "source" convention used above for V1's own multi-subplan
+        execution_metadata, so DecisionStory.tsx's Execution step reads the
+        same shape regardless of engine.
+        """
+        if any(plan.get("intent") == "reconciliation" for plan in all_plans):
+            return "ifc+pdf (reconciliation)"
+        distinct_sources = sorted({plan["source"] for plan in all_plans if plan.get("source")})
+        if len(distinct_sources) == 1:
+            return distinct_sources[0]
+        if len(distinct_sources) > 1:
+            return "multi_source"
+        return None
+
+    @staticmethod
+    def _numeric_tokens_from_result_value(value: Any) -> set[float]:
+        """Independent-review finding, 2026-09-17: the numbers a *correct*
+        answer to this one tool call could truthfully state, extracted
+        from the tool's own real return value -- not from anything the
+        model goes on to say. Deliberately narrow in scope: this is a
+        mechanical, numeric-only cross-check (does at least one real
+        number this tool actually produced show up in the model's final
+        prose), not a semantic fact-checker -- it catches a wrong count or
+        measurement (the reported "99999 doors" case, a real tool call
+        returning 4), it does not and cannot catch a fabricated
+        *non-numeric* claim layered onto a correct number (e.g. an invented
+        fire-rating attached to a correct door count). That gap is real and
+        not closed here; see this method's own caller for how the result
+        is used.
+
+        Owner-reported, 2026-09-17 (found live: a real space_distance
+        answer, e.g. a real 5.234 m centroid distance, phrased by the
+        model with different rounding -- "5.23 m" -- than this method's
+        first version pre-formatted): returns raw floats now, not
+        pre-rounded strings, so the caller can compare with a tolerance
+        instead of requiring an exact string match against one of a fixed
+        handful of decimal-place guesses. A real fabrication (99999 vs 4)
+        is nowhere near any reasonable tolerance; a model's own natural
+        rounding of a real measurement is.
+        """
+        numbers: set[float] = set()
+
+        def _add(number: float) -> None:
+            if number != number or number in (float("inf"), float("-inf")):  # noqa: PLR0124 (NaN check)
+                return
+            numbers.add(float(number))
+
+        if isinstance(value, bool):
+            return numbers
+        if isinstance(value, (int, float)):
+            _add(value)
+        elif isinstance(value, dict):
+            if "value_m" in value:  # aggregate_quantity/space_distance's own shape -- the headline measurement
+                _add(value["value_m"])
+                for key in ("eligible_count", "total_entity_count"):
+                    if isinstance(value.get(key), (int, float)):
+                        _add(value[key])
+            elif value and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in value.values()):
+                # group_elements_by_storey's own shape: {storey_name: count}.
+                # Every bucket's own count is a number a correct answer
+                # could truthfully state (the total, the winning storey's
+                # count, or any single storey named in the question).
+                for sub_value in value.values():
+                    _add(sub_value)
+                _add(sum(value.values()))
+            else:
+                # Independent-review finding, 2026-09-17, third pass:
+                # get_element_properties's own shape ({"element": {...},
+                # "storey": ..., "properties": {...flattened...}}) matched
+                # neither special case above, so this method returned an
+                # *empty* set for it -- silently disabling both consistency
+                # checks for every property-lookup answer (confirmed live:
+                # "Every door is 99999 metres high and fire certified" after
+                # a real get_element_properties call passed unchecked, since
+                # no expected numbers were ever recorded to check against).
+                # Recursing into every nested value pulls out whatever real
+                # numeric leaves the tool actually returned (heights,
+                # areas, express IDs, ...) as candidate real facts; this can
+                # only make the check more permissive (more real numbers to
+                # match against), never less correct.
+                for sub_value in value.values():
+                    numbers |= AgentService._numeric_tokens_from_result_value(sub_value)
+        elif isinstance(value, list):
+            if value and all(isinstance(item, dict) and "status" in item for item in value):
+                # reconcile_doors_windows's own shape: a list of per-tag
+                # comparison items, each carrying a "status" (matched/
+                # dimension_mismatch/missing_in_pdf/missing_in_ifc). The
+                # real fact a correct summary states here is normally a
+                # *count of items per status* ("6 matched, 1 mismatch"),
+                # which is not any single item's own width/height leaf
+                # value -- recursing into items alone (below) would leave
+                # those summary counts unrecognized as real numbers and
+                # reject a correct summary outright. Computed alongside,
+                # not instead of, each item's own leaf values.
+                from collections import Counter
+
+                for count in Counter(item.get("status") for item in value).values():
+                    _add(count)
+                _add(len(value))
+            for item in value:
+                numbers |= AgentService._numeric_tokens_from_result_value(item)
+        return numbers
+
+    @staticmethod
+    def _flatten_for_distinct_summary(obj: Any, prefix: str = "", depth: int = 0, max_depth: int = 3) -> dict[str, Any]:
+        """Dotted-path flattening of one list item's nested dict fields
+        (e.g. get_element_properties's {"element": {...}, "storey": ...,
+        "properties": {...}} -> {"element.entity_type": ..., "storey":
+        ..., "properties.Height": ...}), used only by
+        `_distinct_value_summary` below. List-valued fields are skipped
+        (too structurally varied to summarize safely); depth is bounded
+        to avoid runaway recursion on an unexpectedly deep shape.
+        """
+        flat: dict[str, Any] = {}
+        if depth >= max_depth or not isinstance(obj, dict):
+            return flat
+        for key, value in obj.items():
+            path = f"{prefix}.{key}" if prefix else key
+            if isinstance(value, dict):
+                flat.update(AgentService._flatten_for_distinct_summary(value, path, depth + 1, max_depth))
+            elif not isinstance(value, list):
+                flat[path] = value
+        return flat
+
+    @staticmethod
+    def _distinct_value_summary(items: list[Any], max_distinct: int = 20) -> dict[str, dict[str, int]]:
+        """Owner decision, 2026-09-17: closes the sample-truncation false-
+        completeness gap (independent review, third pass, P2 #5) at the
+        data layer instead of the output layer -- see this method's own
+        caller for why. Computed from the FULL list this tool call
+        actually matched, *before* it gets capped to
+        `_V2_TOOL_RESULT_LIST_CAP` sample items, so a "how many distinct
+        X" question can be answered exhaustively even when the raw
+        per-item sample sent to the model is not.
+
+        For every dotted-path field found across all items (see
+        `_flatten_for_distinct_summary`), returns {value: count} -- but
+        only for fields whose distinct-value count is small (2..
+        max_distinct): a field with exactly one distinct value across
+        every item was never at risk from sampling (it would already
+        appear in any non-empty sample), and a field with more distinct
+        values than max_distinct is almost always a per-item identifier
+        (a GlobalId, an express_id), not a meaningful "type/size" a user
+        would ask to enumerate -- summarizing it would just be noise.
+        """
+        from collections import defaultdict
+
+        per_key: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            for key, value in AgentService._flatten_for_distinct_summary(item).items():
+                if value is None:
+                    continue
+                per_key[key][str(value)] += 1
+        return {key: dict(counts) for key, counts in per_key.items() if 1 < len(counts) <= max_distinct}
+
+    @staticmethod
+    def _entity_terms_for(entity_type: str | None) -> frozenset[str]:
+        """Independent-review finding, 2026-09-17, third pass: the English
+        noun(s) a real answer about this entity type would actually use
+        ("door"/"doors" for IfcDoor), reusing the exact vocabulary
+        `ELEMENT_ALIASES` already teaches the router/model -- not a
+        separate, hand-maintained list that can drift from it. Lets the
+        consistency check look for *this specific claim* ("N doors")
+        rather than treating every number anywhere in the answer as
+        equally relevant.
+
+        English-only for now, a disclosed, real limitation: a Chinese
+        answer's own noun for the same entity ("门"/"扇") is not in this
+        set, so the proximity check below simply has nothing to bind to
+        for a Chinese answer and silently skips it -- the baseline
+        "some real number appears somewhere" check still applies to every
+        language equally, only this stricter half is English-only today.
+        """
+        if not entity_type:
+            return frozenset()
+        from app.agent.router import ELEMENT_ALIASES
+
+        terms = {alias for alias, canonical in ELEMENT_ALIASES.items() if canonical == entity_type and alias.isascii()}
+        terms.add(entity_type.removeprefix("Ifc").lower())
+        return frozenset(terms)
+
+    @staticmethod
+    def _narrative_consistent_with_tool_facts(answer_markdown: str, expected_numeric_facts: list[tuple[frozenset[str], set[float]]]) -> bool:
+        """Independent-review finding, 2026-09-17: this turn's own real
+        numbers vs. what the model's final prose actually says.
+
+        Two checks, both required, per tool call:
+
+        1. **Baseline (every language)**: at least one of this call's own
+           real numbers appears (within tolerance) somewhere in the
+           answer. Catches a model that never mentions the true value at
+           all.
+
+        2. **Entity-bound (English answers only -- see `_entity_terms_for`)**:
+           wherever the answer mentions this call's own entity noun next
+           to a number, that number must be one of the real ones. Catches
+           the specific bypass independent review found live: a fake
+           model answering "4 records were checked. There are 99999
+           doors, all certified for 120 minutes" after a real
+           count_elements call returning 4 passed check 1 alone (a real
+           "4" genuinely appears in the text), because check 1 never
+           verified *what* the "4" was actually claimed to describe --
+           only that a correct number existed somewhere. "99999" sits
+           directly next to "doors," the exact entity this tool call was
+           about, and does not match; check 2 catches that.
+
+        Neither check is a general semantic fact-checker (see
+        `_numeric_tokens_from_result_value`'s own docstring) -- a
+        sufficiently contrived answer that avoids ever placing a wrong
+        number near the entity noun (e.g. restates the claim in a
+        differently-worded clause with no noun nearby at all) can still
+        defeat check 2; only check 1's weaker guarantee then applies.
+        This is a real, disclosed boundary, not a claim of a complete
+        semantic verifier.
+
+        A whole-number expectation (a count) must match exactly -- "4
+        doors" vs "5 doors" is a real, meaningful discrepancy, not
+        rounding. A fractional expectation (a measurement) matches within
+        a small absolute tolerance, since a model naturally rounds a real
+        5.234 m distance to "5.23 m" or "5.2 m" when composing prose; that
+        is not fabrication and this check must not treat it as such.
+
+        Independent-review finding, 2026-09-17, third pass -- two real
+        bugs in how check 2 was applied, both confirmed live and fixed
+        here:
+
+        (a) **Decoy bypass.** "There are 99999 doors (4 checked)." used to
+        pass: the window around "doors" contains both "99999" and the
+        real "4", and the old rule only required *some* nearby number to
+        match ("if nearby_numbers and not any(...)"). A real value sitting
+        next to a fabricated one rescued it. Fixed by requiring *every*
+        nearby number to be individually explainable, not just one of
+        them.
+
+        (b) **Same-entity, different-scope false positive.** "The whole
+        project contains 4 doors. On the first floor there are 2 doors."
+        is a correct answer to two *separate* tool calls (project-wide
+        count=4, Level-01-filtered count=2) -- but checking each call's
+        own narrow expected set against *every* occurrence of the shared
+        noun "doors" rejected it: the "4 doors" call's own check saw the
+        unrelated "2" near a different "doors" mention and had nothing in
+        its own {4} to explain it. Multi-scope comparison in one answer is
+        V2's core value proposition, so this was a serious regression, not
+        an edge case. Fixed by first merging expected values across every
+        tool call that shares the same entity terms, then checking each
+        occurrence's nearby numbers against that *combined* set -- a
+        legitimate second scope's value is now itself part of what
+        "doors" is allowed to mean anywhere in the answer, while a value
+        that matches nothing in the combined set (99999) is still caught.
+
+        Owner-reported, 2026-09-17 (found live against the real Duplex
+        project): after a turn listing every entity type's own count
+        (IfcFurnishingElement=61, IfcMember=4, ..., IfcWindow=24, each
+        from its own count_elements call), the user asked "好了总和是多少?"
+        ("okay, what's the total?"). The model correctly re-called the
+        counts this turn (per its own system prompt: never state a number
+        not just received from a tool this turn) and answered with their
+        sum -- a real, mechanically verifiable arithmetic derivation over
+        this turn's own real numbers, not a new, ungrounded claim. Check 1
+        as written only accepted a value that was itself literally one
+        call's own returned number, so the correct total was rejected as
+        if it were fabricated -- this is exactly the class of "legitimate
+        synthesis over verified data" this system is supposed to allow
+        (owner decision, 2026-09-17: V2 exists so the model can freely
+        reason over tool results, not just restate them one at a time);
+        the check's own definition of "real" was too narrow, not the
+        model's freedom too broad. Fixed by additionally accepting the sum
+        of this turn's own whole-number, single-valued facts (a plain
+        count_elements-style scalar, not a multi-value shape like
+        aggregate_quantity/group_by, where "the one number to sum" isn't
+        well-defined) as a valid baseline value -- a real sum of real
+        counts, still mechanically checked, never an arbitrary allowance.
+        """
+        import re
+
+        def _matches(expected: float, actual: float) -> bool:
+            if float(expected).is_integer():
+                return actual == expected
+            return abs(actual - expected) < 0.05
+
+        answer_lower = answer_markdown.lower()
+        answer_numbers = [float(match) for match in re.findall(r"\d+(?:\.\d+)?", answer_markdown)]
+
+        # A real sum over this turn's own real per-call counts is a
+        # legitimate derivation, not a fabrication -- see this method's
+        # own docstring. Only whole-number, single-valued ("pure scalar")
+        # calls contribute: a multi-value shape (aggregate_quantity's own
+        # {value_m, eligible_count, ...}, group_by's per-bucket counts)
+        # has no single unambiguous "the" number to add, so those are left
+        # out rather than guessed at.
+        scalar_values = [next(iter(expected)) for _, expected in expected_numeric_facts if len(expected) == 1 and next(iter(expected)).is_integer()]
+        total_of_scalars = sum(scalar_values) if len(scalar_values) > 1 else None
+        answer_states_the_total = total_of_scalars is not None and any(_matches(total_of_scalars, actual) for actual in answer_numbers)
+
+        # Check 1: baseline presence, any language -- per tool call, not
+        # merged, so a call whose own value is never mentioned anywhere
+        # still fails even if some *other* call's value happens to appear
+        # -- except when the answer instead states the correct combined
+        # total of every scalar call this turn, which honestly accounts
+        # for this call's own contribution without repeating it verbatim.
+        for entity_terms, expected in expected_numeric_facts:
+            if answer_states_the_total and len(expected) == 1 and next(iter(expected)) in scalar_values:
+                continue
+            if not any(_matches(value, actual) for value in expected for actual in answer_numbers):
+                return False
+
+        # Check 2: entity-bound, merged by shared entity terms (see (b) above).
+        combined_by_entity: dict[frozenset[str], set[float]] = {}
+        for entity_terms, expected in expected_numeric_facts:
+            if not entity_terms:
+                continue
+            combined_by_entity.setdefault(entity_terms, set()).update(expected)
+
+        for entity_terms, combined_expected in combined_by_entity.items():
+            # A number within a short window of this entity's own noun must
+            # be one of the real values for *any* tool call about this
+            # entity this turn. A window of ~15 characters on each side
+            # comfortably covers "4 doors" / "there are 99999 doors" /
+            # "doors: 99999" without reaching into an unrelated sentence.
+            for term in entity_terms:
+                for match in re.finditer(re.escape(term), answer_lower):
+                    window = answer_lower[max(0, match.start() - 15): match.end() + 15]
+                    nearby_numbers = [float(n) for n in re.findall(r"\d+(?:\.\d+)?", window)]
+                    for actual in nearby_numbers:
+                        if not any(_matches(value, actual) for value in combined_expected):
+                            return False
+        return True
 
     @staticmethod
     def _citations(evidence: list[Evidence], state: GraphState) -> list[dict]:

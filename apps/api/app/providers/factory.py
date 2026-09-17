@@ -17,6 +17,7 @@ def get_text_provider(settings: Settings) -> ModelProvider:
             api_version=settings.azure_openai_api_version,
             deployment=settings.azure_openai_text_deployment,
             timeout_seconds=settings.model_call_timeout_seconds,
+            reasoning_effort=settings.v2_reasoning_effort,
         )
     return OpenAIProvider(settings.openai_api_key, settings.openai_text_model, settings.model_call_timeout_seconds)
 

@@ -1,6 +1,6 @@
 import React, { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { api, ApiAuthError, AuthedImage, ensureSessionId, setStoredApiKey } from "./apiClient";
+import { api, ApiAuthError, AuthedImage, ensureSessionId, setStoredApiKey, withAuthHeader } from "./apiClient";
 import { DecisionStory } from "./DecisionStory";
 import { Findings } from "./Findings";
 import { IfcViewer, ViewerStatus } from "./IfcViewer";
@@ -65,7 +65,10 @@ function App() {
   // deployment before this milestone, and any deployment that leaves
   // ADLS unset, has exactly this one implicit project). `projects` stays
   // empty in that mode too, so the selector below never renders.
-  const [projectId, setProjectId] = useState<string | undefined>(undefined);
+  // Owner-requested, 2026-09-17: default to the real Duplex project + V2
+  // engine for this local testing round, rather than the synthetic demo
+  // fixture on V1.
+  const [projectId, setProjectId] = useState<string | undefined>("duplex");
   const [projects, setProjects] = useState<ProjectOption[]>([]);
   // Bumped on every project switch; a request's response is discarded
   // (never applied to conversation/viewer/evidence state) if this counter
@@ -83,6 +86,43 @@ function App() {
   const [snapshot, setSnapshot] = useState<string | null>(null);
   const [snapshotCleared, setSnapshotCleared] = useState(false);
   const [sourcePreference, setSourcePreference] = useState<SourcePreference>("auto");
+  // SPEC-M16: "v1" (default) is today's engine, completely unaffected by
+  // this toggle -- submit() below is untouched. "v2" is the new,
+  // independent tool-calling agent (SS C), submitted via the separate
+  // submitV2() path so V1's own request/response handling never has to
+  // account for a second response shape (a streamed SSE turn instead of
+  // one JSON object).
+  // Owner-requested, 2026-09-17: default to V2 for this testing round.
+  const [engine, setEngine] = useState<"v1" | "v2">("v2");
+  // `question` is captured here (owner-reported, 2026-09-16): the user's
+  // own just-asked message must stay visible for the whole "thinking"
+  // period, not only reappear once the answer lands -- otherwise a
+  // multi-turn V2 conversation looks like it forgot what was just asked.
+  // Owner-reported, 2026-09-17: `statuses` used to be a bare `string[]`,
+  // matched by re-deriving the same label string on each update -- with
+  // several *same-named* tool calls in one turn (e.g.
+  // group_elements_by_storey called once per entity type, a real, common
+  // shape), a single "completed" event matched and flipped *every*
+  // "Calling X…" entry sharing that string, not just the one call that
+  // actually finished. Each status now carries a stable `id` (the tool
+  // call's own `call_id`, or the fixed id "thinking" for the "thinking"
+  // ping) so an update can target the exact entry it belongs to.
+  const [v2Streaming, setV2Streaming] = useState<{ question: string; statuses: { id: string; label: string }[]; answer: string } | null>(null);
+  // Owner-reported, 2026-09-16 (found live: a real Azure 429 mid-stream):
+  // submitV2's own catch block used to call setApiError without setting
+  // apiState, so the top-level banner (gated on apiState === "unavailable",
+  // below) never rendered it -- a failed V2 turn looked like the whole
+  // conversation had silently gone blank. Reusing apiState/apiError would
+  // be misleading here (that state also drives the top-of-page "API
+  // unavailable" status label for the *whole app*, not one turn), so V2
+  // gets its own turn-scoped error surfaced inline in the conversation.
+  // Carries `question` too (owner-reported, 2026-09-16, second round): the
+  // v2Streaming block that had been showing the user's own message is
+  // cleared to null in submitV2's `finally` before this renders, so on a
+  // failed turn the question needs its own copy here or it vanishes along
+  // with v2Streaming, leaving the error bubble with no visible context for
+  // what was actually asked.
+  const [v2Error, setV2Error] = useState<{ question: string; message: string } | null>(null);
   const [tab, setTab] = useState<WorkspaceTab>("bim");
   const [drawingZoom, setDrawingZoom] = useState(1);
   const [drawingEvidence, setDrawingEvidence] = useState<{ bbox?: number[]; board?: string; field?: string; page?: number; document?: string; localized?: boolean } | null>(null);
@@ -199,6 +239,153 @@ function App() {
     } finally { window.clearInterval(progressTimer); controllerRef.current = null; setBusy(false); setActiveRequestId(null); setRequestStage("idle"); }
   }
 
+  // SPEC-M16: V2's own submit path -- a separate function, not a branch
+  // inside submit() above, so V1's request/response handling (a single
+  // JSON object) never has to account for V2's streamed SSE shape.
+  // Consumes the response body as a raw stream (fetch + ReadableStream,
+  // not EventSource, which cannot POST or carry the auth header this app
+  // needs) and renders tool-use status lines and answer tokens as they
+  // arrive, then folds the final event into the same `turns` list V1
+  // uses, labeled by engine so a benchmark comparison is legible without
+  // cross-referencing the audit trail.
+  async function submitV2(event: FormEvent) {
+    event.preventDefault();
+    if (!question.trim() || busy) return;
+    const askedQuestion = question.trim();
+    // Independent-review finding, 2026-09-17: unlike submit() above,
+    // this never captured a switch-sequence snapshot or wired an
+    // AbortController -- switchProject's own `controllerRef.current?.abort()`
+    // call had nothing to abort, so a V2 response that was already on its
+    // way back from a project the user has since switched away from
+    // still landed: setThreadId, turns, and trace all applied
+    // unconditionally once the stream naturally finished. Sharing
+    // `controllerRef` with submit() is safe (the engine toggle plus
+    // `busy` gating means only one of the two is ever in flight), and is
+    // what lets switchProject's existing abort call reach this fetch too.
+    const switchSeqAtStart = switchSeqRef.current;
+    const controller = new AbortController();
+    controllerRef.current = controller;
+    setBusy(true);
+    setV2Error(null);
+    setV2Streaming({ question: askedQuestion, statuses: [], answer: "" });
+    setQuestion("");
+    try {
+      const response = await fetch("/api/v1/chat", withAuthHeader({
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          thread_id: threadId, project_id: projectId, question: askedQuestion, engine: "v2",
+          // Independent-review finding, 2026-09-17: this request never
+          // carried viewer_context or source_preference at all (V1's own
+          // submit() above sends both) -- inspect_current_view had no
+          // selection/snapshot to work with even when the user had
+          // already selected an element or captured a view, and the
+          // Source control's own choice was silently not honored for V2.
+          source_preference: sourcePreference,
+          viewer_context: {
+            selected_global_ids: selected?.globalId ? [selected.globalId] : [],
+            selected_express_ids: selected?.expressId === undefined ? [] : [selected.expressId],
+            selected_entity_type: selected?.type || null, selected_display_name: selected?.name || null,
+            camera_pose: {}, snapshot_id: snapshot ? `snapshot-${Date.now()}` : null,
+            screenshot_base64: snapshot ? snapshot.split(",")[1] : null,
+            selection_cleared: selectionCleared,
+            snapshot_cleared: snapshotCleared,
+            target_global_id: selected?.globalId || null,
+            target_entity_type: selected?.type || null,
+            target_visible: selected?.type === "IfcStair" || selected?.type === "IfcStairFlight",
+          },
+        }),
+        signal: controller.signal,
+      }));
+      if (!response.ok || !response.body) throw new Error(`V2 request failed (${response.status}).`);
+      const newThreadId = response.headers.get("X-Thread-Id") || threadId;
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let finalResponse: Response | null = null;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          const event = JSON.parse(line.slice("data: ".length));
+          if (event.type === "thinking") {
+            // SPEC-M16 SS E: the tool-selection round cannot itself be
+            // streamed (it must be fully received before its arguments
+            // are parseable) -- real measurement found this is most of a
+            // turn's wall time. An immediate "thinking" line is the
+            // honest mitigation: something visible right away, not
+            // several seconds of silence before the first real status.
+            //
+            // Owner-reported, 2026-09-17: this used to *replace* the
+            // whole statuses array with a bare ["Thinking…"] -- fine for
+            // the very first ping (nothing to lose yet), but a *later*
+            // "thinking" ping (fired again when composing the final
+            // answer, after this turn's own tool calls already
+            // completed) wiped every "X ✓" line the user had just watched
+            // finish, making the turn look like it had reset back to
+            // square one instead of having made real progress. Now
+            // updates (or adds) only the "thinking" entry itself, by id,
+            // leaving completed tool statuses visible alongside it.
+            setV2Streaming((current) => current && {
+              ...current,
+              statuses: [...current.statuses.filter((s) => s.id !== "thinking"), { id: "thinking", label: "Thinking…" }],
+            });
+          } else if (event.type === "tool_status") {
+            setV2Streaming((current) => current && {
+              ...current,
+              statuses: event.status === "started"
+                ? [...current.statuses.filter((s) => s.id !== "thinking"), { id: event.call_id, label: `Calling ${event.tool_name}…` }]
+                : current.statuses.map((s) => s.id === event.call_id ? { id: s.id, label: `${event.tool_name} ✓` } : s),
+            });
+          } else if (event.type === "answer_chunk") {
+            setV2Streaming((current) => current && { ...current, statuses: current.statuses.filter((s) => s.id !== "thinking"), answer: current.answer + event.text });
+          } else if (event.type === "final") {
+            finalResponse = event.response as Response;
+          } else if (event.type === "error") {
+            throw new Error(event.message);
+          }
+        }
+      }
+      if (finalResponse) {
+        // Independent-review finding, 2026-09-17: applied unconditionally
+        // before this check existed -- a response that finished after the
+        // user had already switched projects (switchProject bumps
+        // switchSeqRef precisely so a stale response can be told apart
+        // from a current one) would still overwrite the *new* project's
+        // thread id and append its own turn/trace into the *new*
+        // project's conversation. Mirrors submit()'s own guard above.
+        if (switchSeqRef.current !== switchSeqAtStart) return;
+        setThreadId(newThreadId || undefined);
+        // Owner-reported, 2026-09-16: the Decision Trace panel showed
+        // "No plan recorded"/empty Question/Execution detail for V2 turns
+        // -- V2's own _audit() calls already write into the same audit
+        // store V1's do (AgentService._audit is shared, unchanged), this
+        // was purely a missing fetch on the frontend side. Mirrors
+        // submit()'s own V1 call to the same endpoint exactly.
+        let responseTrace: TraceEvent[] = [];
+        try { responseTrace = await api<TraceEvent[]>(`/api/v1/traces/${finalResponse.trace_id}`); } catch (error) { console.warn("V2 trace fetch failed", error); }
+        if (switchSeqRef.current !== switchSeqAtStart) return;
+        setTurns((current) => [...current, {
+          id: finalResponse!.trace_id, user: askedQuestion, assistant: finalResponse!,
+          timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }), trace: responseTrace,
+        }]);
+        setTrace(responseTrace);
+      }
+    } catch (error) {
+      if ((error as Error).name !== "AbortError") {
+        console.error(error);
+        setV2Error({ question: askedQuestion, message: (error as Error).message });
+      }
+    } finally {
+      controllerRef.current = null;
+      setBusy(false);
+      setV2Streaming(null);
+    }
+  }
+
   async function stopRequest() {
     if (!activeRequestId) return;
     const requestId = activeRequestId;
@@ -224,7 +411,7 @@ function App() {
   // the same textarea. newConversation() is the actual "start clean"
   // action (called directly, and by switchProject below), so it -- not
   // submit()'s own success path -- is the right place to guarantee this.
-  function newConversation() { setThreadId(undefined); setTurns([]); setTrace([]); setSelected(null); setSelectionCleared(false); setSnapshot(null); setSnapshotCleared(false); setSourcePreference("auto"); setDrawingEvidence(null); setQuestion(""); }
+  function newConversation() { setThreadId(undefined); setTurns([]); setTrace([]); setSelected(null); setSelectionCleared(false); setSnapshot(null); setSnapshotCleared(false); setSourcePreference("auto"); setDrawingEvidence(null); setQuestion(""); setV2Error(null); }
 
   function switchProject(nextProjectId: string) {
     // OD-40: switching projects implicitly starts a new conversation (the
@@ -312,6 +499,18 @@ function App() {
     <div className="top-controls">
       {projects.length > 0 && <label>Project <select value={projectId || "demo"} onChange={(e) => switchProject(e.target.value)}>{projects.map((p) => <option key={p.project_id} value={p.project_id}>{p.display_name}</option>)}</select></label>}
       <label>Source <select value={sourcePreference} onChange={(e) => setSourcePreference(e.target.value as SourcePreference)}><option value="auto">Auto</option><option value="ifc">IFC Model</option><option value="pdf">Engineering Drawing</option><option value="viewer_snapshot">Current Viewer Snapshot</option></select></label>
+      {/* SPEC-M16: explicit, visible per-question engine choice -- never
+          automatic/silent routing between V1 and V2 (this spec's own
+          Invariant). Owner-requested, 2026-09-17: the *frontend's own*
+          initial selection now defaults to V2 + the real Duplex project
+          for this testing round (see the `engine`/`projectId` useState
+          calls above) -- this is purely this page's own starting UI state,
+          not the backend's own default: `ChatRequest.engine`'s Pydantic
+          default stays "v1" (SPEC-M16's own Invariant: every existing
+          caller that omits `engine` keeps V1's byte-for-byte-unchanged
+          behavior), so nothing here weakens that guarantee for any other
+          caller of this API. */}
+      <label title="V1: today's engine. V2: the new independent tool-calling agent (beta) -- pick either per question to compare them.">Engine <select value={engine} onChange={(e) => setEngine(e.target.value as "v1" | "v2")}><option value="v1">V1 (current)</option><option value="v2">V2 (agent, beta)</option></select></label>
       <button type="button" onClick={newConversation}>New conversation</button><button type="button" onClick={() => { setSelected(null); setSelectionCleared(true); setHighlightedIds(new Set()); }}>Clear selection</button><button type="button" onClick={() => { setSnapshot(null); setSnapshotCleared(true); }}>Clear snapshot</button>
     </div>
     <section className="workspace">
@@ -329,7 +528,30 @@ function App() {
         {tab === "snapshot" && <section className="snapshot"><h2>Viewer Snapshot</h2>{snapshot ? <img src={snapshot} alt="Captured IFC viewer context" /> : <p className="empty">Capture a BIM view to enable image-grounded inspection.</p>}<p>Selected: {selected?.globalId || "none"}</p></section>}
         {tab === "findings" && <Findings projectId={projectId} />}
       </aside>
-      <section className="chat"><h2>Conversation</h2><div className="messages" ref={timelineRef}>{turns.length === 0 ? <p className="empty">Ask a BIM, drawing, or current-view question. Auto chooses the source; overrides remain in technical details.</p> : turns.map((turn) => <React.Fragment key={turn.id}><div className="message-row user"><article className="message user-message"><div className="message-meta"><span>User</span><time>{turn.timestamp}</time></div><p>{turn.user}</p></article></div><div className="message-row assistant"><article className={`message assistant-message ${turn.assistant.disposition}`}><div className="message-meta"><span>Assistant</span><span>{turn.assistant.disposition.replace(/_/g, " ")}</span><span className={turn.assistant.verification.status}>{turn.assistant.verification.status}</span><time>{turn.timestamp}</time></div><p>{renderAnswerMarkdown(turn.assistant.answer_markdown)}</p><details className="technical-details"><summary>Technical details</summary><small>Source: {turn.assistant.execution_metadata.source || "—"} · Planner: {turn.assistant.execution_metadata.planning_mode || "—"} · Models: {turn.assistant.execution_metadata.model_call_count || 0} · Tools: {turn.assistant.execution_metadata.tool_call_count || 0} · Trace: {turn.assistant.trace_id}</small></details></article></div></React.Fragment>)}</div><form onSubmit={submit}><textarea value={question} onChange={(e) => setQuestion(e.target.value)} placeholder="e.g. How many doors are in the project?" rows={3} /><div className="submit-row"><button disabled={busy}>{busy ? `Checking evidence… ${requestStage}` : "Ask with audit trail"}</button>{busy && <button type="button" className="stop-button" onClick={stopRequest}>Stop request</button>}</div></form></section>
+      <section className="chat"><h2>Conversation</h2><div className="messages" ref={timelineRef}>{turns.length === 0 ? <p className="empty">Ask a BIM, drawing, or current-view question. Auto chooses the source; overrides remain in technical details.</p> : turns.map((turn) => <React.Fragment key={turn.id}><div className="message-row user"><article className="message user-message"><div className="message-meta"><span>User</span><time>{turn.timestamp}</time></div><p>{turn.user}</p></article></div><div className="message-row assistant"><article className={`message assistant-message ${turn.assistant.disposition}`}><div className="message-meta"><span>Assistant</span>{/* SPEC-M16: labeled so a V1/V2 benchmark comparison is legible without cross-referencing the audit trail. */}<span className="engine-badge">{turn.assistant.execution_metadata.engine === "v2" ? "V2 (agent)" : "V1"}</span><span>{turn.assistant.disposition.replace(/_/g, " ")}</span><span className={turn.assistant.verification.status}>{turn.assistant.verification.status}</span><time>{turn.timestamp}</time></div><p>{renderAnswerMarkdown(turn.assistant.answer_markdown)}</p>{turn.assistant.verification.status === "unverified" && <p className="unverified-caveat">⚠ This answer's own numbers could not be fully confirmed against this turn's tool results — please double-check before relying on it.</p>}<details className="technical-details"><summary>Technical details</summary><small>Source: {turn.assistant.execution_metadata.source || "—"} · Planner: {turn.assistant.execution_metadata.planning_mode || "—"} · Models: {turn.assistant.execution_metadata.model_call_count || 0} · Tools: {turn.assistant.execution_metadata.tool_call_count || 0} · Latency: {turn.assistant.execution_metadata.latency_ms ? `${turn.assistant.execution_metadata.latency_ms} ms` : "—"} · Trace: {turn.assistant.trace_id}</small></details></article></div></React.Fragment>)}
+        {/* SPEC-M16 SS F: V2's own live progress -- tool-use status lines
+            clear/tick as calls resolve, then the final answer's tokens
+            append as they stream in, verified live in the browser (this
+            session's own established standard), not just unit-tested. */}
+        {/* Owner-reported, 2026-09-16: the user's own just-asked message
+            used to disappear for the whole "thinking" period (only
+            re-appearing once the answer arrived, since it was added to
+            `turns` all at once at the very end) -- rendered here
+            immediately instead, from the same `v2Streaming.question`
+            captured the instant submitV2 starts. */}
+        {v2Streaming && <React.Fragment><div className="message-row user"><article className="message user-message"><div className="message-meta"><span>User</span></div><p>{v2Streaming.question}</p></article></div><div className="message-row assistant"><article className="message assistant-message v2-streaming"><div className="message-meta"><span>Assistant</span><span className="engine-badge">V2 (agent)</span><span>working…</span></div>{v2Streaming.statuses.map((status) => <p key={status.id} className="v2-tool-status">{status.label}</p>)}{v2Streaming.answer && <p>{renderAnswerMarkdown(v2Streaming.answer)}</p>}</article></div></React.Fragment>}
+        {/* Owner-reported, 2026-09-16: a V2 turn that fails mid-stream (a
+            real Azure 429 during live testing surfaced this) used to leave
+            the conversation panel looking silently empty -- v2Streaming is
+            cleared in submitV2's `finally` before this renders, so the
+            error needs its own turn-scoped slot rather than reusing
+            v2Streaming's block. Second round, same day: v2Error's own
+            question was still missing (only the error bubble showed, with
+            no visible trace of what had been asked) -- v2Error now carries
+            its own `question` copy, rendered as its own user-message row
+            here, the same way v2Streaming's does above. */}
+        {v2Error && <React.Fragment><div className="message-row user"><article className="message user-message"><div className="message-meta"><span>User</span></div><p>{v2Error.question}</p></article></div><div className="message-row assistant"><article className="message assistant-message error"><div className="message-meta"><span>Assistant</span><span className="engine-badge">V2 (agent)</span><span>error</span></div><p className="runtime-error" role="alert">{v2Error.message}</p></article></div></React.Fragment>}
+      </div><form onSubmit={engine === "v2" ? submitV2 : submit}><textarea value={question} onChange={(e) => setQuestion(e.target.value)} placeholder="e.g. How many doors are in the project?" rows={3} /><div className="submit-row"><button disabled={busy}>{busy ? (engine === "v2" ? "Agent working…" : `Checking evidence… ${requestStage}`) : "Ask with audit trail"}</button>{busy && engine === "v1" && <button type="button" className="stop-button" onClick={stopRequest}>Stop request</button>}</div></form></section>
       <aside className="inspector"><DecisionStory latest={latest} trace={trace} projectId={projectId} onOpenCitation={openCitation} /></aside>
     </section>
   </main>;

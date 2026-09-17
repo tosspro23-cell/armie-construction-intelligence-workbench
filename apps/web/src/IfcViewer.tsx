@@ -176,6 +176,15 @@ export function IfcViewer({ onSelection, onSnapshot, onStatus, highlightedGlobal
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const controlsRef = useRef<OrbitControls | null>(null);
   const elementMeshesRef = useRef<Map<string, THREE.Mesh>>(new Map());
+  // Owner-reported, 2026-09-16: jumping to a citation for a small element
+  // (e.g. a single beam) framed the camera so close the highlighted item
+  // filled the whole view with no surrounding building visible -- "拉得
+  // 特别近，基本上就是看不清楚的，是个什么东西". The whole scene's own
+  // bounding diagonal (computed once in loadProjection below) is kept
+  // here so the highlight fly-to effect can use it as a floor: never
+  // frame *closer* than a fraction of the whole building's own size,
+  // regardless of how small the highlighted element itself is.
+  const sceneSizeRef = useRef<number>(20);
 
   const publishStatus = (next: ViewerStatus) => {
     setStatus(next);
@@ -242,11 +251,22 @@ export function IfcViewer({ onSelection, onSnapshot, onStatus, highlightedGlobal
       if (mesh && camera && controls) {
         const box = mesh.geometry.boundingBox ?? new THREE.Box3().setFromObject(mesh);
         const center = box.getCenter(new THREE.Vector3());
-        const size = Math.max(box.getSize(new THREE.Vector3()).length(), 1.5);
+        const elementSize = Math.max(box.getSize(new THREE.Vector3()).length(), 1.5);
+        // Owner-reported, 2026-09-16: a small element's own bounding size
+        // (e.g. a single structural beam) put the camera so close nothing
+        // but that one item filled the frame, with no surrounding
+        // building visible to recognize what it even was. The distance
+        // now also has a floor of a fraction of the *whole scene's* own
+        // bounding diagonal (sceneSizeRef, set once in loadProjection), so
+        // a small highlighted element is always framed with enough of the
+        // real building around it to be legible -- larger elements (a
+        // room-sized IfcSpace, D-056) are unaffected, since their own
+        // elementSize * 1.8 already exceeds this floor.
+        const distance = Math.max(elementSize * 1.8, sceneSizeRef.current * 0.35);
         controls.target.copy(center);
         const direction = camera.position.clone().sub(center).normalize();
         if (direction.lengthSq() === 0) direction.set(0.6, 0.5, 0.6).normalize();
-        camera.position.copy(center).add(direction.multiplyScalar(size * 1.8));
+        camera.position.copy(center).add(direction.multiplyScalar(distance));
         camera.updateProjectionMatrix();
         controls.update();
       }
@@ -364,6 +384,7 @@ export function IfcViewer({ onSelection, onSnapshot, onStatus, highlightedGlobal
         });
         const center = bounds.getCenter(new THREE.Vector3());
         const size = Math.max(bounds.getSize(new THREE.Vector3()).length(), 1);
+        sceneSizeRef.current = size;
         controls.target.copy(center);
         camera.position.copy(center).add(new THREE.Vector3(size * 0.9, size * 0.65, size * 0.9));
         camera.near = Math.max(size / 1000, 0.01);

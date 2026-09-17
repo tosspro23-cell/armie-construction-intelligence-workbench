@@ -100,7 +100,16 @@ input, textarea { width: 100%; background: #0b1020; color: #f6f8ff; border: 1px 
 .message-meta time { margin-left: auto; color: #8190ad; text-transform: none; }
 .technical-details { margin-top: 8px; color: #a8b4cf; font-size: .78rem; }
 .technical-details summary { cursor: pointer; color: #9fbfff; }
-.passed { color: #8ff0b1; } .failed { color: #ff9696; } .not_applicable { color: #d6c17a; }
+.verified { color: #8ff0b1; } .failed { color: #ff9696; } .not_applicable { color: #d6c17a; } .unverified { color: #ffb454; }
+/* D-062: a caught narrative-consistency mismatch is disclosed, not
+   withheld -- a small caveat line under the answer, not a full-size
+   banner, since it is a possibility to double-check, not a confirmed
+   error. */
+.unverified-caveat { margin: 6px 0 0; color: #ffb454; font-size: .74rem; }
+/* SPEC-M16: V1/V2 engine labeling + V2's own live tool-use progress. */
+.engine-badge { padding: 1px 6px; border-radius: 6px; background: #24345c; color: #bcd2ff; font-size: .68rem; letter-spacing: .02em; }
+.v2-streaming { opacity: .92; }
+.v2-tool-status { margin: 4px 0 0; color: #8ab9ff; font-size: .82rem; font-style: italic; }
 form { margin-top: 16px; display: grid; gap: 10px; position: sticky; bottom: 0; padding-top: 10px; background: #121a30; z-index: 2; }
 .submit-row { display: flex; gap: 8px; align-items: center; }
 .stop-button { background: #ff9696; color: #240d14; }
@@ -171,9 +180,10 @@ button:disabled { opacity: .6; cursor: wait; }
 .evidence-jump { display: block; margin-top: 8px; padding: 0; background: none; border: none; color: #7eafff; font-size: .74rem; cursor: pointer; text-align: left; }
 .evidence-jump:hover { text-decoration: underline; }
 .verification-reason { padding: 8px 10px; border-radius: 8px; background: #0c1326; border-left: 3px solid #8190ad; }
-.verification-reason.passed { border-left-color: #8ff0b1; }
+.verification-reason.verified { border-left-color: #8ff0b1; }
 .verification-reason.failed { border-left-color: #ff9696; }
 .verification-reason.not_applicable { border-left-color: #d6c17a; }
+.verification-reason.unverified { border-left-color: #ffb454; }
 pre { max-width: 100%; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: .75rem; }
 @media (max-width: 1100px) { .workspace { grid-template-columns: 1fr; } .ifc-viewer, .viewer-host { min-height: 300px; } }
 

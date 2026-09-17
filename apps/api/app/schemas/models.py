@@ -142,6 +142,12 @@ class ChatRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
     viewer_context: ViewerContext | None = None
     source_preference: Literal["auto", "ifc", "pdf", "viewer_snapshot"] = "auto"
+    # SPEC-M16: "v1" (default, every caller from before this milestone) is
+    # today's heuristic-fast-path + semantic-planner engine, byte-for-byte
+    # unchanged. "v2" is the new, fully independent tool-calling agent --
+    # an explicit, visible per-question choice (the workbench's own engine
+    # toggle), never an automatic/silent substitution for v1.
+    engine: Literal["v1", "v2"] = "v1"
 
 
 class FindingTransitionRequest(BaseModel):
@@ -238,7 +244,12 @@ class QueryPlan(BaseModel):
     expected_result_shape: Literal["scalar_count", "grouped_counts", "single_group_extremum", "list", "properties", "element_identity", "element_storey", "element_properties", "document_value", "visual_claim", "scalar_measurement", "clarification"] | None = None
     requested_field: str | None = None
     rationale: str
-    planning_mode: Literal["heuristic", "llm", "context"] = "heuristic"
+    # SPEC-M16: "tool_calling" marks a plan V2's tool-calling agent built
+    # from a model-requested tool call, distinct from "llm" (V1's
+    # single-shot structured-output semantic planner) -- so the Decision
+    # Trace can honestly show which engine, and which planning mechanism,
+    # actually produced a given plan.
+    planning_mode: Literal["heuristic", "llm", "context", "tool_calling"] = "heuristic"
     rule_id: str | None = None
     matched_signals: list[str] = Field(default_factory=list)
     match_status: Literal["complete", "partial", "unknown"] = "unknown"
@@ -344,7 +355,38 @@ class VerifierResult(BaseModel):
 
 
 class VerificationStatus(BaseModel):
-    status: Literal["passed", "failed", "not_applicable"]
+    # Owner-requested, 2026-09-17: "passed" -> "verified" -- a GPT
+    # independent review noted "passed" reads as a weaker claim than what
+    # this status actually asserts (every stated fact traced to a real,
+    # checked source), and that ambiguity was part of why a purely
+    # structural check (a tool call happened) could be mistaken for actual
+    # content verification. Renamed the value everywhere it's constructed
+    # or compared -- schema, verifiers.py, graph.py, DecisionStory.tsx's
+    # CSS class, and every test asserting this literal.
+    #
+    # Owner decision, 2026-09-17: "unverified" added -- V2's own numeric
+    # narrative-consistency check (graph.py's
+    # `_narrative_consistent_with_tool_facts`) used to hard-fail the whole
+    # turn (disposition=error, answer withdrawn) whenever it could not
+    # confirm the model's final prose matched this turn's own tool
+    # results. This turned out to have a worse cost/benefit balance than
+    # it looked: every *confirmed* catch of this check, across three
+    # rounds of independent review, was against a deliberately scripted
+    # adversarial test double -- never a real fabrication from the actual
+    # model in live use -- while the check's own false-positive rate
+    # against real live usage was confirmed twice (a natural rounding of a
+    # real measurement, and a correct sum of this turn's own real counts).
+    # A construction/BIM decision-support tool where "the user shares
+    # final responsibility for judgment calls" (see project memory) is
+    # better served by disclosing an unconfirmed claim than by silently
+    # withdrawing a very possibly-correct answer. "unverified" carries the
+    # answer through instead of discarding it -- the UI surfaces it as a
+    # small caveat, not a blocked turn. `failed` is kept for a
+    # categorically different, non-probabilistic case (a truncated/
+    # content-filtered response, `finish_reason in {"length",
+    # "content_filter"}`) where the response actually is incomplete, not
+    # merely unconfirmed.
+    status: Literal["verified", "failed", "not_applicable", "unverified"]
     verifier_results: list[VerifierResult] = Field(default_factory=list)
     reason: str | None = None
 

@@ -10,9 +10,10 @@ real injection seam stays under test.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
-from typing import Any, TypeVar
+from dataclasses import dataclass, field
+from typing import Any, AsyncIterator, TypeVar
 
+from app.providers.base import AnswerChunkEvent, ToolCallEvent, TurnCompleteEvent
 from pydantic import BaseModel
 
 T = TypeVar("T", bound=BaseModel)
@@ -22,11 +23,35 @@ T = TypeVar("T", bound=BaseModel)
 class RecordedCall:
     """One call made against a :class:`FakeModelProvider`."""
 
-    kind: str  # "structured" | "vision_structured"
+    kind: str  # "structured" | "vision_structured" | "stream_turn"
     purpose: str
     prompt: str
-    response_model: type[BaseModel]
+    response_model: type[BaseModel] | None = None
     image_base64: str | None = None
+
+
+@dataclass
+class ScriptedToolCalls:
+    """SPEC-M16: script a ``stream_turn`` response requesting one or more
+    tool calls, e.g. ``ScriptedToolCalls([("count_elements", {"entity_type": "IfcDoor"})])``.
+    """
+
+    calls: list[tuple[str, dict[str, Any]]]
+
+
+@dataclass
+class ScriptedAnswer:
+    """SPEC-M16: script a ``stream_turn`` response streaming a final answer
+    as the given chunks, e.g. ``ScriptedAnswer(["The project ", "contains 4 doors."])``.
+
+    ``finish_reason`` defaults to ``None`` (a normal stop); pass
+    ``"length"`` or ``"content_filter"`` to script the truncated/blocked-
+    mid-answer case ``invoke_v2`` treats as a hard failure (see
+    `TurnCompleteEvent.finish_reason`'s own docstring).
+    """
+
+    chunks: list[str] = field(default_factory=list)
+    finish_reason: str | None = None
 
 
 async def sleep_past_deadline(seconds: float, *, then: BaseException | BaseModel) -> Any:
@@ -100,3 +125,26 @@ class FakeModelProvider:
             response_model=response_model, image_base64=image_base64,
         ))
         return await self._resolve(purpose)
+
+    async def stream_turn(
+        self, *, messages: list[dict[str, Any]], tools: list[dict[str, Any]], purpose: str,
+    ) -> AsyncIterator[AnswerChunkEvent | ToolCallEvent | TurnCompleteEvent]:
+        """SPEC-M16: script one turn with :class:`ScriptedToolCalls` or
+        :class:`ScriptedAnswer`, queued via ``script(purpose, ...)`` exactly
+        like every other purpose this fake already supports.
+        """
+        self.calls.append(RecordedCall(kind="stream_turn", purpose=purpose, prompt=str(messages)))
+        item = await self._resolve(purpose)
+        if isinstance(item, ScriptedToolCalls):
+            events = [ToolCallEvent(call_id=f"call_{index}", tool_name=name, arguments=arguments) for index, (name, arguments) in enumerate(item.calls)]
+            yield TurnCompleteEvent(tool_calls=events, raw_assistant_message={
+                "role": "assistant",
+                "tool_calls": [{"id": event.call_id, "type": "function", "function": {"name": event.tool_name, "arguments": "{}"}} for event in events],
+            })
+            return
+        if isinstance(item, ScriptedAnswer):
+            for chunk in item.chunks:
+                yield AnswerChunkEvent(text=chunk)
+            yield TurnCompleteEvent(tool_calls=[], raw_assistant_message={"role": "assistant", "content": "".join(item.chunks)}, finish_reason=item.finish_reason)
+            return
+        raise AssertionError(f"FakeModelProvider.stream_turn expected a ScriptedToolCalls or ScriptedAnswer for purpose={purpose!r}, got {item!r}")
