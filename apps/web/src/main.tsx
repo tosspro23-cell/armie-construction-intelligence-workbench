@@ -65,7 +65,10 @@ function App() {
   // deployment before this milestone, and any deployment that leaves
   // ADLS unset, has exactly this one implicit project). `projects` stays
   // empty in that mode too, so the selector below never renders.
-  const [projectId, setProjectId] = useState<string | undefined>(undefined);
+  // Owner-requested, 2026-09-17: default to the real Duplex project + V2
+  // engine for this local testing round, rather than the synthetic demo
+  // fixture on V1.
+  const [projectId, setProjectId] = useState<string | undefined>("duplex");
   const [projects, setProjects] = useState<ProjectOption[]>([]);
   // Bumped on every project switch; a request's response is discarded
   // (never applied to conversation/viewer/evidence state) if this counter
@@ -89,7 +92,8 @@ function App() {
   // submitV2() path so V1's own request/response handling never has to
   // account for a second response shape (a streamed SSE turn instead of
   // one JSON object).
-  const [engine, setEngine] = useState<"v1" | "v2">("v1");
+  // Owner-requested, 2026-09-17: default to V2 for this testing round.
+  const [engine, setEngine] = useState<"v1" | "v2">("v2");
   // `question` is captured here (owner-reported, 2026-09-16): the user's
   // own just-asked message must stay visible for the whole "thinking"
   // period, not only reappear once the answer lands -- otherwise a
@@ -427,7 +431,15 @@ function App() {
       <label>Source <select value={sourcePreference} onChange={(e) => setSourcePreference(e.target.value as SourcePreference)}><option value="auto">Auto</option><option value="ifc">IFC Model</option><option value="pdf">Engineering Drawing</option><option value="viewer_snapshot">Current Viewer Snapshot</option></select></label>
       {/* SPEC-M16: explicit, visible per-question engine choice -- never
           automatic/silent routing between V1 and V2 (this spec's own
-          Invariant). Defaults to V1 every time the app loads. */}
+          Invariant). Owner-requested, 2026-09-17: the *frontend's own*
+          initial selection now defaults to V2 + the real Duplex project
+          for this testing round (see the `engine`/`projectId` useState
+          calls above) -- this is purely this page's own starting UI state,
+          not the backend's own default: `ChatRequest.engine`'s Pydantic
+          default stays "v1" (SPEC-M16's own Invariant: every existing
+          caller that omits `engine` keeps V1's byte-for-byte-unchanged
+          behavior), so nothing here weakens that guarantee for any other
+          caller of this API. */}
       <label title="V1: today's engine. V2: the new independent tool-calling agent (beta) -- pick either per question to compare them.">Engine <select value={engine} onChange={(e) => setEngine(e.target.value as "v1" | "v2")}><option value="v1">V1 (current)</option><option value="v2">V2 (agent, beta)</option></select></label>
       <button type="button" onClick={newConversation}>New conversation</button><button type="button" onClick={() => { setSelected(null); setSelectionCleared(true); setHighlightedIds(new Set()); }}>Clear selection</button><button type="button" onClick={() => { setSnapshot(null); setSnapshotCleared(true); }}>Clear snapshot</button>
     </div>

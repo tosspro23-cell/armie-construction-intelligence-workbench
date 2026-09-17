@@ -176,6 +176,15 @@ class AzureOpenAIProvider:
             if not chunk.choices:
                 continue
             delta = chunk.choices[0].delta
+            # Owner-reported, 2026-09-17: a real chunk with a non-empty
+            # `choices` array but `choices[0].delta` itself `None` (seen on
+            # a window-type-classification question, the same shape as the
+            # SPEC-M16 benchmark's own headline question) raised
+            # `'NoneType' object has no attribute 'content'` -- a second,
+            # different Azure streaming quirk from the empty-choices one
+            # above, not caught by that earlier fix.
+            if delta is None:
+                continue
             if delta.content:
                 content_parts.append(delta.content)
                 yield AnswerChunkEvent(text=delta.content)
