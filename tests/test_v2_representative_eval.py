@@ -102,6 +102,51 @@ def test_v2_representative_eval_parallel_multi_tool(tmp_path: Path) -> None:
     assert response.execution_metadata["tool_call_count"] == 2
 
 
+def test_v2_accepts_a_real_sum_of_this_turns_own_per_type_counts(tmp_path: Path) -> None:
+    """Owner-reported, 2026-09-17 (found live against the real Duplex
+    project): after a turn listing every entity type's own count
+    individually, the user asked "好了总和是多少?" ("okay, what's the
+    total?"). The model correctly re-called the counts this turn (per its
+    own system prompt: never state a number not just received from a tool
+    this turn) and answered with their sum -- a real, mechanically
+    verifiable arithmetic derivation over this turn's own real numbers,
+    not a new, ungrounded claim. The narrative-consistency check as
+    written only accepted a value that was itself literally one call's
+    own returned number, so the correct total ("8" here, from 4 real
+    doors + 4 real windows) was rejected as if it were fabricated --
+    disposition=error, "I could not safely finalize this answer...",
+    exactly what the owner saw live.
+
+    Fixed by additionally accepting the sum of this turn's own whole-
+    number, single-valued ("pure scalar") facts as a valid baseline value.
+    """
+    fake = FakeModelProvider()
+    fake.script("v2_tool_turn", ScriptedToolCalls([
+        ("count_elements", {"entity_type": "IfcDoor"}),
+        ("count_elements", {"entity_type": "IfcWindow"}),
+    ]))
+    fake.script("v2_tool_turn", ScriptedAnswer(["That's a total of 8 elements."]))
+    _, service, resources = _service(tmp_path, fake)
+
+    response = asyncio.run(_run(service, resources, "好了总和是多少?", "eval-sum-of-counts"))
+
+    assert response.disposition.value == "answered"
+    assert response.verification.status == "verified"
+    assert "8" in response.answer_markdown
+
+    # The fix must not have simply widened the check into accepting any
+    # number -- an incorrect stated total is still caught.
+    fake_bad = FakeModelProvider()
+    fake_bad.script("v2_tool_turn", ScriptedToolCalls([
+        ("count_elements", {"entity_type": "IfcDoor"}),
+        ("count_elements", {"entity_type": "IfcWindow"}),
+    ]))
+    fake_bad.script("v2_tool_turn", ScriptedAnswer(["That's a total of 999 elements."]))
+    _, service_bad, resources_bad = _service(tmp_path, fake_bad)
+    response_bad = asyncio.run(_run(service_bad, resources_bad, "好了总和是多少?", "eval-sum-of-counts-bad"))
+    assert response_bad.disposition.value == "error"
+
+
 def test_v2_partial_tool_failure_marks_partially_answered(tmp_path: Path) -> None:
     """Independent-review finding, 2026-09-17: one real, successful tool
     call alongside one capability-gate-rejected call (an unsupported

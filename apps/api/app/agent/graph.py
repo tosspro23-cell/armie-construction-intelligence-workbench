@@ -2866,6 +2866,29 @@ Return only a corrected MultiQueryPlan JSON object."""
         legitimate second scope's value is now itself part of what
         "doors" is allowed to mean anywhere in the answer, while a value
         that matches nothing in the combined set (99999) is still caught.
+
+        Owner-reported, 2026-09-17 (found live against the real Duplex
+        project): after a turn listing every entity type's own count
+        (IfcFurnishingElement=61, IfcMember=4, ..., IfcWindow=24, each
+        from its own count_elements call), the user asked "好了总和是多少?"
+        ("okay, what's the total?"). The model correctly re-called the
+        counts this turn (per its own system prompt: never state a number
+        not just received from a tool this turn) and answered with their
+        sum -- a real, mechanically verifiable arithmetic derivation over
+        this turn's own real numbers, not a new, ungrounded claim. Check 1
+        as written only accepted a value that was itself literally one
+        call's own returned number, so the correct total was rejected as
+        if it were fabricated -- this is exactly the class of "legitimate
+        synthesis over verified data" this system is supposed to allow
+        (owner decision, 2026-09-17: V2 exists so the model can freely
+        reason over tool results, not just restate them one at a time);
+        the check's own definition of "real" was too narrow, not the
+        model's freedom too broad. Fixed by additionally accepting the sum
+        of this turn's own whole-number, single-valued facts (a plain
+        count_elements-style scalar, not a multi-value shape like
+        aggregate_quantity/group_by, where "the one number to sum" isn't
+        well-defined) as a valid baseline value -- a real sum of real
+        counts, still mechanically checked, never an arbitrary allowance.
         """
         import re
 
@@ -2877,10 +2900,26 @@ Return only a corrected MultiQueryPlan JSON object."""
         answer_lower = answer_markdown.lower()
         answer_numbers = [float(match) for match in re.findall(r"\d+(?:\.\d+)?", answer_markdown)]
 
+        # A real sum over this turn's own real per-call counts is a
+        # legitimate derivation, not a fabrication -- see this method's
+        # own docstring. Only whole-number, single-valued ("pure scalar")
+        # calls contribute: a multi-value shape (aggregate_quantity's own
+        # {value_m, eligible_count, ...}, group_by's per-bucket counts)
+        # has no single unambiguous "the" number to add, so those are left
+        # out rather than guessed at.
+        scalar_values = [next(iter(expected)) for _, expected in expected_numeric_facts if len(expected) == 1 and next(iter(expected)).is_integer()]
+        total_of_scalars = sum(scalar_values) if len(scalar_values) > 1 else None
+        answer_states_the_total = total_of_scalars is not None and any(_matches(total_of_scalars, actual) for actual in answer_numbers)
+
         # Check 1: baseline presence, any language -- per tool call, not
         # merged, so a call whose own value is never mentioned anywhere
-        # still fails even if some *other* call's value happens to appear.
+        # still fails even if some *other* call's value happens to appear
+        # -- except when the answer instead states the correct combined
+        # total of every scalar call this turn, which honestly accounts
+        # for this call's own contribution without repeating it verbatim.
         for entity_terms, expected in expected_numeric_facts:
+            if answer_states_the_total and len(expected) == 1 and next(iter(expected)) in scalar_values:
+                continue
             if not any(_matches(value, actual) for value in expected for actual in answer_numbers):
                 return False
 
