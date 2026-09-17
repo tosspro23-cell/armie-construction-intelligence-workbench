@@ -92,9 +92,23 @@ def test_v2_representative_eval_reconciliation(tmp_path: Path) -> None:
 
 
 def test_v2_representative_eval_zero_tool_calls_marks_verification_not_applicable(tmp_path: Path) -> None:
-    """SPEC-M16 Invariants: a turn with no tool calls at all (a general/
-    conversational question) is honestly marked -- verification is
-    `not_applicable`, not a false claim of having checked something.
+    """SPEC-M16 Invariants: a turn with no tool calls at all -- here, one
+    that is really asking the user for more information -- is honestly
+    marked: `clarification_required`, matching V1's own disposition for
+    the identical situation, and verification `not_applicable` rather than
+    a false claim of having checked something.
+
+    Owner-reported, 2026-09-17 (a 24-question EN/ZH live domain sweep):
+    this scenario is exactly SPEC-M16's own live benchmark report's
+    "known gap, found live, not yet fixed" (question 10, docs/reports/
+    2026-09-16-m16-v1-vs-v2-benchmark.md) -- `invoke_v2`'s disposition line
+    was `"answered" if all_citations else "answered"`, both branches
+    identical, so a zero-tool-call turn was always mislabeled "answered"
+    regardless of citations. The sweep found this is a broader pattern (5
+    of 24 real turns), never a case where V2 legitimately answered without
+    needing data -- always a genuine clarification or capability-limit
+    explanation. Fixed at the source; this test now asserts the corrected
+    disposition instead of the bug it used to encode.
     """
     fake = FakeModelProvider()
     fake.script("v2_tool_turn", ScriptedAnswer(["Please select an element or capture the current view first."]))
@@ -102,6 +116,6 @@ def test_v2_representative_eval_zero_tool_calls_marks_verification_not_applicabl
 
     response = asyncio.run(_run(service, resources, "What can you see in the current view?", "eval-viewer"))
 
-    assert response.disposition.value == "answered"
+    assert response.disposition.value == "clarification_required"
     assert response.verification.status == "not_applicable"
     assert response.citations == []

@@ -2088,8 +2088,22 @@ Return only a corrected MultiQueryPlan JSON object."""
             messages.append(turn_complete.raw_assistant_message)
             if not turn_complete.tool_calls:
                 self._audit(state, "v2_turn_finalized", "finalized", "V2 agent finished calling tools and produced its final answer.", {"iteration": iteration}, planning_mode="tool_calling", actual_provider=provider.name, actual_model=provider.model)
-                disposition = "answered" if all_citations else "answered"
-                verification = VerificationStatus(status="passed" if all_citations else "not_applicable", reason="Every stated fact came from a verified tool call this turn." if all_citations else "No tool call was needed to answer this question.")
+                # Owner-reported, 2026-09-17: this was `"answered" if
+                # all_citations else "answered"` -- both branches identical,
+                # so the condition was dead code and every zero-tool-call
+                # turn (already flagged as a known gap in the original
+                # SPEC-M16 benchmark report, question 10) was mislabeled
+                # "answered". A 24-question EN/ZH domain sweep confirmed
+                # this is a broader, reproducible pattern, not an edge
+                # case: every one of 5 zero-tool-call turns in that sweep
+                # was genuinely a clarification request or an honest
+                # capability-limit explanation (an ambiguous storey name, a
+                # vague entity, a nonexistent storey, an unmodeled entity
+                # type) -- never a case where V2 legitimately answered
+                # without needing any real data. Matches V1's own
+                # disposition for the identical situation.
+                disposition = "answered" if all_citations else "clarification_required"
+                verification = VerificationStatus(status="passed" if all_citations else "not_applicable", reason="Every stated fact came from a verified tool call this turn." if all_citations else "No tool call was made this turn -- nothing here is a claim of fact.")
                 response = AgentResponse(
                     thread_id=thread_id, trace_id=trace_id, disposition=Disposition(disposition),
                     answer_markdown="".join(answer_parts), citations=[Citation.model_validate(item) for item in all_citations],

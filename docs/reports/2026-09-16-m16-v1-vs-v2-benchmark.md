@@ -89,11 +89,14 @@ architecture cannot answer *correctly* at all, not on making already-solved ques
 
 ## Known gaps, found live, not yet fixed
 
-- **Question 10's disposition** (`answered` for a request that is really asking the user for more
-  information) probably should read `clarification_required`, matching V1's own disposition for
-  the identical situation. Not fixed in this pass -- `invoke_v2`'s disposition logic currently only
-  distinguishes "had a tool call" from "did not," not "answered directly" from "asked a clarifying
-  question." A real, scoped follow-up.
+- ~~**Question 10's disposition**...~~ **Fixed 2026-09-17.** The root cause was worse than "not yet
+  built": `invoke_v2`'s disposition line read `"answered" if all_citations else "answered"` --
+  both branches identical, dead code, so every zero-tool-call turn was unconditionally "answered"
+  regardless of citations. A 24-question EN/ZH live domain sweep (ambiguous storey names, vague
+  entities, nonexistent storeys, unmodeled entity types) found 5 zero-tool-call turns, every one a
+  genuine clarification/capability-limit case -- confirming this was a systematic pattern, not an
+  edge case. Now reads `"answered" if all_citations else "clarification_required"`, matching V1's
+  own disposition for the identical situation.
 - **Per-turn wall time (5-19s) is materially slower than V1's own instant-or-near-instant common
   case.** Per this report's own Rationale, closing that gap further (a faster tool-selection step,
   parallelizing more of the round trip, or a different model for that specific decision) is real

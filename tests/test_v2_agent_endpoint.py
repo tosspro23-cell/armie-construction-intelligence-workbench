@@ -113,6 +113,18 @@ def test_v2_engine_recent_turn_memory_persists_and_is_reused(tmp_path: Path) -> 
     fake = FakeModelProvider()
     fake.script("v2_tool_turn", ScriptedToolCalls([("count_elements", {"entity_type": "IfcDoor"})]))
     fake.script("v2_tool_turn", ScriptedAnswer(["The project has 6 doors."]))
+    # Owner-reported, 2026-09-17: this second turn used to be scripted as
+    # a bare ScriptedAnswer with no tool call at all -- unrealistic (V2's
+    # own system prompt requires a fresh tool call for every stated fact;
+    # a real model asked "and the windows?" calls count_elements again, it
+    # does not recall "4" from memory alone), and it happened to be
+    # exactly the scenario a since-fixed dead-code disposition bug
+    # (`"answered" if all_citations else "answered"`) always mislabeled
+    # "answered" regardless. Scripting a real second tool call keeps this
+    # test's actual purpose (memory threading) intact while asserting a
+    # disposition the fixed code actually earns, not one the bug used to
+    # hand out unconditionally.
+    fake.script("v2_tool_turn", ScriptedToolCalls([("count_elements", {"entity_type": "IfcWindow"})]))
     fake.script("v2_tool_turn", ScriptedAnswer(["And 4 windows, following up on the doors."]))
     container, service = _build(settings, fake)
     main_module.app.state.container = container
