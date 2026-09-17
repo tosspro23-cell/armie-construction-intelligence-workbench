@@ -1140,6 +1140,18 @@ Return only a corrected MultiQueryPlan JSON object."""
                 "citations": citations,
                 "verification": status.model_dump(),
                 "result_value": result.value,
+                # Owner-reported, 2026-09-17: the repository layer already
+                # computes this (e.g. "No IFC elements matched the query."
+                # -- exactly what a mistranslated/nonexistent storey filter
+                # like "第二层" instead of "Level 2" produces: a faithfully
+                # correct zero for a bad filter, not a fabrication, but
+                # presented with no hint anything was off) -- it was simply
+                # never read by any caller. V1 doesn't need it (not
+                # agentic); V2 does, since invoke_v2 forwards this straight
+                # back to the model as this tool's own result, giving it a
+                # chance to notice and retry with a corrected filter rather
+                # than confidently reporting a wrong zero.
+                "warnings": result.warnings,
                 "context_update": {
                     "active_source": SourceType.IFC.value,
                     "active_entity_type": plan.entity_type,
@@ -1888,7 +1900,7 @@ Return only a corrected MultiQueryPlan JSON object."""
         return AgentResponse.model_validate(outcome["final_response"])
 
     @staticmethod
-    def _v2_system_prompt() -> str:
+    def _v2_system_prompt(storey_names: list[str] | None = None) -> str:
         """SPEC-M16: V2's own system prompt.
 
         Deliberately restates the same honesty invariant every part of V1
@@ -1898,6 +1910,11 @@ Return only a corrected MultiQueryPlan JSON object."""
         recall a construction fact from its own training -- only to call a
         tool and then describe that tool's real, verified return value.
         """
+        storey_guidance = (
+            f"This project's real storey names are exactly: {storey_names} -- always pass one of "
+            "these exact strings as a storey filter, never a translation, abbreviation, or ordinal "
+            "guess (e.g. \"第二层\" or \"2nd floor\") of the storey the user meant. "
+        ) if storey_names else ""
         return (
             "You are a construction/BIM assistant with tools to query a real IFC building model "
             "and its PDF drawings/schedules. Decide which tool(s) answer the user's question, call "
@@ -1906,9 +1923,20 @@ Return only a corrected MultiQueryPlan JSON object."""
             "count, measurement, or property value you did not just receive from a tool call -- if "
             "no tool can answer part of the question, say so honestly rather than guessing. "
             "Respond in the same language as the user's latest message. "
+            f"{storey_guidance}"
+            "If a tool result includes a non-empty 'warnings' field (e.g. a storey filter matched "
+            "zero elements), that is a signal your filter value may be wrong, not proof the true "
+            "count is zero -- reconsider the filter (check it against the real storey names above) "
+            "before reporting a zero as fact. "
             f"Valid entity_type values for every tool: {sorted(SUPPORTED_ENTITY_TYPES)}. "
             "reconcile_doors_windows only checks door/window width and height -- never claim it "
             "checked any other attribute (fire rating, material, etc.). "
+            "When a question asks about ONE specific storey (e.g. 'how many doors on Level 2'), "
+            "call count_elements with that storey filter, not group_elements_by_storey -- both "
+            "give a correct number, but group_elements_by_storey's own evidence necessarily covers "
+            "every storey, not just the one asked about, which is needlessly broad for a "
+            "single-storey question. Reserve group_elements_by_storey for questions that are "
+            "themselves about comparing or ranking storeys (e.g. 'which floor has the most'). "
             "Tools cannot filter by name or sub-category (e.g. there is no way to ask for only "
             "'tables' out of IfcFurnishingElement) -- if a large result was capped to a sample plus "
             "a total count, that is the most detail this system can give; do not call the same tool "
@@ -1994,7 +2022,20 @@ Return only a corrected MultiQueryPlan JSON object."""
             "tool_call_count": 0, "model_call_count": 0,
         }
         provider = self.container.text_provider_factory(self.settings)
-        messages: list[dict[str, Any]] = [{"role": "system", "content": self._v2_system_prompt()}]
+        # Owner-reported, 2026-09-17: a Chinese storey phrase ("第二层")
+        # passed straight through as a filter value, never translated to
+        # this project's own English storey names, matched zero real
+        # elements -- a faithfully-executed but wrong filter, reported as
+        # a confident (wrong) zero. Giving the model the real names up
+        # front removes the guess entirely for any project that has an
+        # IFC source at all (PDF-only projects have none to give).
+        try:
+            storey_names = [
+                storey["name"] for storey in project_resources.ifc_repository.metadata().get("storeys", []) if storey.get("name")
+            ]
+        except Exception:
+            storey_names = []
+        messages: list[dict[str, Any]] = [{"role": "system", "content": self._v2_system_prompt(storey_names)}]
         for turn in recent_turns or []:
             messages.append({"role": "user", "content": turn["question"]})
             messages.append({"role": "assistant", "content": turn["answer"]})
@@ -2127,7 +2168,19 @@ Return only a corrected MultiQueryPlan JSON object."""
                     }
                 messages.append({
                     "role": "tool", "tool_call_id": tool_call.call_id,
-                    "content": json.dumps({"disposition": tool_result.get("disposition"), "answer": tool_result.get("answer"), "result_value": tool_result_value}, default=str),
+                    "content": json.dumps({
+                        "disposition": tool_result.get("disposition"), "answer": tool_result.get("answer"),
+                        "result_value": tool_result_value,
+                        # Owner-reported, 2026-09-17: e.g. a storey filter of
+                        # "第二层" (never translated to the model's own
+                        # "Level 2" naming) matched zero real elements --
+                        # correctly executed, but a bad filter, not a real
+                        # zero. Surfacing this warning gives the model a
+                        # chance to notice and retry with a corrected
+                        # filter instead of confidently reporting a wrong
+                        # count.
+                        "warnings": tool_result.get("warnings") or [],
+                    }, default=str),
                 })
                 yield {"type": "tool_status", "tool_name": tool_call.tool_name, "status": "completed"}
         # SPEC-M16 Invariants: a hard, enforced cap -- never an unbounded loop.
