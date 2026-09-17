@@ -198,21 +198,28 @@ def test_v2_clarification_required_turn_still_persists_conversation_memory(tmp_p
     assert "Please specify the exact room identifiers you mean." in second_call_messages
 
 
-def test_v2_never_streams_a_narrative_before_it_passes_verification(tmp_path: Path) -> None:
-    """Independent-review finding, 2026-09-17, second pass: `answer_chunk`
-    events used to be forwarded to the client the instant each token
-    arrived from the model -- a narrative later caught as inconsistent
-    with this turn's own tool results (a real count_elements call
-    returning 4, a fake model answering "There are 99999 doors") had
-    *already* been streamed to and rendered by the client before its own
-    rejection was even decided. SPEC-M16's own Invariant ("streaming only
-    ever carries already-verified content") was never actually true for
-    this second model call, only for tool execution.
+def test_v2_streams_a_flagged_narrative_live_instead_of_withholding_it(tmp_path: Path) -> None:
+    """D-062 (2026-09-17), replacing this test's own previous, opposite
+    assertion (`test_v2_never_streams_a_narrative_before_it_passes_
+    verification`): `answer_chunk` events used to be buffered until the
+    numeric narrative-consistency check passed, specifically so a
+    narrative later caught as inconsistent with this turn's own tool
+    results could be fully withheld from the client -- SPEC-M16's own
+    Invariant, "streaming only ever carries already-verified content."
 
-    Now buffered until the consistency check passes; an inconsistent
-    narrative must never reach the client as an answer_chunk, in any
-    form, at any point in the event stream -- not just absent from the
-    final response.
+    That invariant was deliberately amended by D-062: across three rounds
+    of independent review, every confirmed catch of this exact check was
+    against a deliberately scripted adversarial test double (this test's
+    own scenario is one of them), never a real fabrication from the
+    actual model in live use, while the check's own false-positive rate
+    against real live usage was confirmed twice. A decision-support tool
+    where the user shares final responsibility for judgment calls is
+    better served by disclosing an unconfirmed claim than by silently
+    withdrawing it. `AnswerChunkEvent`s are streamed live again (the
+    buffering they were held back for no longer applies), and a caught
+    inconsistency now sets verification.status="unverified" while keeping
+    the disposition the tool-call outcomes actually earned and the
+    model's real text -- it is flagged, not hidden.
     """
     import app.main as main_module
 
@@ -225,14 +232,16 @@ def test_v2_never_streams_a_narrative_before_it_passes_verification(tmp_path: Pa
     main_module.app.state.agent = service
     main_module.app.state.requests = {}
 
-    response = asyncio.run(main_module.chat(ChatRequest(request_id="v2-no-leak-1", thread_id="v2-no-leak-thread", question=QUESTION, engine="v2")))
+    response = asyncio.run(main_module.chat(ChatRequest(request_id="v2-flagged-1", thread_id="v2-flagged-thread", question=QUESTION, engine="v2")))
     events = asyncio.run(_collect_sse_events(response))
 
     answer_chunks = [event for event in events if event["type"] == "answer_chunk"]
-    assert answer_chunks == []  # never sent, not even before the final rejection
+    assert "".join(chunk["text"] for chunk in answer_chunks) == "There are 99999 doors, all fire-certified for 120 minutes."
     final = [event for event in events if event["type"] == "final"][0]["response"]
-    assert final["disposition"] == "error"
-    assert "99999" not in final["answer_markdown"]
+    assert final["disposition"] == "answered"
+    assert final["verification"]["status"] == "unverified"
+    assert "99999" in final["answer_markdown"]
+    assert len(final["citations"]) > 0  # real evidence is kept alongside the disclosed caveat, not dropped
 
 
 def test_v2_request_record_gets_the_real_trace_id_used_by_the_turn(tmp_path: Path) -> None:

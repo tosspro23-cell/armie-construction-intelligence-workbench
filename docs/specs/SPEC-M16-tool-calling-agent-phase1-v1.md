@@ -252,6 +252,13 @@ construction, verification logic, or any part of V1's existing execution path.
   intermediate "thinking" or an unverified draft. This is a deliberate design choice, not an
   implementation detail: it is what lets V2 be fast-*feeling* (progressive rendering) without
   weakening the honesty guarantee that no unverified claim ever reaches the user, in any form.
+  **Amended by D-062 (2026-09-17):** an unverified numeric claim (the narrative-consistency check's
+  own finding) now reaches the user with a disclosed caveat instead of being withheld -- see D-062
+  for the full rationale (an empirically higher false-positive than true-positive rate against real
+  usage, plus the product's own decision-support positioning). Streaming itself also reverted from
+  buffer-then-replay to live, since buffering existed specifically to serve the hard-block behavior
+  this amendment retires. A truncated/content-filtered response is still never presented as if it
+  were a complete, trustworthy answer -- that specific guarantee stands unweakened.
 - A hard, enforced cap on tool-call iterations per turn -- never an unbounded loop.
 - `engine="v1"` (the default, and every existing caller's unmodified behavior) leaves every
   existing code path, test, and deployed behavior byte-for-byte unchanged.

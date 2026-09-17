@@ -363,7 +363,30 @@ class VerificationStatus(BaseModel):
     # content verification. Renamed the value everywhere it's constructed
     # or compared -- schema, verifiers.py, graph.py, DecisionStory.tsx's
     # CSS class, and every test asserting this literal.
-    status: Literal["verified", "failed", "not_applicable"]
+    #
+    # Owner decision, 2026-09-17: "unverified" added -- V2's own numeric
+    # narrative-consistency check (graph.py's
+    # `_narrative_consistent_with_tool_facts`) used to hard-fail the whole
+    # turn (disposition=error, answer withdrawn) whenever it could not
+    # confirm the model's final prose matched this turn's own tool
+    # results. This turned out to have a worse cost/benefit balance than
+    # it looked: every *confirmed* catch of this check, across three
+    # rounds of independent review, was against a deliberately scripted
+    # adversarial test double -- never a real fabrication from the actual
+    # model in live use -- while the check's own false-positive rate
+    # against real live usage was confirmed twice (a natural rounding of a
+    # real measurement, and a correct sum of this turn's own real counts).
+    # A construction/BIM decision-support tool where "the user shares
+    # final responsibility for judgment calls" (see project memory) is
+    # better served by disclosing an unconfirmed claim than by silently
+    # withdrawing a very possibly-correct answer. "unverified" carries the
+    # answer through instead of discarding it -- the UI surfaces it as a
+    # small caveat, not a blocked turn. `failed` is kept for a
+    # categorically different, non-probabilistic case (a truncated/
+    # content-filtered response, `finish_reason in {"length",
+    # "content_filter"}`) where the response actually is incomplete, not
+    # merely unconfirmed.
+    status: Literal["verified", "failed", "not_applicable", "unverified"]
     verifier_results: list[VerifierResult] = Field(default_factory=list)
     reason: str | None = None
 

@@ -100,7 +100,12 @@ input, textarea { width: 100%; background: #0b1020; color: #f6f8ff; border: 1px 
 .message-meta time { margin-left: auto; color: #8190ad; text-transform: none; }
 .technical-details { margin-top: 8px; color: #a8b4cf; font-size: .78rem; }
 .technical-details summary { cursor: pointer; color: #9fbfff; }
-.verified { color: #8ff0b1; } .failed { color: #ff9696; } .not_applicable { color: #d6c17a; }
+.verified { color: #8ff0b1; } .failed { color: #ff9696; } .not_applicable { color: #d6c17a; } .unverified { color: #ffb454; }
+/* D-062: a caught narrative-consistency mismatch is disclosed, not
+   withheld -- a small caveat line under the answer, not a full-size
+   banner, since it is a possibility to double-check, not a confirmed
+   error. */
+.unverified-caveat { margin: 6px 0 0; color: #ffb454; font-size: .74rem; }
 /* SPEC-M16: V1/V2 engine labeling + V2's own live tool-use progress. */
 .engine-badge { padding: 1px 6px; border-radius: 6px; background: #24345c; color: #bcd2ff; font-size: .68rem; letter-spacing: .02em; }
 .v2-streaming { opacity: .92; }
@@ -178,6 +183,7 @@ button:disabled { opacity: .6; cursor: wait; }
 .verification-reason.verified { border-left-color: #8ff0b1; }
 .verification-reason.failed { border-left-color: #ff9696; }
 .verification-reason.not_applicable { border-left-color: #d6c17a; }
+.verification-reason.unverified { border-left-color: #ffb454; }
 pre { max-width: 100%; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: .75rem; }
 @media (max-width: 1100px) { .workspace { grid-template-columns: 1fr; } .ifc-viewer, .viewer-host { min-height: 300px; } }
 

@@ -135,7 +135,8 @@ def test_v2_accepts_a_real_sum_of_this_turns_own_per_type_counts(tmp_path: Path)
     assert "8" in response.answer_markdown
 
     # The fix must not have simply widened the check into accepting any
-    # number -- an incorrect stated total is still caught.
+    # number -- an incorrect stated total is still caught (D-062: flagged
+    # as unverified rather than hard-blocked, but still caught).
     fake_bad = FakeModelProvider()
     fake_bad.script("v2_tool_turn", ScriptedToolCalls([
         ("count_elements", {"entity_type": "IfcDoor"}),
@@ -144,7 +145,7 @@ def test_v2_accepts_a_real_sum_of_this_turns_own_per_type_counts(tmp_path: Path)
     fake_bad.script("v2_tool_turn", ScriptedAnswer(["That's a total of 999 elements."]))
     _, service_bad, resources_bad = _service(tmp_path, fake_bad)
     response_bad = asyncio.run(_run(service_bad, resources_bad, "好了总和是多少?", "eval-sum-of-counts-bad"))
-    assert response_bad.disposition.value == "error"
+    assert response_bad.verification.status == "unverified"
 
 
 def test_v2_partial_tool_failure_marks_partially_answered(tmp_path: Path) -> None:
@@ -236,7 +237,7 @@ def test_v2_representative_eval_zero_tool_calls_marks_verification_not_applicabl
     assert response.citations == []
 
 
-def test_v2_rejects_narrative_that_contradicts_its_own_tool_result(tmp_path: Path) -> None:
+def test_v2_flags_a_narrative_that_contradicts_its_own_tool_result(tmp_path: Path) -> None:
     """Independent-review finding, 2026-09-17: a scripted model that calls
     a real tool (count_elements -> the real armie_demo.ifc fixture's real
     4 doors), then answers with a wildly different, unrelated number
@@ -247,9 +248,17 @@ def test_v2_rejects_narrative_that_contradicts_its_own_tool_result(tmp_path: Pat
     performed was "did a tool call leave a citation this turn," never
     whether the model's own final prose was consistent with it.
 
-    This locks in the fix (`_narrative_consistent_with_tool_facts`): the
-    turn must now finalize as disposition=error, verification.status
-    ="failed", and the fabricated text must never reach `answer_markdown`.
+    D-062 (2026-09-17), amending this test's own previous assertion:
+    `_narrative_consistent_with_tool_facts` catching a mismatch used to
+    hard-fail the whole turn (disposition=error, real text replaced,
+    citations dropped) -- now it flags instead: disposition stays
+    whatever the tool-call outcomes earned ("answered" here, since the
+    tool call itself succeeded), verification.status becomes "unverified",
+    and the model's actual text is kept, not replaced or hidden. See D-062
+    for why: across three review rounds, every confirmed catch of this
+    check was an adversarial test double, never a real fabrication in live
+    use, while the check's own false-positive rate against real usage was
+    confirmed twice.
 
     Scope, stated plainly (see `_numeric_tokens_from_result_value`'s own
     docstring): this is a numeric-only cross-check. It reliably catches a
@@ -266,10 +275,10 @@ def test_v2_rejects_narrative_that_contradicts_its_own_tool_result(tmp_path: Pat
 
     response = asyncio.run(_run(service, resources, "How many doors are there?", "eval-fabrication"))
 
-    assert response.disposition.value == "error"
-    assert response.verification.status == "failed"
-    assert "99999" not in response.answer_markdown
-    assert response.citations == []  # real evidence must not sit alongside a withdrawn, inconsistent claim
+    assert response.disposition.value == "answered"
+    assert response.verification.status == "unverified"
+    assert "99999" in response.answer_markdown  # shown, not withheld -- the caveat is in verification, not a text swap
+    assert len(response.citations) > 0  # real evidence is kept, not dropped, alongside the disclosed caveat
 
 
 def test_v2_rejects_a_fabricated_number_hidden_behind_a_correct_decoy(tmp_path: Path) -> None:
@@ -286,6 +295,10 @@ def test_v2_rejects_a_fabricated_number_hidden_behind_a_correct_decoy(tmp_path: 
     tool call's own entity noun ("door"/"doors") next to a number, that
     number is a real one -- "99999 doors" fails this even though "4"
     exists elsewhere in the same text.
+
+    D-062 (2026-09-17): a caught mismatch is now flagged
+    (verification.status="unverified"), not hard-blocked -- see that
+    decision for why. Still verified here: shown, not withheld.
     """
     fake = FakeModelProvider()
     fake.script("v2_tool_turn", ScriptedToolCalls([("count_elements", {"entity_type": "IfcDoor"})]))
@@ -294,9 +307,8 @@ def test_v2_rejects_a_fabricated_number_hidden_behind_a_correct_decoy(tmp_path: 
 
     response = asyncio.run(_run(service, resources, "How many doors are there?", "eval-fabrication-decoy"))
 
-    assert response.disposition.value == "error"
-    assert response.verification.status == "failed"
-    assert "99999" not in response.answer_markdown
+    assert response.verification.status == "unverified"
+    assert "99999" in response.answer_markdown
 
 
 def test_v2_rejects_a_fabricated_number_sitting_in_the_same_window_as_a_real_one(tmp_path: Path) -> None:
@@ -312,6 +324,10 @@ def test_v2_rejects_a_fabricated_number_sitting_in_the_same_window_as_a_real_one
 
     Fixed by requiring *every* number found near the entity noun to be
     individually explainable, not just one of them.
+
+    D-062 (2026-09-17): a caught mismatch is now flagged
+    (verification.status="unverified"), not hard-blocked -- see that
+    decision for why. Still verified here: shown, not withheld.
     """
     fake = FakeModelProvider()
     fake.script("v2_tool_turn", ScriptedToolCalls([("count_elements", {"entity_type": "IfcDoor"})]))
@@ -320,9 +336,8 @@ def test_v2_rejects_a_fabricated_number_sitting_in_the_same_window_as_a_real_one
 
     response = asyncio.run(_run(service, resources, "How many doors are there?", "eval-fabrication-same-window-decoy"))
 
-    assert response.disposition.value == "error"
-    assert response.verification.status == "failed"
-    assert "99999" not in response.answer_markdown
+    assert response.verification.status == "unverified"
+    assert "99999" in response.answer_markdown
 
 
 def test_v2_accepts_the_same_entity_reported_at_two_different_scopes(tmp_path: Path) -> None:
@@ -361,7 +376,8 @@ def test_v2_accepts_the_same_entity_reported_at_two_different_scopes(tmp_path: P
 
     # The combined-expected-set fix must not have simply widened the check
     # into accepting anything -- a value that matches neither call's real
-    # result is still caught.
+    # result is still caught (D-062: flagged as unverified, not
+    # hard-blocked, but still caught).
     fake_bad = FakeModelProvider()
     fake_bad.script("v2_tool_turn", ScriptedToolCalls([
         ("count_elements", {"entity_type": "IfcDoor"}),
@@ -370,7 +386,7 @@ def test_v2_accepts_the_same_entity_reported_at_two_different_scopes(tmp_path: P
     fake_bad.script("v2_tool_turn", ScriptedAnswer(["The whole project contains 4 doors. On the first floor there are 99999 doors."]))
     _, service_bad, resources_bad = _service(tmp_path, fake_bad)
     response_bad = asyncio.run(_run(service_bad, resources_bad, "How many doors total, and how many on the first floor?", "eval-multi-scope-bad"))
-    assert response_bad.disposition.value == "error"
+    assert response_bad.verification.status == "unverified"
 
 
 def test_v2_rejects_a_fabricated_property_value_from_a_list_shaped_tool_result(tmp_path: Path) -> None:
@@ -385,6 +401,10 @@ def test_v2_rejects_a_fabricated_property_value_from_a_list_shaped_tool_result(t
 
     Fixed by recursing into list/dict-shaped tool results to pull out
     every real numeric leaf value as a candidate fact.
+
+    D-062 (2026-09-17): a caught mismatch is now flagged
+    (verification.status="unverified"), not hard-blocked -- see that
+    decision for why. Still verified here: shown, not withheld.
     """
     fake = FakeModelProvider()
     fake.script("v2_tool_turn", ScriptedToolCalls([("get_element_properties", {"entity_type": "IfcDoor"})]))
@@ -393,9 +413,8 @@ def test_v2_rejects_a_fabricated_property_value_from_a_list_shaped_tool_result(t
 
     response = asyncio.run(_run(service, resources, "What properties does the door have?", "eval-property-fabrication"))
 
-    assert response.disposition.value == "error"
-    assert response.verification.status == "failed"
-    assert "99999" not in response.answer_markdown
+    assert response.verification.status == "unverified"
+    assert "99999" in response.answer_markdown
 
 
 def test_v2_exposes_an_exhaustive_distinct_value_summary_for_a_truncated_list_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -620,6 +639,32 @@ def test_v2_respects_a_deadline_that_expires_mid_tool_dispatch(tmp_path: Path, m
     assert final.disposition.value == "timeout"
     assert elapsed_to_final is not None
     assert elapsed_to_final < 0.15  # nowhere near the slow tool call's own full 200ms delay
+
+
+def test_v2_appends_a_caveat_to_a_truncated_response_instead_of_replacing_it(tmp_path: Path) -> None:
+    """D-062 (2026-09-17): a response cut off by the model's own max-token
+    limit or blocked mid-answer by content filtering (`finish_reason in
+    {"length", "content_filter"}`) is a categorically different, non-
+    probabilistic failure from the narrative-consistency check above (the
+    response really is incomplete, not merely unconfirmed) -- it stays a
+    hard `disposition=error`. But since `AnswerChunkEvent`s now stream
+    live (see D-062), whatever partial text the model produced before
+    being cut off has already reached the client by the time
+    `finish_reason` is known; replacing it with a generic templated
+    message (the previous behavior) would make the client-rendered stream
+    and the saved "final" response disagree about what was actually said.
+    Now appends a clear caveat to the real (if incomplete) text instead.
+    """
+    fake = FakeModelProvider()
+    fake.script("v2_tool_turn", ScriptedAnswer(["The door height is 2.1"], finish_reason="length"))
+    _, service, resources = _service(tmp_path, fake)
+
+    response = asyncio.run(_run(service, resources, "What is the door height?", "eval-truncated"))
+
+    assert response.disposition.value == "error"
+    assert response.verification.status == "failed"
+    assert "The door height is 2.1" in response.answer_markdown  # the real, if incomplete, text is kept
+    assert "cut off" in response.answer_markdown  # and a clear caveat is appended, not a full replacement
 
 
 def test_v2_respects_a_cancellation_request(tmp_path: Path) -> None:

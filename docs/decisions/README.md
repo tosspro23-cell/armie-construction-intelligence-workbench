@@ -2830,3 +2830,48 @@ selection) returns `disposition=answered` rather than `clarification_required`, 
 identical-situation handling -- `invoke_v2`'s disposition logic currently only distinguishes "had a
 tool call" from "did not," not "answered directly" from "asked a clarifying question." Named
 explicitly in the benchmark report rather than silently left for someone else to rediscover.
+
+## D-062 — SPEC-M16 V2: narrative-inconsistency downgraded from a hard block to a disclosed caveat
+
+Owner-directed, 2026-09-17, amending SPEC-M16's own recorded Invariant ("Streaming only ever
+carries already-verified content... no unverified claim ever reaches the user, in any form" --
+`docs/specs/SPEC-M16-tool-calling-agent-phase1-v1.md`'s Invariants section). Recorded here because
+CLAUDE.md's own stop condition requires exactly this: a fix that weakens a documented invariant is
+not something to change silently in code alone.
+
+**What changed.** `invoke_v2`'s numeric narrative-consistency check
+(`_narrative_consistent_with_tool_facts`) used to hard-fail the whole turn on a mismatch:
+`disposition=error`, the model's real answer replaced with a generic withdrawal message, citations
+dropped. It now sets `verification.status="unverified"` (new literal value,
+`schemas/models.py`'s `VerificationStatus`) and leaves the disposition, narrative, and citations
+exactly as produced -- the frontend surfaces a small caveat instead of hiding the turn. Streaming
+was also reverted from buffer-then-replay back to live (`AnswerChunkEvent`s yielded the instant they
+arrive), since buffering existed specifically to support the hard-block invariant this decision
+retires. A truncated/content-filtered response (`finish_reason in {"length","content_filter"}`) is
+kept as a hard `disposition=error` -- a categorically different, non-probabilistic case (the
+response really is incomplete, not merely unconfirmed) -- but now appends a caveat to the text
+already streamed live rather than retroactively replacing it, since by the time `finish_reason` is
+known the client has already seen it.
+
+**Why.** Across three rounds of independent GPT review targeting this exact mechanism (see SPEC-M16
+project history), every *confirmed* catch was against a deliberately scripted adversarial
+`FakeModelProvider` test double, built specifically to prove the check's own logic -- never a real
+fabrication observed from the actual model (`gpt-5-mini`) in live use. Meanwhile the check's own
+false-positive rate against real live usage was confirmed twice: a natural rounding of a real
+`space_distance` measurement (5.234 m phrased as "5.23 m"), and a correct sum of this turn's own
+real per-type counts (owner-reported live against the real Duplex project) both hard-failed a
+correct answer. Empirically, as observed on this branch so far, this check's own false-positive rate
+exceeds its confirmed true-positive rate against real usage. Combined with the owner's own product-
+positioning decision the same day (V2 is a decision-support tool where the user shares final
+responsibility for judgment calls, not a pure deterministic oracle that must independently prove
+every claim before showing it -- see project memory
+`feedback_review_architecture_vs_product_positioning.md`), a hard block was judged the wrong
+severity for a check with this specific track record: the downside of an occasional real
+fabrication reaching the user with a visible, honest caveat is smaller than the downside of
+regularly discarding correct answers outright, which had already happened twice in ordinary
+manual testing.
+
+**What did not change.** The check itself keeps running and keeps being reported (via
+`verification.status` and the audit trail) -- this is a change in *consequence*, not a removal of
+the check. A response the model itself knows is incomplete (truncated/content-filtered) is still a
+hard failure, since that is a certain defect, not a probabilistic call the user should weigh.

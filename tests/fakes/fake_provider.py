@@ -43,9 +43,15 @@ class ScriptedToolCalls:
 class ScriptedAnswer:
     """SPEC-M16: script a ``stream_turn`` response streaming a final answer
     as the given chunks, e.g. ``ScriptedAnswer(["The project ", "contains 4 doors."])``.
+
+    ``finish_reason`` defaults to ``None`` (a normal stop); pass
+    ``"length"`` or ``"content_filter"`` to script the truncated/blocked-
+    mid-answer case ``invoke_v2`` treats as a hard failure (see
+    `TurnCompleteEvent.finish_reason`'s own docstring).
     """
 
     chunks: list[str] = field(default_factory=list)
+    finish_reason: str | None = None
 
 
 async def sleep_past_deadline(seconds: float, *, then: BaseException | BaseModel) -> Any:
@@ -139,6 +145,6 @@ class FakeModelProvider:
         if isinstance(item, ScriptedAnswer):
             for chunk in item.chunks:
                 yield AnswerChunkEvent(text=chunk)
-            yield TurnCompleteEvent(tool_calls=[], raw_assistant_message={"role": "assistant", "content": "".join(item.chunks)})
+            yield TurnCompleteEvent(tool_calls=[], raw_assistant_message={"role": "assistant", "content": "".join(item.chunks)}, finish_reason=item.finish_reason)
             return
         raise AssertionError(f"FakeModelProvider.stream_turn expected a ScriptedToolCalls or ScriptedAnswer for purpose={purpose!r}, got {item!r}")

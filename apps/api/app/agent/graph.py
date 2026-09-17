@@ -2216,26 +2216,20 @@ Return only a corrected MultiQueryPlan JSON object."""
                 self._audit(state, "v2_turn_continued", "model_called", "V2 agent requested another model turn using this iteration's tool results.", {"iteration": iteration}, planning_mode="tool_calling")
             model_call_count = state.get("model_call_count", 0) + 1
             state["model_call_count"] = model_call_count
-            # Independent-review finding, 2026-09-17, second pass: the
-            # model's final-answer text is now buffered rather than
-            # streamed live (see below) -- without some signal here, an
-            # iteration composing a long answer would go visibly silent
-            # for its whole duration instead of the token-by-token
-            # progress it used to show. Re-uses the same "thinking" signal
-            # SPEC-M16 SS E already established for the first call's own
-            # silent decision round trip (which already gets it once,
-            # before this loop starts -- only re-sent for iteration > 1 so
-            # it isn't emitted twice back-to-back for the first).
+            # Independent-review finding, 2026-09-17, second pass: without
+            # some signal here, an iteration composing a long answer would
+            # go visibly silent for its whole duration before the first
+            # token arrives. Re-uses the same "thinking" signal SPEC-M16
+            # SS E already established for the first call's own silent
+            # decision round trip (which already gets it once, before
+            # this loop starts -- only re-sent for iteration > 1 so it
+            # isn't emitted twice back-to-back for the first).
             if iteration > 1:
                 yield {"type": "thinking"}
             turn_complete = None
             this_iteration_answer_parts: list[str] = []
-            # Independent-review finding, 2026-09-17, second pass: two
-            # separate problems shared this one loop, both confirmed live
-            # with a scripted slow fake model (a real hung/slow deployment
-            # call, not just "too many rounds"):
-            #
-            # (a) The per-iteration deadline/cancel checks above only run
+            # Independent-review finding, 2026-09-17, second pass: the
+            # per-iteration deadline/cancel checks above only run
             # *between* iterations -- a single iteration's own model call
             # sleeping/hanging past `deadline` was never interrupted,
             # confirmed live: deadline=50ms, a 200ms-delayed fake model,
@@ -2244,20 +2238,32 @@ Return only a corrected MultiQueryPlan JSON object."""
             # slow *individual* call is bounded too, not just cumulative
             # iteration count.
             #
-            # (b) `AnswerChunkEvent`s used to be yielded live, the instant
-            # each token arrived -- meaning a narrative later caught as
-            # inconsistent with this turn's own tool results (see
-            # `_narrative_consistent_with_tool_facts` below) had *already*
-            # been streamed to and rendered by the client before its own
-            # rejection was even decided. SPEC-M16's own Invariant
-            # ("streaming only ever carries already-verified content")
-            # was never actually true for this second model call, only
-            # for tool execution. Buffered per-iteration here instead;
-            # only replayed to the client (still as a fast burst of the
-            # same chunks, not one flat block, to keep some sense of
-            # progressive reveal) once the narrative has actually passed
-            # the consistency check below -- an inconsistent one is never
-            # sent to the client in any form, chunked or otherwise.
+            # Owner decision, 2026-09-17: `AnswerChunkEvent`s are streamed
+            # live again (yielded the instant each token arrives), not
+            # buffered-then-replayed. They were buffered for two rounds
+            # (SPEC-M16 SS E, second pass) specifically so a narrative
+            # later caught as inconsistent with this turn's own tool
+            # results could be fully withheld before ever reaching the
+            # client. That reason no longer applies: an inconsistent
+            # narrative is no longer withheld (see the consistency check
+            # below) -- it is shown with a caveat instead, since every
+            # *confirmed* catch of that check across three rounds of
+            # independent review was against a deliberately scripted
+            # adversarial test, never a real fabrication from the actual
+            # model in live use, while the check's own false-positive rate
+            # against real live usage was confirmed twice. Buffering had
+            # a real, felt UX cost with no corresponding real-world
+            # benefit: the model's own answer-composition call is most of
+            # a turn's wall time, and buffering meant the client saw
+            # nothing (just a static "thinking" indicator) for that whole
+            # duration before every token appeared at once in a burst. A
+            # truncated/content-filtered response (finish_reason below) is
+            # a different, non-probabilistic case where the response
+            # really is incomplete -- but since it can only be detected
+            # *after* the stream ends, and the (real, if incomplete) text
+            # has already been streamed live by then, that path now
+            # appends a clear caveat to what was actually shown rather
+            # than trying to retroactively hide it.
             stream_iter = provider.stream_turn(messages=messages, tools=TOOL_DEFINITIONS, purpose="v2_tool_turn").__aiter__()
             while True:
                 remaining = (deadline - time.perf_counter()) if deadline is not None else None
@@ -2287,6 +2293,7 @@ Return only a corrected MultiQueryPlan JSON object."""
                     return
                 if isinstance(event, AnswerChunkEvent):
                     this_iteration_answer_parts.append(event.text)
+                    yield {"type": "answer_chunk", "text": event.text}
                 elif isinstance(event, TurnCompleteEvent):
                     turn_complete = event
             messages.append(turn_complete.raw_assistant_message)
@@ -2302,9 +2309,25 @@ Return only a corrected MultiQueryPlan JSON object."""
                 # docstring.
                 if turn_complete.finish_reason in {"length", "content_filter"}:
                     self._audit(state, "v2_turn_finalized", "error", "V2's model turn ended abnormally before completing its answer.", {"iteration": iteration, "finish_reason": turn_complete.finish_reason}, planning_mode="tool_calling", actual_provider=provider.name, actual_model=provider.model)
+                    # Owner decision, 2026-09-17: appends a caveat to the
+                    # text actually shown instead of replacing it with a
+                    # generic templated message. Now that AnswerChunkEvents
+                    # stream live (see the loop above), whatever partial
+                    # text the model produced before being cut off has
+                    # already reached the client by the time finish_reason
+                    # is known -- swapping in different text here would
+                    # make the client-rendered stream and the saved
+                    # "final" response disagree about what was actually
+                    # said, which is worse than showing the real (if
+                    # incomplete) text with an honest note that it was cut
+                    # off. Citations gathered from any prior iteration's
+                    # tool calls are kept for the same reason: they are
+                    # real, not invalidated by this iteration's own
+                    # truncation.
+                    narrative = "".join(answer_parts) + f"\n\n⚠️ This response was cut off ({turn_complete.finish_reason}) before it finished -- treat it as incomplete."
                     response = AgentResponse(
                         thread_id=thread_id, trace_id=trace_id, disposition=Disposition.ERROR,
-                        answer_markdown=f"The request failed safely: the model's response was cut off ({turn_complete.finish_reason}) before it finished -- not shown as a complete answer.",
+                        answer_markdown=narrative, citations=[Citation.model_validate(item) for item in all_citations],
                         verification=VerificationStatus(status="failed", reason=f"The model turn ended with finish_reason={turn_complete.finish_reason!r} instead of a normal stop."),
                         execution_metadata={"engine": "v2", "model_call_count": model_call_count, "tool_call_count": state.get("tool_call_count", 0), "iterations": iteration, "planning_mode": "tool_calling", "actual_provider": provider.name, "actual_model": provider.model, "finish_reason": turn_complete.finish_reason},
                     )
@@ -2368,32 +2391,31 @@ Return only a corrected MultiQueryPlan JSON object."""
                 # `_narrative_consistent_with_tool_facts`'s own docstring
                 # for this check's real, narrow scope (numeric only).
                 narrative_consistent = self._narrative_consistent_with_tool_facts(narrative, expected_numeric_facts)
+                # Owner decision, 2026-09-17: an inconsistent narrative is
+                # now flagged, not withheld. It used to hard-fail the
+                # whole turn (disposition=error, real narrative replaced
+                # with a generic withdrawal message, citations dropped) --
+                # but across three rounds of independent review, every
+                # *confirmed* catch of this check was against a
+                # deliberately scripted adversarial test double, never a
+                # real fabrication from the actual model in live use,
+                # while the check's own false-positive rate against real
+                # live usage was confirmed twice (a natural rounding of a
+                # real measurement, and a correct sum of this turn's own
+                # real counts -- see `_narrative_consistent_with_tool_facts`'s
+                # own docstring). For a decision-support tool where the
+                # user shares final responsibility for judgment calls (see
+                # project memory), disclosing an unconfirmed claim serves
+                # better than silently discarding a likely-correct answer.
+                # `disposition` is left as whatever the tool-call outcomes
+                # above already earned; only `verification.status` reflects
+                # this check's own result, and citations/narrative are
+                # both kept exactly as produced.
                 if all_citations and not narrative_consistent:
-                    disposition = "error"
-                    verification = VerificationStatus(status="failed", reason="The final answer's own stated numbers could not be matched to any value this turn's tool calls actually returned.")
-                    narrative = "I could not safely finalize this answer: what I was about to say did not match the values the tools actually returned this turn."
-                    self._audit(state, "v2_narrative_consistency", "error", "V2's final narrative did not match this turn's own tool results; answer withheld.", {"expected_numeric_facts": [{"entity_terms": sorted(terms), "numbers": sorted(numbers)} for terms, numbers in expected_numeric_facts]}, planning_mode="tool_calling")
-                    # Real evidence must never sit alongside a withdrawn
-                    # claim it wasn't actually consistent with -- a client
-                    # rendering both together would read as "here's the
-                    # proof," exactly the false credibility this check
-                    # exists to prevent.
-                    all_citations = []
+                    verification = VerificationStatus(status="unverified", reason="The final answer's own stated numbers could not be matched to any value this turn's tool calls actually returned; shown with a caveat rather than withheld.")
+                    self._audit(state, "v2_narrative_consistency", "verification_completed", "V2's final narrative did not match this turn's own tool results; shown to the user with a caveat, not withheld.", {"expected_numeric_facts": [{"entity_terms": sorted(terms), "numbers": sorted(numbers)} for terms, numbers in expected_numeric_facts]}, planning_mode="tool_calling")
                 else:
                     verification = VerificationStatus(status="verified" if all_citations else "not_applicable", reason="Every stated fact came from a verified tool call this turn." if all_citations else "No tool call was made this turn -- nothing here is a claim of fact.")
-                    # Independent-review finding, 2026-09-17, second pass:
-                    # only replayed here, now that the narrative has
-                    # actually passed the consistency check above -- this
-                    # is the *only* place this whole method ever sends
-                    # answer_chunk events to the client. Sent as the same
-                    # per-token chunks the model itself produced (a fast
-                    # burst, not a flat block) purely to preserve some
-                    # sense of progressive reveal; the safety property
-                    # (nothing shown before verification) does not depend
-                    # on this granularity -- an inconsistent narrative
-                    # above never reaches this line at all.
-                    for chunk in this_iteration_answer_parts:
-                        yield {"type": "answer_chunk", "text": chunk}
                 response = AgentResponse(
                     thread_id=thread_id, trace_id=trace_id, disposition=Disposition(disposition),
                     answer_markdown=narrative, citations=[Citation.model_validate(item) for item in all_citations],
