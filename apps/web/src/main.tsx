@@ -98,7 +98,16 @@ function App() {
   // own just-asked message must stay visible for the whole "thinking"
   // period, not only reappear once the answer lands -- otherwise a
   // multi-turn V2 conversation looks like it forgot what was just asked.
-  const [v2Streaming, setV2Streaming] = useState<{ question: string; statuses: string[]; answer: string } | null>(null);
+  // Owner-reported, 2026-09-17: `statuses` used to be a bare `string[]`,
+  // matched by re-deriving the same label string on each update -- with
+  // several *same-named* tool calls in one turn (e.g.
+  // group_elements_by_storey called once per entity type, a real, common
+  // shape), a single "completed" event matched and flipped *every*
+  // "Calling X…" entry sharing that string, not just the one call that
+  // actually finished. Each status now carries a stable `id` (the tool
+  // call's own `call_id`, or the fixed id "thinking" for the "thinking"
+  // ping) so an update can target the exact entry it belongs to.
+  const [v2Streaming, setV2Streaming] = useState<{ question: string; statuses: { id: string; label: string }[]; answer: string } | null>(null);
   // Owner-reported, 2026-09-16 (found live: a real Azure 429 mid-stream):
   // submitV2's own catch block used to call setApiError without setting
   // apiState, so the top-level banner (gated on apiState === "unavailable",
@@ -309,16 +318,30 @@ function App() {
             // turn's wall time. An immediate "thinking" line is the
             // honest mitigation: something visible right away, not
             // several seconds of silence before the first real status.
-            setV2Streaming((current) => current && { ...current, statuses: ["Thinking…"] });
+            //
+            // Owner-reported, 2026-09-17: this used to *replace* the
+            // whole statuses array with a bare ["Thinking…"] -- fine for
+            // the very first ping (nothing to lose yet), but a *later*
+            // "thinking" ping (fired again when composing the final
+            // answer, after this turn's own tool calls already
+            // completed) wiped every "X ✓" line the user had just watched
+            // finish, making the turn look like it had reset back to
+            // square one instead of having made real progress. Now
+            // updates (or adds) only the "thinking" entry itself, by id,
+            // leaving completed tool statuses visible alongside it.
+            setV2Streaming((current) => current && {
+              ...current,
+              statuses: [...current.statuses.filter((s) => s.id !== "thinking"), { id: "thinking", label: "Thinking…" }],
+            });
           } else if (event.type === "tool_status") {
             setV2Streaming((current) => current && {
               ...current,
               statuses: event.status === "started"
-                ? [...current.statuses.filter((s) => s !== "Thinking…"), `Calling ${event.tool_name}…`]
-                : current.statuses.map((s) => s === `Calling ${event.tool_name}…` ? `${event.tool_name} ✓` : s),
+                ? [...current.statuses.filter((s) => s.id !== "thinking"), { id: event.call_id, label: `Calling ${event.tool_name}…` }]
+                : current.statuses.map((s) => s.id === event.call_id ? { id: s.id, label: `${event.tool_name} ✓` } : s),
             });
           } else if (event.type === "answer_chunk") {
-            setV2Streaming((current) => current && { ...current, statuses: current.statuses.filter((s) => s !== "Thinking…"), answer: current.answer + event.text });
+            setV2Streaming((current) => current && { ...current, statuses: current.statuses.filter((s) => s.id !== "thinking"), answer: current.answer + event.text });
           } else if (event.type === "final") {
             finalResponse = event.response as Response;
           } else if (event.type === "error") {
@@ -516,7 +539,7 @@ function App() {
             `turns` all at once at the very end) -- rendered here
             immediately instead, from the same `v2Streaming.question`
             captured the instant submitV2 starts. */}
-        {v2Streaming && <React.Fragment><div className="message-row user"><article className="message user-message"><div className="message-meta"><span>User</span></div><p>{v2Streaming.question}</p></article></div><div className="message-row assistant"><article className="message assistant-message v2-streaming"><div className="message-meta"><span>Assistant</span><span className="engine-badge">V2 (agent)</span><span>working…</span></div>{v2Streaming.statuses.map((status, index) => <p key={index} className="v2-tool-status">{status}</p>)}{v2Streaming.answer && <p>{renderAnswerMarkdown(v2Streaming.answer)}</p>}</article></div></React.Fragment>}
+        {v2Streaming && <React.Fragment><div className="message-row user"><article className="message user-message"><div className="message-meta"><span>User</span></div><p>{v2Streaming.question}</p></article></div><div className="message-row assistant"><article className="message assistant-message v2-streaming"><div className="message-meta"><span>Assistant</span><span className="engine-badge">V2 (agent)</span><span>working…</span></div>{v2Streaming.statuses.map((status) => <p key={status.id} className="v2-tool-status">{status.label}</p>)}{v2Streaming.answer && <p>{renderAnswerMarkdown(v2Streaming.answer)}</p>}</article></div></React.Fragment>}
         {/* Owner-reported, 2026-09-16: a V2 turn that fails mid-stream (a
             real Azure 429 during live testing surfaced this) used to leave
             the conversation panel looking silently empty -- v2Streaming is

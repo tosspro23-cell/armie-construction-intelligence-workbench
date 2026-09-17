@@ -2074,7 +2074,7 @@ Return only a corrected MultiQueryPlan JSON object."""
 
         Yields plain dicts for the caller (an SSE endpoint, or a test
         harness collecting them into a list) to forward:
-        - {"type": "tool_status", "tool_name": ..., "status": "started"|"completed"}
+        - {"type": "tool_status", "tool_name": ..., "call_id": ..., "status": "started"|"completed"}
         - {"type": "answer_chunk", "text": ...}
         - {"type": "final", "response": AgentResponse}  -- always the last event
 
@@ -2437,7 +2437,16 @@ Return only a corrected MultiQueryPlan JSON object."""
                 yield {"type": "final", "response": response}
                 return
             for tool_call in turn_complete.tool_calls:
-                yield {"type": "tool_status", "tool_name": tool_call.tool_name, "status": "started"}
+                # Owner-reported, 2026-09-17: with several *same-named*
+                # tool calls in one turn (e.g. group_elements_by_storey
+                # called once per entity type -- a real, common shape),
+                # the client had only `tool_name` to key a status update
+                # by, so a single "completed" event flipped *every*
+                # matching "Calling X…" line to "X ✓" at once, regardless
+                # of which specific call actually finished. `call_id` (already
+                # unique per `ToolCallEvent`) lets the client match a
+                # status transition to the exact call it belongs to.
+                yield {"type": "tool_status", "tool_name": tool_call.tool_name, "call_id": tool_call.call_id, "status": "started"}
             # Independent-review finding, 2026-09-17, third pass: the
             # deadline/cancel machinery above only ever bounded the
             # *model's* own stream_turn call -- confirmed live with a
@@ -2620,7 +2629,7 @@ Return only a corrected MultiQueryPlan JSON object."""
                         "warnings": tool_result.get("warnings") or [],
                     }, default=str),
                 })
-                yield {"type": "tool_status", "tool_name": tool_call.tool_name, "status": "completed"}
+                yield {"type": "tool_status", "tool_name": tool_call.tool_name, "call_id": tool_call.call_id, "status": "completed"}
         # SPEC-M16 Invariants: a hard, enforced cap -- never an unbounded loop.
         self._audit(state, "v2_turn_error", "error", "V2 agent exceeded its bounded tool-call iteration limit without finalizing.", {"max_iterations": max_iterations}, planning_mode="tool_calling")
         response = AgentResponse(

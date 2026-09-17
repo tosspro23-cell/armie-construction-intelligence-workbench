@@ -85,6 +85,48 @@ def test_v2_engine_answers_correctly_via_the_real_endpoint(tmp_path: Path) -> No
     assert len(final["citations"]) > 0
 
 
+def test_v2_tool_status_events_carry_a_stable_call_id_for_same_named_calls(tmp_path: Path) -> None:
+    """Owner-reported, 2026-09-17 (found live against the real Duplex
+    project): several *same-named* tool calls in one turn (here,
+    group_elements_by_storey called once per entity type -- a real,
+    common shape) each emitted a `tool_status` event carrying only
+    `tool_name`, with no way to tell one call's own "started"/"completed"
+    pair apart from another's sharing the same name. The frontend, which
+    matched status updates by re-deriving the same label string, flipped
+    every matching "Calling X…" line to "X ✓" on the *first* completion,
+    regardless of which specific call had actually finished.
+
+    `call_id` (already unique per `ToolCallEvent`, just not previously
+    forwarded on this event) lets a client match a transition to the
+    exact call it belongs to.
+    """
+    import app.main as main_module
+
+    settings = _settings(tmp_path)
+    fake = FakeModelProvider()
+    fake.script("v2_tool_turn", ScriptedToolCalls([
+        ("group_elements_by_storey", {"entity_type": "IfcWall"}),
+        ("group_elements_by_storey", {"entity_type": "IfcSlab"}),
+        ("group_elements_by_storey", {"entity_type": "IfcColumn"}),
+    ]))
+    fake.script("v2_tool_turn", ScriptedAnswer(["Walls, slabs, and columns are grouped by storey as shown."]))
+    container, service = _build(settings, fake)
+    main_module.app.state.container = container
+    main_module.app.state.agent = service
+    main_module.app.state.requests = {}
+
+    response = asyncio.run(main_module.chat(ChatRequest(request_id="v2-same-name-1", thread_id="v2-same-name-thread", question="Group walls, slabs, and columns by storey.", engine="v2")))
+    events = asyncio.run(_collect_sse_events(response))
+
+    tool_statuses = [event for event in events if event["type"] == "tool_status"]
+    assert len(tool_statuses) == 6  # 3 calls x (started + completed)
+    assert all("call_id" in status and status["call_id"] for status in tool_statuses)
+    started_ids = {status["call_id"] for status in tool_statuses if status["status"] == "started"}
+    completed_ids = {status["call_id"] for status in tool_statuses if status["status"] == "completed"}
+    assert len(started_ids) == 3  # three distinct calls, not collapsed by shared tool_name
+    assert started_ids == completed_ids  # every started call_id has its own matching completed event
+
+
 def test_v2_engine_streams_the_answer_incrementally(tmp_path: Path) -> None:
     """The whole point of streaming: multiple distinct answer_chunk events,
     not the full answer delivered as a single chunk.
