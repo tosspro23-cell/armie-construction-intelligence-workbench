@@ -157,6 +157,47 @@ def test_v2_engine_recent_turn_memory_persists_and_is_reused(tmp_path: Path) -> 
     assert final2["disposition"] == "answered"
 
 
+def test_v2_clarification_required_turn_still_persists_conversation_memory(tmp_path: Path) -> None:
+    """Independent-review finding, 2026-09-17, third pass: `_v2_sse_stream`
+    only persisted `v2_recent_turns` when `disposition == "answered"` --
+    a turn that honestly asked the user to disambiguate
+    (disposition=clarification_required) was never saved, so the *next*
+    turn's model had no memory of the question it had just asked or why,
+    breaking a clarification round-trip's continuity. V1's own `chat()`
+    (main.py:550) already persists for both "answered" and
+    "clarification_required"; V2 had quietly diverged from that
+    established convention.
+
+    space_distance against armie_demo.ifc (which has no IfcSpace elements
+    at all) deterministically triggers disposition=clarification_required,
+    same technique test_v2_representative_eval.py's own clarification test
+    uses -- no synthetic/mocked tool_result needed.
+    """
+    import app.main as main_module
+
+    settings = _settings(tmp_path, conversation_memory_turns=6)
+    fake = FakeModelProvider()
+    fake.script("v2_tool_turn", ScriptedToolCalls([("space_distance", {"from_space": "Nonexistent Room A", "to_space": "Nonexistent Room B"})]))
+    fake.script("v2_tool_turn", ScriptedAnswer(["Please specify the exact room identifiers you mean."]))
+    fake.script("v2_tool_turn", ScriptedAnswer(["Following up on the room clarification, here is more detail."]))
+    container, service = _build(settings, fake)
+    main_module.app.state.container = container
+    main_module.app.state.agent = service
+    main_module.app.state.requests = {}
+
+    r1 = asyncio.run(main_module.chat(ChatRequest(request_id="v2-clarify-mem-1", thread_id="v2-clarify-mem-thread", question="What is the distance between room A and room B?", engine="v2")))
+    events1 = asyncio.run(_collect_sse_events(r1))
+    final1 = [event for event in events1 if event["type"] == "final"][0]["response"]
+    assert final1["disposition"] == "clarification_required"
+
+    r2 = asyncio.run(main_module.chat(ChatRequest(request_id="v2-clarify-mem-2", thread_id="v2-clarify-mem-thread", question="I meant B204 and B202.", engine="v2")))
+    asyncio.run(_collect_sse_events(r2))
+
+    second_call_messages = fake.calls[-1].prompt
+    assert "What is the distance between room A and room B?" in second_call_messages
+    assert "Please specify the exact room identifiers you mean." in second_call_messages
+
+
 def test_v2_never_streams_a_narrative_before_it_passes_verification(tmp_path: Path) -> None:
     """Independent-review finding, 2026-09-17, second pass: `answer_chunk`
     events used to be forwarded to the client the instant each token

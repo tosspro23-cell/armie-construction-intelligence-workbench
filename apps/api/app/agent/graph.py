@@ -1961,7 +1961,24 @@ Return only a corrected MultiQueryPlan JSON object."""
             "a total count, that is the most detail this system can give; do not call the same tool "
             "again with the same or a differently-worded request hoping for a different or more "
             "complete result. State the exact total, describe the sample honestly as partial, and "
-            "stop there rather than retrying."
+            "stop there rather than retrying. "
+            # Independent-review finding, 2026-09-17, third pass: a sample
+            # cap is safe for a total *count* (that number is exact
+            # regardless of sampling) but not for a claim about *how many
+            # distinct values/types* exist -- e.g. "how many distinct
+            # window sizes" answered from only the first 40 of 85
+            # elements could truthfully report 3 distinct sizes in the
+            # sample while a 4th exists only among the omitted ones, and
+            # nothing in the tool result or the numeric consistency check
+            # catches this, since the reported total_count is itself
+            # correct. Not yet fixed by a deterministic tool (that would
+            # need a real distinct-value-grouping operation, out of scope
+            # here) -- this is a prompt-level mitigation only.
+            "If a result was capped to a sample plus a total count, you cannot truthfully claim to "
+            "know how many *distinct* values, types, or sizes exist among ALL of them -- only how "
+            "many appear in the sample you were shown. Never state a distinct-value/type count as "
+            "if it were exhaustive when the underlying list was sampled; say explicitly that further, "
+            "unseen items might include additional distinct values."
         )
 
     def _v2_dispatch_tool(self, tool_call: ToolCallEvent, state: GraphState) -> dict[str, Any]:
@@ -2391,7 +2408,60 @@ Return only a corrected MultiQueryPlan JSON object."""
                 return
             for tool_call in turn_complete.tool_calls:
                 yield {"type": "tool_status", "tool_name": tool_call.tool_name, "status": "started"}
-            results = await asyncio.gather(*(asyncio.to_thread(self._v2_dispatch_tool, tool_call, state) for tool_call in turn_complete.tool_calls))
+            # Independent-review finding, 2026-09-17, third pass: the
+            # deadline/cancel machinery above only ever bounded the
+            # *model's* own stream_turn call -- confirmed live with a
+            # 50ms deadline and a 200ms delay injected into tool dispatch
+            # instead of the model stream: this asyncio.gather ran to
+            # completion regardless, ~210ms elapsed against the 50ms
+            # budget. A hung or slow tool call (a stuck DB read, a slow
+            # IFC query) was never actually interruptible, only the model
+            # round trip was.
+            #
+            # A deadline that has already passed is caught before dispatch
+            # even starts. For the dispatch itself: `asyncio.wait_for`
+            # (used for the model stream above) does NOT work here --
+            # `_v2_dispatch_tool` runs in a real OS thread via
+            # `asyncio.to_thread`, and a thread already executing blocking
+            # work cannot actually be cancelled; `wait_for` calls `cancel()`
+            # on timeout and then *awaits that cancellation completing*,
+            # which for an uncancellable thread means it silently blocks
+            # until the thread finishes anyway (confirmed live: still ~207ms
+            # elapsed against a 50ms deadline, `wait_for` in name only).
+            # `asyncio.wait(..., timeout=...)` instead returns as soon as
+            # the timeout elapses regardless of whether the still-running
+            # tasks ever finish -- the orphaned thread keeps running to
+            # completion in the background (harmless: these are read-only
+            # queries) but this turn stops waiting on it and reports the
+            # timeout promptly, matching the model-stream path's own
+            # promptness.
+            dispatch_remaining = (deadline - time.perf_counter()) if deadline is not None else None
+            if dispatch_remaining is not None and dispatch_remaining <= 0:
+                self._audit(state, "v2_turn_error", "timeout", "V2 agent exceeded its bounded wall-clock deadline before tool dispatch.", {"iteration": iteration}, planning_mode="tool_calling")
+                response = AgentResponse(
+                    thread_id=thread_id, trace_id=trace_id, disposition=Disposition.TIMEOUT,
+                    answer_markdown="The request exceeded its time limit. Please retry with a narrower question.",
+                    verification=VerificationStatus(status="not_applicable", reason="Timed out before a final answer was reached."),
+                    execution_metadata={"engine": "v2", "model_call_count": state.get("model_call_count", 0), "tool_call_count": state.get("tool_call_count", 0), "iterations": iteration, "planning_mode": "tool_calling"},
+                )
+                yield {"type": "final", "response": response}
+                return
+            dispatch_tasks = [asyncio.ensure_future(asyncio.to_thread(self._v2_dispatch_tool, tool_call, state)) for tool_call in turn_complete.tool_calls]
+            if dispatch_remaining is not None:
+                _done, pending = await asyncio.wait(dispatch_tasks, timeout=dispatch_remaining)
+                if pending:
+                    for task in pending:
+                        task.cancel()  # best-effort only -- cannot stop an already-running thread, just detaches from it
+                    self._audit(state, "v2_turn_error", "timeout", "V2 agent's tool dispatch itself exceeded the bounded wall-clock deadline.", {"iteration": iteration}, planning_mode="tool_calling")
+                    response = AgentResponse(
+                        thread_id=thread_id, trace_id=trace_id, disposition=Disposition.TIMEOUT,
+                        answer_markdown="The request exceeded its time limit. Please retry with a narrower question.",
+                        verification=VerificationStatus(status="not_applicable", reason="Timed out before a final answer was reached."),
+                        execution_metadata={"engine": "v2", "model_call_count": state.get("model_call_count", 0), "tool_call_count": state.get("tool_call_count", 0), "iterations": iteration, "planning_mode": "tool_calling"},
+                    )
+                    yield {"type": "final", "response": response}
+                    return
+            results = await asyncio.gather(*dispatch_tasks)
             for tool_call, result in zip(turn_complete.tool_calls, results):
                 tool_result = result.get("tool_result", {})
                 # Independent-review finding, 2026-09-17: was
@@ -2480,7 +2550,11 @@ Return only a corrected MultiQueryPlan JSON object."""
                     tool_result_value = {
                         "total_count": len(tool_result_value),
                         "sample_items": tool_result_value[:_V2_TOOL_RESULT_LIST_CAP],
-                        "note": f"{len(tool_result_value) - _V2_TOOL_RESULT_LIST_CAP} further item(s) omitted for brevity; the total_count above is exact.",
+                        "note": (
+                            f"{len(tool_result_value) - _V2_TOOL_RESULT_LIST_CAP} further item(s) omitted for brevity; the total_count above is exact. "
+                            "The omitted items may include distinct values/types/sizes not present in sample_items -- "
+                            "do not state a count of distinct values as exhaustive based on this sample alone."
+                        ),
                     }
                 messages.append({
                     "role": "tool", "tool_call_id": tool_call.call_id,
@@ -2580,6 +2654,42 @@ Return only a corrected MultiQueryPlan JSON object."""
                 for sub_value in value.values():
                     _add(sub_value)
                 _add(sum(value.values()))
+            else:
+                # Independent-review finding, 2026-09-17, third pass:
+                # get_element_properties's own shape ({"element": {...},
+                # "storey": ..., "properties": {...flattened...}}) matched
+                # neither special case above, so this method returned an
+                # *empty* set for it -- silently disabling both consistency
+                # checks for every property-lookup answer (confirmed live:
+                # "Every door is 99999 metres high and fire certified" after
+                # a real get_element_properties call passed unchecked, since
+                # no expected numbers were ever recorded to check against).
+                # Recursing into every nested value pulls out whatever real
+                # numeric leaves the tool actually returned (heights,
+                # areas, express IDs, ...) as candidate real facts; this can
+                # only make the check more permissive (more real numbers to
+                # match against), never less correct.
+                for sub_value in value.values():
+                    numbers |= AgentService._numeric_tokens_from_result_value(sub_value)
+        elif isinstance(value, list):
+            if value and all(isinstance(item, dict) and "status" in item for item in value):
+                # reconcile_doors_windows's own shape: a list of per-tag
+                # comparison items, each carrying a "status" (matched/
+                # dimension_mismatch/missing_in_pdf/missing_in_ifc). The
+                # real fact a correct summary states here is normally a
+                # *count of items per status* ("6 matched, 1 mismatch"),
+                # which is not any single item's own width/height leaf
+                # value -- recursing into items alone (below) would leave
+                # those summary counts unrecognized as real numbers and
+                # reject a correct summary outright. Computed alongside,
+                # not instead of, each item's own leaf values.
+                from collections import Counter
+
+                for count in Counter(item.get("status") for item in value).values():
+                    _add(count)
+                _add(len(value))
+            for item in value:
+                numbers |= AgentService._numeric_tokens_from_result_value(item)
         return numbers
 
     @staticmethod
@@ -2648,6 +2758,34 @@ Return only a corrected MultiQueryPlan JSON object."""
         a small absolute tolerance, since a model naturally rounds a real
         5.234 m distance to "5.23 m" or "5.2 m" when composing prose; that
         is not fabrication and this check must not treat it as such.
+
+        Independent-review finding, 2026-09-17, third pass -- two real
+        bugs in how check 2 was applied, both confirmed live and fixed
+        here:
+
+        (a) **Decoy bypass.** "There are 99999 doors (4 checked)." used to
+        pass: the window around "doors" contains both "99999" and the
+        real "4", and the old rule only required *some* nearby number to
+        match ("if nearby_numbers and not any(...)"). A real value sitting
+        next to a fabricated one rescued it. Fixed by requiring *every*
+        nearby number to be individually explainable, not just one of
+        them.
+
+        (b) **Same-entity, different-scope false positive.** "The whole
+        project contains 4 doors. On the first floor there are 2 doors."
+        is a correct answer to two *separate* tool calls (project-wide
+        count=4, Level-01-filtered count=2) -- but checking each call's
+        own narrow expected set against *every* occurrence of the shared
+        noun "doors" rejected it: the "4 doors" call's own check saw the
+        unrelated "2" near a different "doors" mention and had nothing in
+        its own {4} to explain it. Multi-scope comparison in one answer is
+        V2's core value proposition, so this was a serious regression, not
+        an edge case. Fixed by first merging expected values across every
+        tool call that shares the same entity terms, then checking each
+        occurrence's nearby numbers against that *combined* set -- a
+        legitimate second scope's value is now itself part of what
+        "doors" is allowed to mean anywhere in the answer, while a value
+        that matches nothing in the combined set (99999) is still caught.
         """
         import re
 
@@ -2659,21 +2797,33 @@ Return only a corrected MultiQueryPlan JSON object."""
         answer_lower = answer_markdown.lower()
         answer_numbers = [float(match) for match in re.findall(r"\d+(?:\.\d+)?", answer_markdown)]
 
+        # Check 1: baseline presence, any language -- per tool call, not
+        # merged, so a call whose own value is never mentioned anywhere
+        # still fails even if some *other* call's value happens to appear.
         for entity_terms, expected in expected_numeric_facts:
-            # Check 1: baseline presence, any language.
             if not any(_matches(value, actual) for value in expected for actual in answer_numbers):
                 return False
-            # Check 2: entity-bound -- a number within a short window of
-            # this call's own entity noun must be a real one. A window of
-            # ~15 characters on each side comfortably covers "4 doors" /
-            # "there are 99999 doors" / "doors: 99999" without reaching
-            # into an unrelated adjacent sentence.
+
+        # Check 2: entity-bound, merged by shared entity terms (see (b) above).
+        combined_by_entity: dict[frozenset[str], set[float]] = {}
+        for entity_terms, expected in expected_numeric_facts:
+            if not entity_terms:
+                continue
+            combined_by_entity.setdefault(entity_terms, set()).update(expected)
+
+        for entity_terms, combined_expected in combined_by_entity.items():
+            # A number within a short window of this entity's own noun must
+            # be one of the real values for *any* tool call about this
+            # entity this turn. A window of ~15 characters on each side
+            # comfortably covers "4 doors" / "there are 99999 doors" /
+            # "doors: 99999" without reaching into an unrelated sentence.
             for term in entity_terms:
                 for match in re.finditer(re.escape(term), answer_lower):
                     window = answer_lower[max(0, match.start() - 15): match.end() + 15]
                     nearby_numbers = [float(n) for n in re.findall(r"\d+(?:\.\d+)?", window)]
-                    if nearby_numbers and not any(_matches(value, actual) for value in expected for actual in nearby_numbers):
-                        return False
+                    for actual in nearby_numbers:
+                        if not any(_matches(value, actual) for value in combined_expected):
+                            return False
         return True
 
     @staticmethod

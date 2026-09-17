@@ -642,7 +642,17 @@ async def _v2_sse_stream(agent: AgentService, conversations: ConversationStore, 
                 # chat()'s own `context_persist_error` (D-014) already does
                 # for V1's conversation-context writes.
                 context_persist_error: str | None = None
-                if final_response.disposition.value == "answered":
+                # Independent-review finding, 2026-09-17, third pass: only
+                # "answered" persisted `v2_recent_turns` -- a turn that
+                # honestly asked the user to disambiguate
+                # (disposition=clarification_required) never got saved, so
+                # the *next* turn's model saw no trace of the question it
+                # had just asked or why, breaking a clarification
+                # round-trip's continuity. V1's own `chat()` (main.py:550)
+                # already persists for both "answered" and
+                # "clarification_required" -- this brings V2 in line with
+                # that existing convention instead of a narrower one.
+                if final_response.disposition.value in {"answered", "clarification_required"}:
                     updated_turns = (recent_turns + [{"question": question, "answer": final_response.answer_markdown}])[-memory_turns:]
                     try:
                         await asyncio.to_thread(conversations.set, thread_id, {**context, "v2_recent_turns": updated_turns})

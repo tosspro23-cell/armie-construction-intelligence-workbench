@@ -55,7 +55,14 @@ async def _run(service: AgentService, resources: ProjectResources, question: str
     # group_elements_by_storey result to appear somewhere in the answer,
     # not just a plausible-looking word.
     ("Which storey has the most windows?", ("group_elements_by_storey", {"entity_type": "IfcWindow", "postprocess": "argmax"}), "Level 01 and Level 02 (tied, 2 each)"),
-    ("What properties does the door have?", ("get_element_properties", {"entity_type": "IfcDoor"}), "Level"),
+    # Independent-review finding, 2026-09-17, third pass: was just "Level"
+    # -- get_element_properties's real result is a list of per-element
+    # property dicts, which _numeric_tokens_from_result_value used to
+    # return zero facts for entirely (silently disabling the consistency
+    # check for every property-lookup answer); now it recurses into the
+    # real property values (the fixture's real door height is 2.1 m), so
+    # this answer must actually state one to pass.
+    ("What properties does the door have?", ("get_element_properties", {"entity_type": "IfcDoor"}), "2.1"),
 ])
 def test_v2_representative_eval_single_tool_operations(question: str, tool_call: tuple, expected_fragment: str, tmp_path: Path) -> None:
     fake = FakeModelProvider()
@@ -246,6 +253,105 @@ def test_v2_rejects_a_fabricated_number_hidden_behind_a_correct_decoy(tmp_path: 
     assert "99999" not in response.answer_markdown
 
 
+def test_v2_rejects_a_fabricated_number_sitting_in_the_same_window_as_a_real_one(tmp_path: Path) -> None:
+    """Independent-review finding, 2026-09-17, fourth pass: the decoy fix
+    above (real number placed in an *earlier, separate* sentence) still
+    left a narrower variant open -- a real number placed in the *same*
+    ~15-character window as the fabricated one, e.g. "There are 99999
+    doors (4 checked)." Both "99999" and the real "4" fall within one
+    scan of the word "doors," and the old rule only required *some*
+    nearby number to match ("if nearby_numbers and not any(...)"): the
+    real "4" made that check pass even though "99999" itself never
+    matched anything.
+
+    Fixed by requiring *every* number found near the entity noun to be
+    individually explainable, not just one of them.
+    """
+    fake = FakeModelProvider()
+    fake.script("v2_tool_turn", ScriptedToolCalls([("count_elements", {"entity_type": "IfcDoor"})]))
+    fake.script("v2_tool_turn", ScriptedAnswer(["There are 99999 doors (4 checked)."]))
+    _, service, resources = _service(tmp_path, fake)
+
+    response = asyncio.run(_run(service, resources, "How many doors are there?", "eval-fabrication-same-window-decoy"))
+
+    assert response.disposition.value == "error"
+    assert response.verification.status == "failed"
+    assert "99999" not in response.answer_markdown
+
+
+def test_v2_accepts_the_same_entity_reported_at_two_different_scopes(tmp_path: Path) -> None:
+    """Independent-review finding, 2026-09-17, fourth pass: a genuinely
+    correct answer comparing the *same* entity at two different
+    scopes/filters in one turn -- project-wide count_elements(IfcDoor)=4,
+    then a second count_elements(IfcDoor, storey="Level 01")=2 -- was
+    wrongly rejected. Each tool call's own narrow expected set ({4} for
+    the first, {2} for the second) was checked against *every* occurrence
+    of the shared noun "doors" in the answer: the "{4}" call's own check
+    saw the unrelated "2" near a different "doors" mention elsewhere in
+    the text and had nothing in its own set to explain it.
+
+    Multi-scope comparison in a single answer is V2's core value
+    proposition (the whole reason a typed, single-shape V1 QueryPlan
+    can't express this class of question) -- wrongly rejecting it here
+    would be a serious regression, not an edge case. Fixed by merging
+    expected values across every tool call that shares the same entity
+    terms before running the entity-bound check, so a legitimate second
+    scope's real value is itself part of what "doors" is allowed to mean
+    anywhere in the answer.
+    """
+    fake = FakeModelProvider()
+    fake.script("v2_tool_turn", ScriptedToolCalls([
+        ("count_elements", {"entity_type": "IfcDoor"}),
+        ("count_elements", {"entity_type": "IfcDoor", "storey": "Level 01"}),
+    ]))
+    fake.script("v2_tool_turn", ScriptedAnswer(["The whole project contains 4 doors. On the first floor there are 2 doors."]))
+    _, service, resources = _service(tmp_path, fake)
+
+    response = asyncio.run(_run(service, resources, "How many doors total, and how many on the first floor?", "eval-multi-scope"))
+
+    assert response.disposition.value == "answered"
+    assert response.verification.status == "verified"
+    assert "4 doors" in response.answer_markdown and "2 doors" in response.answer_markdown
+
+    # The combined-expected-set fix must not have simply widened the check
+    # into accepting anything -- a value that matches neither call's real
+    # result is still caught.
+    fake_bad = FakeModelProvider()
+    fake_bad.script("v2_tool_turn", ScriptedToolCalls([
+        ("count_elements", {"entity_type": "IfcDoor"}),
+        ("count_elements", {"entity_type": "IfcDoor", "storey": "Level 01"}),
+    ]))
+    fake_bad.script("v2_tool_turn", ScriptedAnswer(["The whole project contains 4 doors. On the first floor there are 99999 doors."]))
+    _, service_bad, resources_bad = _service(tmp_path, fake_bad)
+    response_bad = asyncio.run(_run(service_bad, resources_bad, "How many doors total, and how many on the first floor?", "eval-multi-scope-bad"))
+    assert response_bad.disposition.value == "error"
+
+
+def test_v2_rejects_a_fabricated_property_value_from_a_list_shaped_tool_result(tmp_path: Path) -> None:
+    """Independent-review finding, 2026-09-17, fourth pass: get_element_
+    properties returns a *list* of per-element property dicts (e.g.
+    [{"element": {...}, "storey": ..., "properties": {"Height": 2.1,
+    ...}}, ...]) -- a shape `_numeric_tokens_from_result_value` didn't
+    handle at all, returning an empty set and silently disabling both
+    consistency checks for every property-lookup answer. Confirmed live:
+    "Every door is 99999 metres high and fire certified" after a real
+    get_element_properties call (real height 2.1 m) passed unchecked.
+
+    Fixed by recursing into list/dict-shaped tool results to pull out
+    every real numeric leaf value as a candidate fact.
+    """
+    fake = FakeModelProvider()
+    fake.script("v2_tool_turn", ScriptedToolCalls([("get_element_properties", {"entity_type": "IfcDoor"})]))
+    fake.script("v2_tool_turn", ScriptedAnswer(["Every door is 99999 metres high and fire certified."]))
+    _, service, resources = _service(tmp_path, fake)
+
+    response = asyncio.run(_run(service, resources, "What properties does the door have?", "eval-property-fabrication"))
+
+    assert response.disposition.value == "error"
+    assert response.verification.status == "failed"
+    assert "99999" not in response.answer_markdown
+
+
 def test_narrative_consistency_check_tolerates_natural_rounding_of_a_measurement() -> None:
     """Owner-reported, 2026-09-17 (found live): a real space_distance call
     returning {"value_m": 5.234, ...} (the same shape aggregate_quantity
@@ -347,6 +453,73 @@ def test_v2_respects_a_deadline_that_expires_mid_model_call(tmp_path: Path) -> N
     assert final.disposition.value == "timeout"
     assert elapsed < 0.15  # nowhere near the fake model's own full 200ms delay
     assert "This should never be reached in time." not in final.answer_markdown
+
+
+def test_v2_respects_a_deadline_that_expires_mid_tool_dispatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Independent-review finding, 2026-09-17, third pass: the mid-model-
+    call fix above only bounds the *model's* own stream_turn call --
+    reproduced live by injecting a 200ms blocking delay into
+    `_v2_dispatch_tool` itself (not the model), with the model answering
+    instantly: a still-valid 50ms deadline at iteration start, and the
+    turn still finalized normally ~210ms later, no timeout at all. A hung
+    or slow tool call (a stuck DB read, a slow IFC query) was never
+    actually interruptible, only the model round trip was.
+
+    Fixed by dispatching via `asyncio.wait(..., timeout=...)` instead of a
+    bare `asyncio.gather` -- and specifically not via `asyncio.wait_for`,
+    which turned out not to work here either: `_v2_dispatch_tool` runs in
+    a real OS thread via `asyncio.to_thread`, and a thread already
+    executing blocking work cannot actually be cancelled, so `wait_for`
+    ends up awaiting that (failed) cancellation to completion -- silently
+    blocking for the tool's full duration anyway. `asyncio.wait` returns
+    at the timeout regardless of whether the still-running task ever
+    finishes, so the turn stops waiting on it promptly; the orphaned
+    thread keeps running in the background (harmless: these are read-only
+    queries) but is no longer this turn's problem.
+    """
+    import time as _time
+
+    fake = FakeModelProvider()
+    fake.script("v2_tool_turn", ScriptedToolCalls([("count_elements", {"entity_type": "IfcDoor"})]))
+    fake.script("v2_tool_turn", ScriptedAnswer(["The project has 4 doors."]))
+    _, service, resources = _service(tmp_path, fake)
+    resources.ifc_repository.metadata()  # warm the cache, same reason as the mid-model-call test above
+
+    real_dispatch = AgentService._v2_dispatch_tool
+
+    def slow_dispatch(self, tool_call, state):
+        _time.sleep(0.2)  # blocking, not asyncio.sleep -- runs inside asyncio.to_thread same as a real hung tool call
+        return real_dispatch(self, tool_call, state)
+
+    monkeypatch.setattr(AgentService, "_v2_dispatch_tool", slow_dispatch)
+
+    final = None
+    elapsed_to_final: float | None = None
+    async def _run_with_deadline():
+        nonlocal final, elapsed_to_final
+        t0 = _time.perf_counter()
+        deadline = t0 + 0.05
+        async for event in service.invoke_v2(
+            project_resources=resources, thread_id="eval-tool-dispatch-timeout", question="How many doors are there?",
+            viewer_context=None, deadline=deadline,
+        ):
+            if event["type"] == "final":
+                final = event["response"]
+                elapsed_to_final = _time.perf_counter() - t0
+    # Independent-review of this test itself: timing must be measured
+    # *inside* the coroutine, up to the moment the "final" event is
+    # yielded -- not around the whole `asyncio.run()` call. The orphaned,
+    # uncancellable dispatch thread keeps running after the timeout is
+    # reported; asyncio.run()'s own shutdown phase waits for every
+    # leftover task (including that one) before returning, which would
+    # make this test see ~200ms regardless of how promptly the turn
+    # itself actually gave up -- measuring the production code's own
+    # behavior, not asyncio.run()'s unrelated cleanup cost.
+    asyncio.run(_run_with_deadline())
+
+    assert final.disposition.value == "timeout"
+    assert elapsed_to_final is not None
+    assert elapsed_to_final < 0.15  # nowhere near the slow tool call's own full 200ms delay
 
 
 def test_v2_respects_a_cancellation_request(tmp_path: Path) -> None:
