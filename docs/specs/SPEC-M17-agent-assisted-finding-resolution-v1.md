@@ -99,7 +99,7 @@ Checked directly against the current codebase, not assumed:
 - `FindingHistoryEntry` gains `proposal_snapshot: AgentProposal | None = None` — the immutable
   copy `approve_proposal` (§4C) writes into history, independent of the finding's own live
   `pending_proposal` field.
-- `apps/api/migrations/0007_agent_proposal.sql` (new, additive-only, same hand-applied pattern as
+- `apps/api/migrations/0008_agent_proposal.sql` (new, additive-only, same hand-applied pattern as
   every migration before it): `ALTER TABLE engineering_findings ADD COLUMN pending_proposal
   JSONB;` and `ALTER TABLE engineering_finding_history ADD COLUMN proposal_snapshot JSONB;` — both
   tables are fully normalized, column-per-field (confirmed by reading `0006_engineering_
@@ -215,7 +215,7 @@ destination rule) is unchanged and not reproduced here.
 `apps/api/app/finding_workflow.py` (`approve_proposal`/`reject_proposal` table entries),
 `apps/api/app/agent/graph.py` (`AgentService.propose_finding_resolution`, new — `invoke_v2` itself
 unmodified), `apps/api/app/main.py` (one new route, two new legal actions on the existing
-transition route), `apps/api/migrations/0007_agent_proposal.sql` (new), `.github/workflows/
+transition route), `apps/api/migrations/0008_agent_proposal.sql` (new), `.github/workflows/
 ci.yml` (migration-apply step), `apps/web/src/Findings.tsx`, new tests,
 `docs/decisions/README.md`, `PROJECT_STATE.md`.
 

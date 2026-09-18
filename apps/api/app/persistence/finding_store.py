@@ -3,7 +3,13 @@ from __future__ import annotations
 import threading
 from typing import Protocol
 
-from app.schemas.models import EngineeringFinding, FindingHistoryEntry, FindingStatus, utc_now
+from app.schemas.models import (
+    AgentProposal,
+    EngineeringFinding,
+    FindingHistoryEntry,
+    FindingStatus,
+    utc_now,
+)
 
 # A finding in any of these statuses is still "in flight" -- a fresh
 # reconciliation run detecting the same tag/finding_type updates this row
@@ -45,7 +51,7 @@ class FindingStore(Protocol):
 
     def append_transition(
         self, finding_id: str, *, to_status: FindingStatus, actor_session_id: str | None, note: str | None,
-        updates: dict | None = None,
+        updates: dict | None = None, proposal_snapshot: AgentProposal | None = None,
     ) -> EngineeringFinding:
         """Append one `FindingHistoryEntry` and update `status` (plus any
         `updates`, e.g. a re-verify's fresh `detail`/observed values) on the
@@ -53,6 +59,22 @@ class FindingStore(Protocol):
         not exist -- callers are responsible for the state-machine legality
         check (FindingService.transition, apps/api/app/services.py)
         *before* calling this; this method only records the result.
+
+        `proposal_snapshot` (SPEC-M17 §4C): set only by `approve_proposal`
+        -- an immutable copy of the exact `AgentProposal` being approved,
+        written onto the created `FindingHistoryEntry` itself, independent
+        of whatever `updates` does to the finding's own live
+        `pending_proposal` field (typically clearing it to `None`).
+        """
+        ...
+
+    def set_pending_proposal(self, finding_id: str, proposal: AgentProposal | None) -> EngineeringFinding:
+        """SPEC-M17 §4B: set (or clear, with `None`) a finding's live
+        `pending_proposal` field. Deliberately not `append_transition`: a
+        `propose-resolution` call is not a state-machine transition (it
+        never changes `status`) and must not create a `FindingHistoryEntry`
+        -- see the finding's own field docstring. Raises `KeyError` if
+        `finding_id` does not exist.
         """
         ...
 
@@ -116,13 +138,16 @@ class InMemoryFindingStore:
 
     def append_transition(
         self, finding_id: str, *, to_status: FindingStatus, actor_session_id: str | None, note: str | None,
-        updates: dict | None = None,
+        updates: dict | None = None, proposal_snapshot: AgentProposal | None = None,
     ) -> EngineeringFinding:
         with self._lock:
             existing = self._findings.get(finding_id)
             if existing is None:
                 raise KeyError(finding_id)
-            entry = FindingHistoryEntry(from_status=existing.status, to_status=to_status, actor_session_id=actor_session_id, note=note)
+            entry = FindingHistoryEntry(
+                from_status=existing.status, to_status=to_status, actor_session_id=actor_session_id,
+                note=note, proposal_snapshot=proposal_snapshot,
+            )
             updated = existing.model_copy(update={
                 "status": to_status,
                 "last_actor_session_id": actor_session_id,
@@ -130,5 +155,14 @@ class InMemoryFindingStore:
                 "history": [*existing.history, entry],
                 **(updates or {}),
             })
+            self._findings[finding_id] = updated
+            return updated
+
+    def set_pending_proposal(self, finding_id: str, proposal: AgentProposal | None) -> EngineeringFinding:
+        with self._lock:
+            existing = self._findings.get(finding_id)
+            if existing is None:
+                raise KeyError(finding_id)
+            updated = existing.model_copy(update={"pending_proposal": proposal, "updated_at": utc_now()})
             self._findings[finding_id] = updated
             return updated

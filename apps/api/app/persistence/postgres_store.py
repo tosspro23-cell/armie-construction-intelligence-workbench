@@ -9,7 +9,13 @@ from psycopg.conninfo import make_conninfo
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
-from app.schemas.models import AuditEvent, EngineeringFinding, FindingHistoryEntry, FindingStatus
+from app.schemas.models import (
+    AgentProposal,
+    AuditEvent,
+    EngineeringFinding,
+    FindingHistoryEntry,
+    FindingStatus,
+)
 
 # The Cognitive Services scope reused for Azure OpenAI (SPEC-M3, OD-23) does
 # not apply here: an Entra ID access token usable as a Postgres password
@@ -315,7 +321,7 @@ class PostgresFindingStore:
             if row is None:
                 return None
             cur.execute(
-                "SELECT id, from_status, to_status, actor_session_id, note, at "
+                "SELECT id, from_status, to_status, actor_session_id, note, proposal_snapshot, at "
                 "FROM engineering_finding_history WHERE finding_id = %s ORDER BY at ASC",
                 (finding_id,),
             )
@@ -343,7 +349,7 @@ class PostgresFindingStore:
 
     def append_transition(
         self, finding_id: str, *, to_status: FindingStatus, actor_session_id: str | None, note: str | None,
-        updates: dict | None = None,
+        updates: dict | None = None, proposal_snapshot: AgentProposal | None = None,
     ) -> EngineeringFinding:
         from uuid import uuid4
         existing = self.get(finding_id)
@@ -359,10 +365,31 @@ class PostgresFindingStore:
             cur.execute(f"UPDATE engineering_findings SET {', '.join(set_clauses)} WHERE finding_id = %s", params)
             cur.execute(
                 """
-                INSERT INTO engineering_finding_history (id, finding_id, from_status, to_status, actor_session_id, note)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                INSERT INTO engineering_finding_history
+                    (id, finding_id, from_status, to_status, actor_session_id, note, proposal_snapshot)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """,
-                (str(uuid4()), finding_id, existing.status.value, to_status.value, actor_session_id, note),
+                (
+                    str(uuid4()), finding_id, existing.status.value, to_status.value, actor_session_id, note,
+                    json.dumps(proposal_snapshot.model_dump(mode="json")) if proposal_snapshot is not None else None,
+                ),
+            )
+            conn.commit()
+        return self.get(finding_id)
+
+    def set_pending_proposal(self, finding_id: str, proposal: AgentProposal | None) -> EngineeringFinding:
+        """SPEC-M17 §4B: updates only `pending_proposal`/`updated_at` -- no
+        history row, no status change (a propose-resolution call is not a
+        state-machine transition).
+        """
+        existing = self.get(finding_id)
+        if existing is None:
+            raise KeyError(finding_id)
+        payload = json.dumps(proposal.model_dump(mode="json")) if proposal is not None else None
+        with self._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE engineering_findings SET pending_proposal = %s, updated_at = now() WHERE finding_id = %s",
+                (payload, finding_id),
             )
             conn.commit()
         return self.get(finding_id)
@@ -377,10 +404,16 @@ class PostgresFindingStore:
             pdf_width_m=row["pdf_width_m"], pdf_height_m=row["pdf_height_m"],
             evidence_refs=row["evidence_refs"], created_at=row["created_at"], updated_at=row["updated_at"],
             last_actor_session_id=row["last_actor_session_id"],
+            # SPEC-M17: psycopg's own JSONB adapter already deserializes
+            # this column into a plain dict (or None) on fetch -- the same
+            # reason `evidence_refs` above needs no manual json.loads --
+            # Pydantic then validates that dict straight into AgentProposal.
+            pending_proposal=row.get("pending_proposal"),
             history=[
                 FindingHistoryEntry(
                     id=str(item["id"]), from_status=item["from_status"], to_status=item["to_status"],
-                    actor_session_id=item["actor_session_id"], note=item["note"], at=item["at"],
+                    actor_session_id=item["actor_session_id"], note=item["note"],
+                    proposal_snapshot=item.get("proposal_snapshot"), at=item["at"],
                 )
                 for item in history_rows
             ],
