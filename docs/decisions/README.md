@@ -2875,3 +2875,52 @@ manual testing.
 `verification.status` and the audit trail) -- this is a change in *consequence*, not a removal of
 the check. A response the model itself knows is incomplete (truncated/content-filtered) is still a
 hard failure, since that is a certain defect, not a probabilistic call the user should weigh.
+
+## D-063 — SPEC-M17: agent-assisted finding resolution, and rejecting vendor agent platforms for it
+
+Owner-directed, 2026-09-18: extends SPEC-M11's already-shipped `EngineeringFinding` lifecycle
+(D-032) with one new step -- while a finding sits `ACTION_REQUIRED`, a human can ask V2's
+tool-calling agent (`invoke_v2`, SPEC-M16/D-061, completely unmodified) to investigate a
+`dimension_mismatch` and propose a corrected value with rationale and citations, gated by an
+explicit human `approve_proposal`/`reject_proposal` decision before it counts toward `RESOLVED`.
+Full design: `docs/specs/SPEC-M17-agent-assisted-finding-resolution-v1.md`.
+
+**Why not a vendor or general workflow platform.** The same conversation that produced this
+milestone considered three off-the-shelf durable/human-in-the-loop orchestration options:
+
+- **OpenAI's Agents API** (distinct from the now-deprecated, shutting-down-2026-11-30 AgentKit/
+  Agent Builder visual tool) has a real, working mechanism for exactly this shape of problem --
+  execution pauses at a sensitive step, serializes state to a database, and resumes hours or days
+  later after a human decision, potentially in a different process. Rejected anyway: it is tightly
+  coupled to OpenAI's own infrastructure, using the proprietary `gpt-6-astra` model and an
+  OpenAI-hosted sandbox by default, with no support for a custom/Azure-hosted model deployment --
+  adopting it would mean abandoning this project's existing Azure OpenAI (`gpt-5-mini`) deployment
+  entirely, a much larger and unrelated decision that should never be bundled into a workflow-shape
+  choice.
+- **Anthropic Managed Agents** has an even stronger native primitive for this -- permission
+  policies (`always_allow`/`always_ask`/`auto`, the last pausing when indeterminate) plus persisted,
+  resumable sessions and scheduled deployments. Equally rejected for the same reason: it requires
+  using Claude as the model, an equally large, unrelated infrastructure decision.
+- **Azure Durable Functions** is the one option that does *not* require a model change -- genuinely
+  Azure-native, and Microsoft's own recommended pairing with Azure AI Foundry Agent Service for
+  exactly this "reasoning layer + orchestration layer" split. Assessed as real and mature, but a
+  separate compute/deployment surface (its own Azure Functions runtime, Task Hub storage, and a
+  stricter deterministic-orchestrator programming model, distinct from this project's existing
+  FastAPI/Container Apps/Postgres stack) not yet justified by a single workflow instance. Revisit
+  specifically if/when a second, differently-shaped workflow type is needed -- not speculatively
+  ahead of one.
+
+Instead, this milestone extends SPEC-M11's own already-shipped, hand-rolled state machine: two new
+`_TRANSITIONS` entries, a new `AgentProposal` type, and a thin `AgentService` method that calls
+`invoke_v2` -- no new runtime, no new deployment surface, fully covered by the same `pytest`
+suite this project's whole test discipline already runs.
+
+**OD-52, recorded for the durable record (owner-agreed 2026-09-18, in conversation).** The agent's
+role is limited to investigation and proposing a value -- it never drafts or regenerates an actual
+engineering artifact (a drawing, an IFC edit), and it never auto-approves its own proposal
+regardless of confidence. A human approves every specific proposal by hand, every time. This is the
+considered answer to "how autonomous should the agent be," reached because current AI tooling is
+not reliable enough at directly authoring engineering artifacts to put that in an unsupervised or
+lightly-supervised path, and because V2's own demonstrated value (D-059/D-061) was *interpretation
+over verified data*, not *artifact generation* -- re-litigate only if the underlying product
+positioning changes, not by re-opening the question from scratch in a later session.

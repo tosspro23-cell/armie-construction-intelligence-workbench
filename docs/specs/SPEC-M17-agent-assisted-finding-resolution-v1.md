@@ -166,7 +166,7 @@ five — `reverify` stays its own dedicated function exactly as today):
   a real mutated-`Tag` fixture (the same isolation technique `tests/test_reconciliation.py` already
   uses) produces a proposal whose citations trace to the real sources — not asserted from a scripted
   fake answer alone.
-- This spec document, committed alone, first. A new `D-06x` decision-log entry recording this
+- This spec document, committed alone, first. A new `D-063` decision-log entry recording this
   design and explicitly the OD-52 "no auto-approve, ever" decision. `PROJECT_STATE.md` M17 entry.
 
 ## 5. State machine (delta from SPEC-M11 §5)
@@ -261,7 +261,7 @@ All SPEC-M11 invariants unchanged, in particular: no code path may transition a 
 
 ## 10. Documentation requirements
 
-A new `D-06x` decision-log entry (design summary, the delta state machine, and OD-52's "no
+A new `D-063` decision-log entry (design summary, the delta state machine, and OD-52's "no
 auto-approve, ever" decision recorded explicitly — this is exactly the kind of judgment call this
 project's own decision log exists to make re-litigable only on purpose, not by accident).
 `PROJECT_STATE.md` M17 entry.

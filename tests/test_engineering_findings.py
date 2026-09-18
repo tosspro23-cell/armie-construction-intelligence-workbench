@@ -19,6 +19,7 @@ from app.finding_workflow import (
     validate_transition,
 )
 from app.schemas.models import FindingStatus
+from fakes.fake_provider import ScriptedAnswer
 from fastapi.testclient import TestClient
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -216,3 +217,148 @@ def test_reverify_is_illegal_outside_resolved(monkeypatch, tmp_path) -> None:
         response = client.post(f"/api/v1/findings/{finding_id}/reverify")
 
     assert response.status_code == 409
+
+
+# --- SPEC-M17: agent-assisted resolution ---------------------------------------
+
+def _walk_to_action_required(client, finding_id: str) -> None:
+    for action in ("acknowledge", "start_action"):
+        response = client.post(f"/api/v1/findings/{finding_id}/transition", json={"action": action})
+        assert response.status_code == 200, response.text
+
+
+def _install_fake_agent(main_module, monkeypatch, chunks: list[str], tool_calls: list[tuple[str, dict]] | None = None):
+    """Swaps `app.state.container`/`app.state.agent` for FakeModelProvider-
+    backed instances. `tool_calls`, if given, scripts a real V2 tool-
+    selection round before the final answer (so the resulting proposal
+    carries real citations); omitted, the scripted answer has no tool call
+    at all -- enough to exercise the propose-resolution wiring itself
+    without needing evidence. Reconciliation itself (creating the findings
+    these tests walk through first) makes zero model calls regardless
+    (SPEC-M2, D-011) -- swapping the agent in only matters for the
+    propose-resolution call each test actually exercises.
+    """
+    from app.agent.graph import AgentService
+    from app.services import ServiceContainer
+    from fakes.fake_provider import FakeModelProvider, ScriptedAnswer, ScriptedToolCalls
+
+    fake = FakeModelProvider()
+    if tool_calls:
+        fake.script("v2_tool_turn", ScriptedToolCalls(tool_calls))
+    fake.script("v2_tool_turn", ScriptedAnswer(chunks))
+    container = ServiceContainer(main_module.app.state.container.settings, text_provider_factory=lambda s: fake, vision_provider_factory=lambda s: fake)
+    monkeypatch.setattr(main_module.app.state, "container", container)
+    monkeypatch.setattr(main_module.app.state, "agent", AgentService(container))
+    return fake
+
+
+def test_propose_resolution_is_illegal_outside_action_required(monkeypatch, tmp_path) -> None:
+    _configure_env(monkeypatch, tmp_path)
+    import app.main as main_module
+
+    with TestClient(main_module.app) as client:
+        client.post("/api/v1/chat", json={"question": RECONCILIATION_QUESTION})
+        finding_id = next(item["finding_id"] for item in client.get("/api/v1/findings").json() if item["tag"] == "W02")  # still OPEN
+
+        response = client.post(f"/api/v1/findings/{finding_id}/propose-resolution")
+
+    assert response.status_code == 409
+
+
+def test_propose_resolution_is_illegal_for_a_non_dimension_mismatch_finding_type(monkeypatch, tmp_path) -> None:
+    _configure_env(monkeypatch, tmp_path)
+    import app.main as main_module
+
+    with TestClient(main_module.app) as client:
+        client.post("/api/v1/chat", json={"question": RECONCILIATION_QUESTION})
+        finding_id = next(item["finding_id"] for item in client.get("/api/v1/findings").json() if item["tag"] == "D04")  # missing_in_pdf
+        _walk_to_action_required(client, finding_id)
+
+        response = client.post(f"/api/v1/findings/{finding_id}/propose-resolution")
+
+    assert response.status_code == 409
+
+
+def test_approve_and_reject_proposal_are_illegal_with_no_pending_proposal(monkeypatch, tmp_path) -> None:
+    _configure_env(monkeypatch, tmp_path)
+    import app.main as main_module
+
+    with TestClient(main_module.app) as client:
+        client.post("/api/v1/chat", json={"question": RECONCILIATION_QUESTION})
+        finding_id = next(item["finding_id"] for item in client.get("/api/v1/findings").json() if item["tag"] == "W02")
+        _walk_to_action_required(client, finding_id)
+
+        approve = client.post(f"/api/v1/findings/{finding_id}/transition", json={"action": "approve_proposal"})
+        reject = client.post(f"/api/v1/findings/{finding_id}/transition", json={"action": "reject_proposal"})
+
+    assert approve.status_code == 409
+    assert reject.status_code == 409
+
+
+def test_propose_resolution_produces_a_real_proposal_with_real_citations(monkeypatch, tmp_path) -> None:
+    """Owner decision, 2026-09-18 (OD-52): the agent investigates and
+    proposes a value -- this locks in that `propose_finding_resolution`
+    actually calls V2's real tool-calling loop against the real IFC/PDF
+    fixtures (a real `get_element_properties` call executes for real; only
+    the model's own two responses are scripted), not a stub, and that the
+    resulting citations trace to real evidence, not invented ones.
+    """
+    _configure_env(monkeypatch, tmp_path)
+    import app.main as main_module
+
+    with TestClient(main_module.app) as client:
+        fake = _install_fake_agent(
+            main_module, monkeypatch,
+            ["The IFC model's own recorded height (1.75 m) is correct; the PDF schedule has a transcription error."],
+            tool_calls=[("get_element_properties", {"entity_type": "IfcWindow"})],
+        )
+        client.post("/api/v1/chat", json={"question": RECONCILIATION_QUESTION})
+        finding_id = next(item["finding_id"] for item in client.get("/api/v1/findings").json() if item["tag"] == "W02")
+        _walk_to_action_required(client, finding_id)
+
+        response = client.post(f"/api/v1/findings/{finding_id}/propose-resolution")
+
+    assert response.status_code == 200
+    proposal = response.json()["pending_proposal"]
+    assert proposal is not None
+    assert proposal["proposed_height_m"] == pytest.approx(1.75)  # the real IFC value, correctly picked out of the free-text conclusion
+    assert proposal["rationale"] == "The IFC model's own recorded height (1.75 m) is correct; the PDF schedule has a transcription error."
+    assert len(proposal["citations"]) > 0  # real evidence from the real get_element_properties call, not invented
+    assert fake.calls  # the fake model was actually invoked, not bypassed
+
+
+def test_approve_proposal_history_snapshot_survives_a_later_overwriting_proposal(monkeypatch, tmp_path) -> None:
+    """SPEC-M17 §4C/§8's own immutability invariant: `approve_proposal`'s
+    history entry must keep the *original* approved proposal, unaffected
+    by a later `propose-resolution` call that replaces the finding's live
+    `pending_proposal` field with something else entirely.
+    """
+    _configure_env(monkeypatch, tmp_path)
+    import app.main as main_module
+
+    with TestClient(main_module.app) as client:
+        fake = _install_fake_agent(main_module, monkeypatch, ["The IFC value 1.75 m is correct."])
+        client.post("/api/v1/chat", json={"question": RECONCILIATION_QUESTION})
+        finding_id = next(item["finding_id"] for item in client.get("/api/v1/findings").json() if item["tag"] == "W02")
+        _walk_to_action_required(client, finding_id)
+
+        client.post(f"/api/v1/findings/{finding_id}/propose-resolution")
+        approved = client.post(f"/api/v1/findings/{finding_id}/transition", json={"action": "approve_proposal"})
+        assert approved.status_code == 200
+        approved_rationale = approved.json()["history"][-1]["proposal_snapshot"]["rationale"]
+
+        # Approving moved the finding to RESOLVED, out of ACTION_REQUIRED --
+        # bounce it back via reverify (the real mismatch is still present,
+        # nothing was actually fixed) so a *second* propose-resolution call
+        # is legal again, then confirm it doesn't touch the first approval's
+        # own already-recorded history entry.
+        client.post(f"/api/v1/findings/{finding_id}/reverify")
+        fake.script("v2_tool_turn", ScriptedAnswer(["A completely different, later conclusion."]))
+        second_propose = client.post(f"/api/v1/findings/{finding_id}/propose-resolution")
+        assert second_propose.status_code == 200
+        assert second_propose.json()["pending_proposal"]["rationale"] == "A completely different, later conclusion."
+
+        final = client.get(f"/api/v1/findings/{finding_id}").json()
+
+    original_approval_entry = next(entry for entry in final["history"] if entry["proposal_snapshot"] is not None)
+    assert original_approval_entry["proposal_snapshot"]["rationale"] == approved_rationale == "The IFC value 1.75 m is correct."
