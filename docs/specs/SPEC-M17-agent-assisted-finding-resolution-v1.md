@@ -67,11 +67,16 @@ Checked directly against the current codebase, not assumed:
   and `verification` (now four values post-D-062: `verified`/`unverified`/`failed`/
   `not_applicable`) — no new tool, dispatch, or verification logic is needed to invoke it from a
   new caller; this milestone adds a caller, not a capability.
-- `EngineeringFinding` already carries `ifc_width_m`/`ifc_height_m`/`pdf_width_m`/`pdf_height_m`
-  and `tag`/`entity_type`/`storey` — everything a `dimension_mismatch` investigation question needs
-  to be built deterministically from the finding itself, with no free-text user input in the
-  prompt (keeps the question reproducible and closes the obvious prompt-injection surface a
-  free-text "ask the agent to fix this" box would open).
+- `EngineeringFinding` already carries `tag`, `ifc_width_m`/`ifc_height_m`/`pdf_width_m`/
+  `pdf_height_m`, and `detail` (a human-readable summary already stating both sides' dimensions) —
+  everything a `dimension_mismatch` investigation question needs to be built deterministically from
+  the finding itself, with no free-text user input in the prompt (keeps the question reproducible
+  and closes the obvious prompt-injection surface a free-text "ask the agent to fix this" box would
+  open). Correction from an earlier draft of this spec: `EngineeringFinding` does **not** carry
+  `entity_type`/`storey` (those exist only on the upstream `ReconciliationItem` it was seeded from,
+  not copied forward) -- confirmed the hard way, by a live `AttributeError` when the implementation
+  first tried to read them, not caught by re-reading the schema carefully enough beforehand. The
+  question is built from `tag`/`detail`/both dimension pairs alone.
 - `Citation`/`VerificationStatus` (`apps/api/app/schemas/models.py`) are already shared types
   between V1 and V2 responses — reusable as-is on a finding's stored proposal, no new evidence
   representation needed.

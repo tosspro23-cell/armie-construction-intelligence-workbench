@@ -15,6 +15,7 @@ from opentelemetry import trace as otel_trace
 from app.agent.graph import AgentService
 from app.config import get_settings
 from app.finding_workflow import (
+    PROPOSAL_REQUIRED_ACTIONS,
     IllegalFindingTransition,
     resolve_reverify_outcome,
     validate_transition,
@@ -846,9 +847,43 @@ def transition_finding(finding_id: str, request: FindingTransitionRequest, x_ses
         target_status = validate_transition(finding.status, request.action)
     except IllegalFindingTransition as error:
         raise HTTPException(status_code=409, detail=str(error)) from None
+    # SPEC-M17 §4C: approve_proposal/reject_proposal additionally require a
+    # live pending_proposal -- not a function of status alone, so this is
+    # checked here rather than distorting validate_transition's own
+    # single-purpose signature (see finding_workflow.py's own comment on
+    # PROPOSAL_REQUIRED_ACTIONS for why).
+    if request.action in PROPOSAL_REQUIRED_ACTIONS and finding.pending_proposal is None:
+        raise HTTPException(status_code=409, detail=f"Cannot '{request.action}' a finding with no pending proposal.")
     updated = container.finding_store.append_transition(
         finding_id, to_status=target_status, actor_session_id=x_session_id, note=request.note,
+        updates={"pending_proposal": None} if request.action in PROPOSAL_REQUIRED_ACTIONS else None,
+        proposal_snapshot=finding.pending_proposal if request.action == "approve_proposal" else None,
     )
+    return updated.model_dump()
+
+
+@app.post("/api/v1/findings/{finding_id}/propose-resolution")
+async def propose_finding_resolution(finding_id: str) -> dict:
+    """SPEC-M17 §4B. Legal only for a `dimension_mismatch` finding
+    currently `ACTION_REQUIRED` -- otherwise `409`, matching
+    `validate_transition`'s own error shape. Does not itself change
+    `status` (see `EngineeringFinding.pending_proposal`'s own field
+    docstring) -- only sets/replaces the finding's live pending proposal;
+    an explicit `approve_proposal`/`reject_proposal` transition (the
+    route above) is what a human uses to actually decide it.
+    """
+    container: ServiceContainer = app.state.container
+    agent: AgentService = app.state.agent
+    finding = container.finding_store.get(finding_id)
+    if finding is None:
+        raise HTTPException(status_code=404, detail=f"Finding '{finding_id}' was not found.")
+    if finding.status != FindingStatus.ACTION_REQUIRED:
+        raise HTTPException(status_code=409, detail=f"Cannot propose a resolution for a finding in status '{finding.status.value}'; only ACTION_REQUIRED findings are eligible.")
+    if finding.finding_type != "dimension_mismatch":
+        raise HTTPException(status_code=409, detail=f"propose-resolution is only supported for dimension_mismatch findings, not '{finding.finding_type}'.")
+    _, resources = await _resolve_project(finding.project_id)
+    proposal = await agent.propose_finding_resolution(resources, finding)
+    updated = container.finding_store.set_pending_proposal(finding_id, proposal)
     return updated.model_dump()
 
 

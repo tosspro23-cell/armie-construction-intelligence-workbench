@@ -34,12 +34,14 @@ from app.agent.tools import TOOL_DEFINITIONS, build_plan_from_tool_call
 from app.config import Settings
 from app.providers.base import AnswerChunkEvent, ToolCallEvent, TurnCompleteEvent
 from app.schemas.models import (
+    AgentProposal,
     AgentResponse,
     AuditEvent,
     Citation,
     ConversationDelta,
     Disposition,
     DocumentQueryInput,
+    EngineeringFinding,
     Evidence,
     IfcQueryInput,
     MultiQueryPlan,
@@ -894,6 +896,96 @@ Return only a corrected MultiQueryPlan JSON object."""
         ifc_items = self._reconciliation_ifc_items(project_resources)
         pdf_items = self._reconciliation_pdf_items(project_resources)
         return self._compare_reconciliation_item(tag, ifc_items.get(tag), pdf_items.get(tag))
+
+    @staticmethod
+    def _extract_proposed_dimension(answer_markdown: str, ifc_value: float | None, pdf_value: float | None, verification_status: str) -> float | None:
+        """SPEC-M17 §4B: which of the two known, already-conflicting values
+        (or a genuinely new one) the agent's own free-text conclusion
+        actually commits to -- a narrow, disclosed heuristic, not a claim
+        of general free-text understanding, matching this project's own
+        established numeric-consistency check in spirit (reuses the exact
+        same whole-number-exact / 0.05-tolerance matching rule).
+
+        - Only one of the two known values appears in the text -> that one
+          (the agent picked a side).
+        - Both appear -> `None` (discusses both without committing; the
+          human reads `rationale` directly rather than being handed a
+          guess).
+        - Neither known value appears, but the answer is independently
+          `verified` (SPEC-M16/D-062 -- i.e. this specific number traces to
+          a real tool result this turn) and exactly one *other* number is
+          present -> that number (a genuinely new, grounded value from a
+          third source, e.g. a spec-sheet PDF). Not `verified`, or more
+          than one other number present -> `None`: never surface an
+          ungrounded or ambiguous guess as *the* proposed value.
+        """
+        import re
+
+        def _matches(expected: float | None, actual: float) -> bool:
+            if expected is None:
+                return False
+            if float(expected).is_integer():
+                return actual == expected
+            return abs(actual - expected) < 0.05
+
+        numbers = [float(match) for match in re.findall(r"\d+(?:\.\d+)?", answer_markdown)]
+        ifc_present = any(_matches(ifc_value, n) for n in numbers)
+        pdf_present = any(_matches(pdf_value, n) for n in numbers)
+        if ifc_present and not pdf_present:
+            return ifc_value
+        if pdf_present and not ifc_present:
+            return pdf_value
+        if ifc_present and pdf_present:
+            return None
+        if verification_status != "verified":
+            return None
+        other_numbers = [n for n in numbers if not _matches(ifc_value, n) and not _matches(pdf_value, n)]
+        return other_numbers[0] if len(other_numbers) == 1 else None
+
+    async def propose_finding_resolution(self, project_resources: ProjectResources, finding: EngineeringFinding) -> AgentProposal:
+        """SPEC-M17 §4B: investigate one `dimension_mismatch` finding and
+        propose which value is actually correct, reusing V2's own
+        tool-calling loop (`invoke_v2`, SPEC-M16) completely unmodified --
+        this method is a caller of it, not a new capability. The question
+        is built entirely from the finding's own already-stored fields
+        (tag, entity type, storey, both sides' stored dimensions) -- never
+        from free-text operator input, which would reopen a prompt-
+        injection surface this design deliberately avoids (SPEC-M17 §3).
+
+        Read-only: like every other V2 question, this can only call
+        existing, read-only tools -- it never writes to the real IFC/PDF
+        sources (SPEC-M17 §8's own invariant). The caller (main.py) is
+        responsible for confirming the finding is `ACTION_REQUIRED` and
+        `finding_type == "dimension_mismatch"` before calling this -- it
+        does not re-check either, the same "caller enforces legality"
+        convention `FindingStore.append_transition` already documents for
+        itself.
+        """
+        question = (
+            f"A door/window reconciliation flagged a dimension mismatch for tag '{finding.tag}': {finding.detail} "
+            f"The IFC model currently records width={finding.ifc_width_m} m, height={finding.ifc_height_m} m. "
+            f"The PDF schedule currently records width={finding.pdf_width_m} m, height={finding.pdf_height_m} m. "
+            "Investigate using your available tools (re-check this element's own real properties, and check "
+            "whether any other configured document corroborates one side) and state clearly, as your conclusion, "
+            "which width and height value is actually correct and why. If you cannot determine this with "
+            "confidence, say so honestly rather than guessing."
+        )
+        final_response: AgentResponse | None = None
+        async for event in self.invoke_v2(
+            project_resources=project_resources, thread_id=f"finding-{finding.finding_id}",
+            question=question, viewer_context=None,
+        ):
+            if event["type"] == "final":
+                final_response = event["response"]
+        assert final_response is not None  # invoke_v2 always yields exactly one "final" event
+        return AgentProposal(
+            proposed_width_m=self._extract_proposed_dimension(final_response.answer_markdown, finding.ifc_width_m, finding.pdf_width_m, final_response.verification.status),
+            proposed_height_m=self._extract_proposed_dimension(final_response.answer_markdown, finding.ifc_height_m, finding.pdf_height_m, final_response.verification.status),
+            rationale=final_response.answer_markdown,
+            citations=final_response.citations,
+            verification=final_response.verification,
+            trace_id=final_response.trace_id,
+        )
 
     def _synthesize_reconciliation_response(self, state: GraphState, multi_plan: MultiQueryPlan) -> dict:
         """SPEC-M2 §4D: join the IFC and PDF door/window sides on Tag/Mark.

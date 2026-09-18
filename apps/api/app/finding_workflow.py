@@ -19,13 +19,30 @@ class IllegalFindingTransition(ValueError):
 # real sources, see AgentService.reverify_reconciliation_tag), so it has
 # its own dedicated endpoint/function below instead of an entry in this
 # table.
+#
+# SPEC-M17 §4C: `approve_proposal`/`reject_proposal` added here exactly
+# like every other action, status-wise -- both are only legal from
+# ACTION_REQUIRED. Neither one's *second* precondition (a pending
+# proposal must actually exist) lives in this table, deliberately: that
+# check is not a function of `current_status` alone the way every other
+# entry here is, so main.py checks it as an explicit extra guard right
+# after this table's own check passes, rather than distorting
+# `validate_transition`'s single-purpose signature to carry it.
 _TRANSITIONS: dict[str, dict[FindingStatus, FindingStatus]] = {
     "acknowledge": {FindingStatus.OPEN: FindingStatus.ACKNOWLEDGED},
     "start_action": {FindingStatus.ACKNOWLEDGED: FindingStatus.ACTION_REQUIRED},
     "waive": {FindingStatus.ACKNOWLEDGED: FindingStatus.WAIVED},
     "mark_false_positive": {FindingStatus.ACKNOWLEDGED: FindingStatus.FALSE_POSITIVE},
     "resolve": {FindingStatus.ACTION_REQUIRED: FindingStatus.RESOLVED},
+    "approve_proposal": {FindingStatus.ACTION_REQUIRED: FindingStatus.RESOLVED},
+    "reject_proposal": {FindingStatus.ACTION_REQUIRED: FindingStatus.ACTION_REQUIRED},
 }
+
+# SPEC-M17 §4C: actions legal only when the finding also has a live
+# `pending_proposal` -- checked by main.py as an extra guard after
+# `validate_transition` itself passes (see the comment on `_TRANSITIONS`
+# above for why this doesn't live inside that table/function).
+PROPOSAL_REQUIRED_ACTIONS = frozenset({"approve_proposal", "reject_proposal"})
 
 
 def validate_transition(current_status: FindingStatus, action: str) -> FindingStatus:
