@@ -278,6 +278,21 @@ distinguishing "a human accepted this conclusion" from "the real source was corr
 state-machine distinction (`resolved` vs. `verified_closed`) already existed in SPEC-M11; the UI
 copy didn't say so.
 
-461 tests pass (up from 439 at the start of this session); `ruff` clean; `npm run build` clean. Not yet deployed to the shared Azure environment or merged to `main` at time of writing.
+**Continued the same session, owner-requested: the disclosed Postgres gap closed against a real
+database.** The row-locked transactions above (items 2/3) had only ever been verified by code
+review and by `InMemoryFindingStore`'s regression suite -- run for real against
+`docker compose up postgres` with genuinely concurrent connections
+(`tests/test_postgres_finding_store_concurrency.py`, gated behind `TEST_DATABASE_URL` and already
+covered automatically by CI's existing real-Postgres job, no `ci.yml` change needed): exactly one
+of ten concurrent approvals of the same proposal wins under real contention, a stale proposal id
+loses even surrounded by real concurrent valid attempts, and 20 real trials of the
+late-investigation-vs-concurrent-resolve race never violate the safety invariant regardless of
+ordering. That last test, run for real, found a genuine independent defect code review alone had
+missed twice already: plain `resolve` never cleared a *pre-existing* `pending_proposal`, leaving a
+stale, still-clickable (and 409-on-click) proposal card on an already-resolved finding. Fixed by
+widening which actions clear `pending_proposal` to include plain `resolve`, not only
+`approve_proposal`/`reject_proposal`.
+
+462 tests pass (up from 439 at the start of this session); `ruff` clean; `npm run build` clean. Not yet deployed to the shared Azure environment or merged to `main` at time of writing.
 
 No scope beyond what is explicitly stated above is approved by this document; product scope and acceptance criteria must be agreed before implementation.

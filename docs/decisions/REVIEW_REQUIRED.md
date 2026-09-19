@@ -462,18 +462,34 @@ trigger would need a dedicated repro this session's own priority (verifying the 
 redesign, then widening finding-type scope) didn't leave room for. Revisit if this proves common
 enough in practice to meaningfully erode trust in the `verified` badge's own signal.
 
-## M17 (D-064): PostgresFindingStore's row-locked transactions have no real-Postgres integration test
+## RESOLVED by D-064 follow-up: PostgresFindingStore's row-locked transactions now have a real-Postgres integration test
 
 D-064's fixes for approval version binding and late-investigation guarding added `SELECT ...
 FOR UPDATE` row locking to `PostgresFindingStore.append_transition`/`set_pending_proposal`
-(`apps/api/app/persistence/postgres_store.py`), so the version/status check and the write happen
-atomically inside one transaction rather than a separate, racy pre-check. This was verified by
-code review and by every `InMemoryFindingStore` regression test passing against the identical
-`FindingStore` Protocol shape (both implementations share the same test-proven contract) -- but
-this repository has no integration test harness against a real Postgres instance for *either*
-store implementation (`PostgresFindingStore`, `PostgresConversationStore`, `PostgresAuditStore`
-alike), so the actual locking behavior under real concurrent connections -- lock wait timeouts,
-deadlock potential if this method is ever called from two different lock-acquisition orders,
-behavior under the connection pool's own retry/backoff -- is unverified live. Flagged here rather
-than claimed as proven; revisit if a real Postgres deployment surfaces contention on this table in
-practice, or before this path carries meaningfully concurrent production traffic.
+(`apps/api/app/persistence/postgres_store.py`), verified at the time only by code review and by
+`InMemoryFindingStore`'s regression suite passing against the identical `FindingStore` Protocol
+shape -- this repository had no integration test harness against a real Postgres instance for
+either store implementation, so the actual locking behavior under real concurrent connections was
+unverified live.
+
+Owner-requested, 2026-09-19: closed by `tests/test_postgres_finding_store_concurrency.py`, gated
+behind `TEST_DATABASE_URL` exactly like `tests/test_postgres_persistence.py`'s existing pattern
+(already applied automatically in CI, which already runs a real `postgres` service and already
+sets `TEST_DATABASE_URL` for the whole job -- no `ci.yml` change was needed, pytest's own
+discovery picked the new file up). Real threads, released together via `threading.Barrier` to
+maximize genuine overlap, against a real connection pool: ten concurrent approvals of the same
+live proposal confirm exactly one wins and nine get `FindingVersionConflict`; a stale proposal id
+is rejected even surrounded by real concurrent valid attempts; 20 real trials of the
+late-investigation-vs-concurrent-resolve race confirm the safety invariant holds regardless of
+which side a real Postgres transaction lets go first.
+
+**Running this against a real database, not just re-reading the code, found a real, independent
+defect no amount of code review had caught**: plain `resolve` (a human bypassing the agent
+proposal entirely, a path SPEC-M11 always allowed) never cleared a pre-existing `pending_proposal`
+-- reproduced with *zero* concurrency once the race test pointed at it (an investigated finding,
+then manually resolved, kept a stale proposal forever, with live Approve/Reject buttons in the UI
+that would 409 if clicked). Fixed by widening the actions that clear `pending_proposal` from
+`PROPOSAL_REQUIRED_ACTIONS` to a new `ACTIONS_THAT_CLEAR_PENDING_PROPOSAL` including plain
+`resolve` (`apps/api/app/finding_workflow.py`), with its own dedicated regression test
+(`test_resolve_clears_a_pre_existing_pending_proposal`) alongside the concurrency tests. Recorded
+in D-064's own amendment for the durable record.

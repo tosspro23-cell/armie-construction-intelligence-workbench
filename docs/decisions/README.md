@@ -3103,3 +3103,38 @@ and cost per effective investigation) is a standing evaluation practice this ses
 direction rather than executed -- it needs real usage to measure, not a one-time implementation.
 
 461 tests pass; `ruff` clean; `npm run build` clean.
+
+**Amended 2026-09-19, same session: the disclosed Postgres gap closed against a real database, which
+found a seventh real defect.** Owner-requested: rather than leaving the row-locked transactions
+above "verified by code review only" (this amendment's own prior text), ran them against a real
+Postgres (`docker compose up postgres`, migrations 0006/0008 applied) with real concurrent
+connections. `tests/test_postgres_finding_store_concurrency.py`, gated behind `TEST_DATABASE_URL`
+matching `tests/test_postgres_persistence.py`'s existing pattern -- already runs in CI automatically
+(CI already provisions a real `postgres` service and `TEST_DATABASE_URL` for the whole job; no
+`ci.yml` change was needed). Confirms, under genuine contention (`threading.Barrier`-released
+concurrent threads, not just sequential logic): exactly one of ten concurrent approvals of the same
+proposal wins, the rest get `FindingVersionConflict`; a stale proposal id loses even surrounded by
+real concurrent valid attempts; 20 real trials of the late-investigation-vs-concurrent-resolve race
+never violate the safety invariant regardless of which side's transaction the database lets go
+first.
+
+That last test, run for real, surfaced a genuine, independent defect no amount of code review had
+caught: plain `resolve` (bypassing the agent proposal entirely -- a path SPEC-M11 always allowed)
+never cleared a *pre-existing* `pending_proposal`. Reproduced with zero concurrency once found: a
+finding an agent already investigated, then resolved manually without ever approving/rejecting that
+proposal, kept it forever -- and `Findings.tsx` renders the full proposal card, live Approve/Reject
+buttons included, whenever `pending_proposal` is truthy with no separate status gate, so those
+buttons stayed clickable (and would 409) on an already-resolved finding. Fixed by widening
+`PROPOSAL_REQUIRED_ACTIONS` into a new, distinct `ACTIONS_THAT_CLEAR_PENDING_PROPOSAL`
+(`finding_workflow.py`) that also includes plain `resolve` -- unlike `approve_proposal`/
+`reject_proposal`, `resolve` needs no `proposal_id` confirmation, since it clears whatever proposal
+exists (if any) as a plain consequence of the finding leaving `ACTION_REQUIRED`, not a decision
+about a specific one.
+
+This is the concrete case for the practice itself, not just this one fix: two rounds of fixing this
+exact code from pure code review (the original six defects, then items 2-3) both missed this,
+because the interaction only exists between two features (agent proposals, manual resolve) that
+each read as correct in isolation -- it took actually running concurrent transactions against a
+real database to surface the gap between them.
+
+462 tests pass; `ruff` clean; `npm run build` clean.
