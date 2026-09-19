@@ -461,3 +461,19 @@ block the human-approval gate this milestone's whole design relies on, and confi
 trigger would need a dedicated repro this session's own priority (verifying the architecture
 redesign, then widening finding-type scope) didn't leave room for. Revisit if this proves common
 enough in practice to meaningfully erode trust in the `verified` badge's own signal.
+
+## M17 (D-064): PostgresFindingStore's row-locked transactions have no real-Postgres integration test
+
+D-064's fixes for approval version binding and late-investigation guarding added `SELECT ...
+FOR UPDATE` row locking to `PostgresFindingStore.append_transition`/`set_pending_proposal`
+(`apps/api/app/persistence/postgres_store.py`), so the version/status check and the write happen
+atomically inside one transaction rather than a separate, racy pre-check. This was verified by
+code review and by every `InMemoryFindingStore` regression test passing against the identical
+`FindingStore` Protocol shape (both implementations share the same test-proven contract) -- but
+this repository has no integration test harness against a real Postgres instance for *either*
+store implementation (`PostgresFindingStore`, `PostgresConversationStore`, `PostgresAuditStore`
+alike), so the actual locking behavior under real concurrent connections -- lock wait timeouts,
+deadlock potential if this method is ever called from two different lock-acquisition orders,
+behavior under the connection pool's own retry/backoff -- is unverified live. Flagged here rather
+than claimed as proven; revisit if a real Postgres deployment surfaces contention on this table in
+practice, or before this path carries meaningfully concurrent production traffic.

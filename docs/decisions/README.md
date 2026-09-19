@@ -2955,3 +2955,151 @@ investigation can hypothesize a plausible-but-unconfirmed match to a different t
 ruling out that the candidate element is already accounted for elsewhere -- correctly surfaced as
 `unverified` (D-062) rather than a false confident claim, which is the fail-safe this system is
 designed to produce, not a defect requiring a fix before shipping.
+
+## D-064 — SPEC-M17 correctness review: proposal integrity and evidence recoverability
+
+An independent code review of the branch at `4e1c673` (the D-063-amended chat-embedded
+architecture) found six real, reproducible defects in the propose/approve/reject path itself --
+not the investigation architecture, which the review judged sound, but the guarantees around what
+gets proposed and what a human is actually approving. All six were independently reproduced
+against real code (not taken on the review's word) before being fixed; each has its own dedicated
+regression test that fails without the fix and passes with it.
+
+**1. A tool result unrelated to the dimension being investigated could be fabricated into a
+proposed value, marked `verified`.** `AgentService._extract_proposed_dimension`'s "no known value
+present, but exactly one other number is present on a verified answer -- treat it as a genuinely
+new proposed value" fallback had no way to distinguish a real third-source measurement from an
+unrelated real number that simply happened to be the answer's only one. Reproduced: an
+investigation whose actual tool call was `count_elements(IfcDoor)` (returning 4), with the whole
+answer "There are 4 doors.", persisted `proposed_width_m = proposed_height_m = 4.0`, `verified`.
+A second, independent bug in the same function: an answer explicitly rejecting a value ("Do not
+use the IFC value of 1.75m; the correct height is still unknown.") still had 1.75 extracted, since
+the substring/number match had no concept of negation. Fixed by removing the "guess from leftover
+numbers" fallback entirely (no safe version of it exists from free text alone -- this is a
+narrower guarantee than before, deliberately: it can now return `None` in a case where the number
+really was new and grounded, but can no longer confidently return the *wrong* thing) and adding a
+narrow rejection-phrase check immediately before a candidate number. `tests/test_finding_proposal_
+extraction.py`.
+
+**2. `approve_proposal`/`reject_proposal` had no way to confirm which specific proposal a human
+was acting on.** `FindingTransitionRequest` carried only `action`/`note` -- a proposal replaced by
+a second investigation (another tab, another reviewer, or a slow first investigation racing a
+faster second one) between page-load and a click could be silently approved/rejected in place of
+the one actually reviewed. Fixed: `FindingTransitionRequest` gains a required-for-these-two-actions
+`proposal_id`; `FindingStore.append_transition` gains `expected_pending_proposal_id`, checked
+*inside* the same lock (`InMemoryFindingStore`) or the same row-locked transaction
+(`PostgresFindingStore`, via `SELECT ... FOR UPDATE`) that performs the write -- not a separate,
+racy pre-check in `main.py` -- raising the new `FindingVersionConflict` (a 409) on any mismatch.
+`tests/test_engineering_findings.py::test_approve_proposal_is_rejected_when_the_proposal_changed_
+since_it_was_loaded` reproduces the exact race (proposal A loaded, proposal B generated, A's stale
+id rejected, B left completely untouched) end-to-end through the real API.
+
+**3. An investigation slow enough to outlast a human's own concurrent action could resurrect a
+`pending_proposal` on a finding no longer `ACTION_REQUIRED`.** The `ACTION_REQUIRED` guard ran once,
+at the start of `_chat_v2`; `set_pending_proposal` wrote unconditionally at the end, regardless of
+how long the investigation took or what happened to the finding in between. Fixed:
+`set_pending_proposal` gains `expected_status`, checked in the same lock/transaction as the write;
+a mismatch returns `None` (a routine race, not a caller error) rather than raising, and `main.py`
+records `execution_metadata["finding_proposal_stale"]` -- the turn's own answer still displays
+normally, only the proposal-persistence step is skipped. Reproduced via fault injection (resolving
+the finding, through the real store, from inside `build_finding_proposal` itself -- the latest
+point a concurrent human action could still land before persistence):
+`test_a_late_finishing_investigation_does_not_resurrect_a_proposal_on_an_already_resolved_finding`.
+
+**4. `reject_proposal` recorded no snapshot of what was rejected.** `approve_proposal`'s history
+entry carried an immutable copy of the approved proposal; `reject_proposal`'s carried `None` --
+"who rejected which proposal, and why" was unanswerable from the finding's own history. Fixed:
+`proposal_snapshot` is now recorded for both actions (`PROPOSAL_REQUIRED_ACTIONS`, not only
+`approve_proposal`). `test_reject_proposal_keeps_a_snapshot_of_what_was_rejected`.
+
+**5. The proposal card had no way to re-view its own rationale or evidence.** `Findings.tsx`
+showed only the proposed dimensions, a verification badge, and a citation count, pointing back at
+the Conversation panel for "the full reasoning" -- but a reviewer returning after a refresh, the
+next day, or a different person entirely has no way to replay that panel's now-gone history. The
+backend already persisted the full `rationale` and `citations` on `AgentProposal`; nothing
+surfaced them again. Fixed: an expandable `<details>` on the proposal card renders the full
+rationale text and the citation list from the finding's own stored proposal, so the object being
+approved is self-contained rather than depending on "you happened to still have the chat open."
+
+**6. A multi-page schedule that continues across pages with an identical header row was searched
+only as far as the first page whose columns matched the field at all** (a narrower, second gap in
+the multi-page search added earlier for live investigation testing, see SPEC-M17 §13.2). A
+continuation page whose own few records simply don't include the one being asked about produces
+the exact same `no_matching_record` signature as a genuine same-page "which one did you mean"
+ambiguity, and the earlier fix stopped searching on that signature, reasoning (correctly, for the
+narrower case it was built for) that a different page couldn't help. Fixed by distinguishing the
+two inside `_native_lookup_on_page`: a page naming more than one candidate record, none matching,
+is a genuine same-page ambiguity (a different page cannot help -- stop and report it); a page
+naming one or zero candidates, not matching, means there is nothing to choose between *on this
+page* at all, and the search keeps going. The multi-page search itself was also widened from "stop
+at the first page `_read_table` can't structure" to "skip an unparseable page and keep going,
+bounded only by the document's own real page count" -- an unparseable page in the middle of a real
+document (prose between two schedule sections) should not look like reaching the end of it.
+Reproduced against a freshly-synthesized real two-page PDF matching the exact shape reported
+(identical Mark/Width/Height header on both pages, the requested record only on page 2):
+`test_native_lookup_finds_a_record_on_a_continuation_page_with_an_identical_header`.
+
+**Known gap, disclosed rather than closed this pass:** `PostgresFindingStore`'s new row-locked
+transactions (items 2/3 above) were verified by code review and by every `InMemoryFindingStore`
+regression test passing against the same `FindingStore` Protocol shape, but this repository has no
+integration test harness against a real Postgres instance for either store implementation --
+`SELECT ... FOR UPDATE` semantics under real concurrent load are unverified live. Flagged in
+`docs/decisions/REVIEW_REQUIRED.md` rather than claimed as proven.
+
+454 tests pass overall (up from 439 before this session's own tool fixes and this review
+combined -- see PROJECT_STATE.md's M17 entry for the full session timeline). `ruff` clean;
+`npm run build` clean.
+
+**Amended 2026-09-19, same session: the review's own suggested closing order, items 2 and 3.**
+The six fixes above closed item 1 of the review's plan ("fix the proposal/approval contract
+first"). The owner asked to continue through the review's own remaining order rather than stopping
+there.
+
+*Item 2 -- a structured verdict per finding type, not force-fit into width/height.* Added
+`submit_finding_verdict`, a tool offered only during a finding investigation
+(`AgentService.invoke_v2`'s new `include_verdict_tool` parameter, set by `_chat_v2` exactly when
+`investigating_finding` is set) -- the model must call it, with typed arguments, to submit its
+conclusion; `build_finding_proposal` now reads that structured call (carried through
+`AgentResponse.execution_metadata["finding_verdict"]`) instead of inferring one from free text.
+`AgentProposal` gains `verdict` (`dimension_confirmed` / `genuine_omission` /
+`found_under_different_reference` / `inconclusive`) and `verdict_basis`. A structured
+`confirmed_width_m`/`confirmed_height_m` is still independently checked against the finding's own
+known IFC/PDF values (`AgentService._matches_known_value`, factored out of the free-text extractor
+so both paths share one matching rule) before being trusted as `proposed_*_m` -- a model stating a
+number through this tool is not, on its own, sufficient grounds to adopt it, matching this
+project's own "code still validates a structured claim, not just a free-text one" reading of the
+review's own "仅要求模型输出JSON不够" point. The free-text extractor remains only as a fallback for
+a turn that never reached the tool at all (e.g. hit the iteration cap first).
+
+The investigation prompts for `missing_in_pdf`/`missing_in_ifc` also gained an explicit
+instruction to run `reconcile_doors_windows` and confirm a same-dimension candidate is not already
+matched to its *own*, different tag before proposing it as the missing element under a different
+name -- directly fixing the reasoning gap D-063's own amendment disclosed live (a `missing_in_ifc`
+investigation matching two IFC windows by dimension alone, without checking either was already
+accounted for). Live-verified against real `gpt-5-mini` after the fix: the same W05 scenario now
+correctly checks all four real IFC window tags, notes two share W05's dimensions but already carry
+their own tags (W01, W03), and submits `verdict: genuine_omission` with a basis naming exactly
+that reasoning -- the review's own suggested "candidate already claimed by another tag" test case,
+closed by construction rather than only tested for after the fact. A same live pass on
+`dimension_mismatch` (W02) submitted `verdict: inconclusive` when the IFC and PDF values were both
+independently corroborated with no tie-breaking evidence -- the honest outcome, not a regression.
+
+*Item 3 -- distinguish "accepted the proposal" from "the source was actually fixed."*
+SPEC-M11's own state machine already had this distinction (`resolved` -- a human's claim -- vs.
+`verified_closed` -- the system re-read the real sources and agrees); what the review's own read
+correctly caught is that the UI copy didn't say so at the point a human clicks the button. "Mark
+resolved" and "Approve" now both carry an explicit tooltip: this records agreement with a
+conclusion, it does not modify the IFC model or PDF drawing, and "Re-check now" is what actually
+confirms the source now agrees. No new `FindingStatus` value added -- the review's own suggestion
+that this is optional ("即使暂不新增状态") given the mechanism already existed.
+
+*Item 4 (discriminating acceptance cases) and item 5 (re-evaluate investigation ROI):* item 4's
+specific cases are covered piecemeal across this amendment and the six fixes above (continuation
+tables, a stale-proposal approval, a mid-investigation human resolve, a same-dimension-different-
+object candidate, an inconclusive-when-genuinely-ambiguous case) rather than as one dedicated
+suite -- see `tests/test_finding_verdict_tool.py` for the verdict-specific ones. Item 5 (measuring
+human review time, proposal actionability, false-association rate, honesty of "cannot determine,"
+and cost per effective investigation) is a standing evaluation practice this session recorded as a
+direction rather than executed -- it needs real usage to measure, not a one-time implementation.
+
+461 tests pass; `ruff` clean; `npm run build` clean.
