@@ -158,14 +158,38 @@ def test_multiple_records_named_is_ambiguous_and_lists_the_matched_candidates(tm
 
 
 def test_field_absent_from_the_document_is_a_miss_never_a_fabricated_value(tmp_path: Path) -> None:
-    """SPEC-M2P1 §3 B9: no after-diversity column exists in the fixture."""
+    """SPEC-M2P1 §3 B9: no after-diversity column exists in the fixture.
+    Pins `page_hint=1` explicitly -- this is testing one page's own miss
+    message, not the multi-page search (see the "checked N pages" test
+    below for that honest-coverage claim instead).
+    """
+    analyzer = _analyzer(tmp_path)
+    query = DocumentQueryInput(field="After Diversity Load", question="What is the after diversity load for DB-L1-A?", page_hint=1)
+    result = analyzer.native_lookup(query)
+
+    assert result.value is None
+    assert result.confidence == 0.0
+    assert "Board" in result.ambiguity and "Diversity Factor" in result.ambiguity
+
+
+def test_field_absent_from_every_page_states_how_many_pages_were_actually_checked(tmp_path: Path) -> None:
+    """Independent-review finding, 2026-09-19: with no page_hint, a miss
+    must honestly claim only "not found on the pages I checked," not
+    silently repeat page 1's own specific message as if it spoke for the
+    whole document -- "not found on the pages I looked at" is a weaker,
+    different claim than "not found," and this fixture's real 2-page
+    document (electrical schedule, then door/window schedule) is exactly
+    the case where conflating the two would be misleading.
+    """
     analyzer = _analyzer(tmp_path)
     query = DocumentQueryInput(field="After Diversity Load", question="What is the after diversity load for DB-L1-A?")
     result = analyzer.native_lookup(query)
 
     assert result.value is None
     assert result.confidence == 0.0
-    assert "Board" in result.ambiguity and "Diversity Factor" in result.ambiguity
+    assert result.miss_reason == "field_not_on_page"
+    assert "2 page(s)" in result.ambiguity
+    assert "1" in result.ambiguity and "2" in result.ambiguity
 
 
 def test_model_generated_requested_field_that_does_not_match_any_header_is_a_miss(tmp_path: Path) -> None:
@@ -343,3 +367,75 @@ def test_v2_extract_pdf_field_tool_call_finds_a_field_on_page_two_with_zero_page
     final = next(event for event in events if event["type"] == "final")["response"]
     assert final["disposition"] == "answered"
     assert "1.70" in final["answer_markdown"]
+
+
+# --- item 20: a genuine continuation table (same header, later page) -------------------
+#
+# Independent-review finding, 2026-09-19: item 19's fix only kept
+# searching on a "field_not_on_page" miss (this page's own columns don't
+# have the requested field at all) and stopped on "no_matching_record"
+# ("the field exists here but no record matches"), reasoning the latter
+# always meant "this page is already the right one." A real continuation
+# schedule breaks that: the SAME header row (Mark/Width/Height) repeats
+# on every page, each page naming only its own few records, so a page
+# that simply doesn't contain the requested record produces the exact
+# same "no_matching_record" signature as genuine same-page ambiguity --
+# and the old code stopped searching right there, one page short of the
+# real answer. Reproduced against a real, freshly-synthesized two-page
+# PDF (not the existing single-table fixture, which never exercised this
+# same-header-on-both-pages shape) with the exact structure the review
+# reported: page 1 names only W01, page 2 (identical header) names only
+# W02 with the value actually being asked about.
+
+_CONTINUATION_TABLE_X = [48, 250, 400]
+
+
+def _write_continuation_schedule(path: Path) -> None:
+    import fitz
+
+    document = fitz.open()
+    for page_rows in ([("W01", "1.20", "1.50")], [("W02", "1.20", "1.70")]):
+        page = document.new_page(width=842, height=595)
+        page.insert_text((42, 45), "CONTINUATION SCHEDULE", fontsize=16, fontname="helv", color=(0.08, 0.2, 0.35))
+        page.insert_text((42, 66), "Synthetic test fixture -- not a real project document", fontsize=9, fontname="helv", color=(0.3, 0.3, 0.3))
+        for row_index, row in enumerate([("Mark", "Width (m)", "Height (m)"), *page_rows]):
+            top = 120 + row_index * 42
+            page.draw_rect(
+                fitz.Rect(_CONTINUATION_TABLE_X[0], top - 22, _CONTINUATION_TABLE_X[-1] + 100, top + 14),
+                color=(0.4, 0.5, 0.65), fill=(0.92, 0.95, 0.98) if row_index == 0 else (1, 1, 1), width=0.8,
+            )
+            for col, value in enumerate(row):
+                page.insert_text((_CONTINUATION_TABLE_X[col] + 8, top), value, fontsize=10.5 if row_index else 10, fontname="helv", color=(0.05, 0.1, 0.2))
+    document.save(path)
+
+
+def test_native_lookup_finds_a_record_on_a_continuation_page_with_an_identical_header(tmp_path: Path) -> None:
+    pdf_path = tmp_path / "continuation_schedule.pdf"
+    _write_continuation_schedule(pdf_path)
+    analyzer = DocumentAnalyzer(pdf_path, tmp_path / "evidence")
+    (tmp_path / "evidence").mkdir(exist_ok=True)
+    query = DocumentQueryInput(field="Height (m)", question="What is the height of W02?")
+
+    result = analyzer.native_lookup(query)
+
+    assert result.value == "1.70"
+    assert result.page == 2
+
+
+def test_native_lookup_still_reports_a_genuine_same_page_ambiguity_immediately(tmp_path: Path) -> None:
+    """The fix for the continuation-table gap must not blur into never
+    stopping at all -- a page naming *more than one* candidate record,
+    none matching the question, is a real "which one did you mean" a
+    different page cannot resolve, and must still be reported as such
+    without scanning further (this is the existing demo schedule fixture,
+    already covered by test_no_record_named_is_ambiguous_..., asserted
+    again here to pin the continuation-table fix didn't regress it).
+    """
+    analyzer = _analyzer(tmp_path)
+    query = DocumentQueryInput(field="Connected Load", question="What is the total connected load?")
+
+    result = analyzer.native_lookup(query)
+
+    assert result.value is None
+    assert result.confidence == 0.4
+    assert result.page == 1

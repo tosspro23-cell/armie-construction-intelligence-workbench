@@ -315,41 +315,86 @@ class DocumentAnalyzer:
         requested field absent from the document entirely -> 0.0. No value
         is ever returned that was not read from a uniquely resolved cell.
 
-        Multi-page fallback (added for SPEC-M17's live investigation
-        testing, 2026-09-18): a caller that already knows which page holds
-        the answer (`query.page_hint` set -- e.g. reconciliation's own
-        schedule reader) gets exactly that page and nothing more, unchanged
-        from every prior version of this method. A caller with no page
-        hint at all -- the V2 tool-calling loop's free-form
-        `extract_pdf_field`, which has no page argument for the model to
-        set -- previously always meant page 1 silently, live-verified
-        2026-09-18 to make the agent's own multi-page-document investigation
-        of a real dimension-mismatch finding fail every one of its 3 retries
-        against the wrong page, even though the correct schedule row was on
-        page 2 the whole time (the deterministic `reconcile_doors_windows`
-        tool already knows to read page 2 -- this fixes the model's own
-        free-form lookup to find that out for itself instead of requiring
-        it to guess a page number it has no way to know). Only a
-        `field_not_on_page` miss keeps scanning forward -- that is the
-        "wrong page entirely" signature; every other miss (no record named,
-        multiple candidates, field present but empty) means this page *is*
-        the right one and a different page would not help.
+        Multi-page search (added for SPEC-M17's live investigation testing,
+        2026-09-18, widened 2026-09-19 after a second, distinct real gap
+        was found in the first version): a caller that already knows which
+        page holds the answer (`query.page_hint` set -- e.g.
+        reconciliation's own schedule reader) gets exactly that page and
+        nothing more, unchanged from every prior version of this method.
+
+        A caller with no page hint at all -- the V2 tool-calling loop's
+        free-form `extract_pdf_field`, which has no page argument for the
+        model to set -- searches every page of the document (bounded by
+        the document's own real page count, never unbounded), stopping the
+        instant a page yields an unambiguous single match. The first
+        version of this fix (2026-09-18) only kept scanning on a
+        `field_not_on_page` miss ("wrong page entirely," e.g. an
+        electrical schedule before the door/window schedule) and stopped
+        on `no_matching_record`, reasoning that "the field exists on this
+        page but no record matches" meant this page was already the right
+        one. Found live, 2026-09-19: a genuinely common real-world case
+        breaks that reasoning -- a schedule that *continues* across
+        several pages with the *same* header row (Mark/Width/Height on
+        every page), where the requested record simply isn't on this
+        particular page yet is on a later one with an identical header.
+        `_match_records` only checks whether *this page's own* candidate
+        identifiers appear in the question text, so a continuation page
+        with no matching record looks identical to "the field exists here
+        but no record was named" even though the real defect is "the
+        record is on a different page." A page-local ambiguity that a
+        different page genuinely cannot resolve (more than one column
+        matches the requested field, or more than one *of this page's
+        own* records is named in the question) still stops the search
+        immediately and reports it as-is -- switching pages cannot help
+        either of those. An unparseable page in the middle of the
+        document (prose between two schedule sections, a page `_read_table`
+        cannot structure at all) is skipped, not treated as the end of the
+        document -- only running past the document's own last page ends
+        the search. If no page anywhere produces an unambiguous match, the
+        result honestly states how many pages were actually checked,
+        rather than only ever repeating page 1's own specific message --
+        "not found on the pages I looked at" is a different, weaker claim
+        than "not found," and this must never blur into the latter.
         """
         if not self.available:
             raise FileNotFoundError(self.pdf_path)
-        page_number = query.page_hint or 1
-        result = self._native_lookup_on_page(query, page_number)
-        if query.page_hint is not None or result.miss_reason != "field_not_on_page":
-            return result
-        page = page_number + 1
-        while True:
-            table = self._read_table(page)
-            if table is None:
-                return result
+        if query.page_hint is not None:
+            return self._native_lookup_on_page(query, query.page_hint)
+
+        import fitz
+        total_pages = len(fitz.open(self.pdf_path))
+        checked: list[DocumentQueryResult] = []
+        for page in range(1, total_pages + 1):
+            if self._read_table(page) is None:
+                continue  # an unparseable/non-tabular page does not end the search
             candidate = self._native_lookup_on_page(query, page)
-            if candidate.miss_reason != "field_not_on_page":
+            if candidate.value is not None:
                 return candidate
-            page += 1
+            if candidate.miss_reason != "field_not_on_page":
+                # A page-local ambiguity a different page cannot resolve:
+                # either the field's own column name is itself ambiguous
+                # on this page, or this page names more than one candidate
+                # record and none matches the question (a genuine "which
+                # one did you mean" -- see _native_lookup_on_page's own
+                # comment on why that's distinct from a single/no-candidate
+                # page, which keeps searching instead via "field_not_on_page").
+                return candidate
+            checked.append(candidate)
+
+        if not checked:
+            return DocumentQueryResult(
+                value=None, unit=None, page=1, bbox=None, extraction_method="native_text",
+                confidence=0.0, evidence=[], ambiguity="The document's table structure could not be read natively.",
+            )
+        pages_checked = ", ".join(str(result.page) for result in checked)
+        ambiguity = (
+            f"Checked {len(checked)} page(s) with a readable table (pages {pages_checked}) -- "
+            f"none contains a resolvable match for '{query.field}' against this question."
+        )
+        return DocumentQueryResult(
+            value=None, unit=None, page=checked[-1].page, bbox=None, extraction_method="native_text",
+            confidence=0.0, evidence=[], ambiguity=ambiguity, miss_reason="field_not_on_page",
+        )
 
     def _native_lookup_on_page(self, query: DocumentQueryInput, page_number: int) -> DocumentQueryResult:
         table = self._read_table(page_number)
@@ -419,7 +464,22 @@ class DocumentAnalyzer:
             # SPEC-M1.5 §4B/OD-14: no candidate row was named at all -- this is
             # not a document-legibility problem, so a vision pass over the same
             # page cannot resolve it either.
-            miss_reason = "no_matching_record"
+            #
+            # Found live, 2026-09-19: this branch conflated two genuinely
+            # different situations under one miss_reason. When this page
+            # names more than one candidate record and the question
+            # matches none of them, that really is "you didn't say which
+            # one" -- a same-page ambiguity no other page can resolve.
+            # When this page names at most one candidate and it still
+            # doesn't match, there is nothing to choose between on this
+            # page at all -- the far more common real explanation is a
+            # continuation table (the same header row repeated across
+            # pages, each page's own single-or-few records never
+            # mentioning the one actually being asked about). That case
+            # must not be reported as a same-page ambiguity; it uses the
+            # same "keep searching other pages" miss reason as a page
+            # missing the field's column outright.
+            miss_reason = "no_matching_record" if len(record_candidates) > 1 else "field_not_on_page"
         else:
             column_label = table.columns[column_matches[0]].label
             matched_records = ", ".join(record_lookup[i] for i in record_matches)
