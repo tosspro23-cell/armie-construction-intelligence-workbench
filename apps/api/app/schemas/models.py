@@ -86,6 +86,22 @@ class AgentProposal(BaseModel):
     proposal_id: str = Field(default_factory=lambda: str(uuid4()))
     proposed_width_m: float | None = None
     proposed_height_m: float | None = None
+    # Independent-review finding, 2026-09-19 (D-064 item 2): a numeric
+    # width/height alone cannot express what a missing_in_pdf/missing_in_ifc
+    # investigation actually concludes ("is this a real omission, or did
+    # you find it under a different tag") -- that categorical judgment is
+    # forced into this typed field instead of being inferred from free
+    # text (AgentService._extract_finding_verdict reads it from the
+    # model's own submit_finding_verdict tool call, never guesses it from
+    # `rationale`). `None` only when the investigation ended without ever
+    # calling that tool (e.g. hit the iteration limit first).
+    verdict: Literal["dimension_confirmed", "genuine_omission", "found_under_different_reference", "inconclusive"] | None = None
+    # The model's own one-or-two-sentence justification for `verdict`,
+    # submitted alongside it through the same tool call -- kept separate
+    # from `rationale` (the full turn's own prose) since this is
+    # specifically "what the model itself believes backs its verdict,"
+    # not the whole investigation's narrative.
+    verdict_basis: str | None = None
     rationale: str
     citations: list[Citation] = Field(default_factory=list)
     verification: VerificationStatus
@@ -210,6 +226,15 @@ class FindingTransitionRequest(BaseModel):
 
     action: str = Field(min_length=1, max_length=64)
     note: str | None = Field(default=None, max_length=2000)
+    # Independent-review finding, 2026-09-19: required (server-enforced,
+    # see main.py's own check) for `approve_proposal`/`reject_proposal` --
+    # identifies which specific AgentProposal the caller actually
+    # reviewed, so the store can atomically reject the action if a
+    # concurrent investigation or another reviewer already replaced it.
+    # Ignored for every other action (kept optional here rather than a
+    # second request schema, matching this endpoint's existing single-body
+    # shape for every action).
+    proposal_id: str | None = Field(default=None, max_length=64)
 
 
 class ClarificationResumeRequest(BaseModel):

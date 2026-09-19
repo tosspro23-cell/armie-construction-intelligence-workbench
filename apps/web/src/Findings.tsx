@@ -12,8 +12,16 @@ type FindingStatus = "open" | "acknowledged" | "action_required" | "resolved" | 
 // the same way this whole file already keeps its own EngineeringFinding
 // mirror self-contained.
 type FindingCitation = { evidence_id: string; source_type: string; label: string; locator: Record<string, any> };
+// Independent-review finding, 2026-09-19 (D-064 item 2): `verdict` is the
+// model's own structured conclusion (submitted via submit_finding_verdict,
+// not inferred from free text) -- the only field that can express what a
+// missing_in_pdf/missing_in_ifc investigation actually concludes, since
+// "is this a real omission" isn't a width or a height. `null` only for a
+// turn that never reached the tool at all.
 type AgentProposal = {
   proposal_id: string; proposed_width_m: number | null; proposed_height_m: number | null;
+  verdict: "dimension_confirmed" | "genuine_omission" | "found_under_different_reference" | "inconclusive" | null;
+  verdict_basis: string | null;
   rationale: string; citations: FindingCitation[];
   verification: { status: "verified" | "unverified" | "failed" | "not_applicable"; reason?: string | null };
   trace_id: string; generated_at: string;
@@ -36,19 +44,44 @@ type EngineeringFinding = {
 // which buttons to show only -- a stale copy here just risks an extra 409
 // round-trip, never an actually-illegal transition, since the server
 // re-validates every action independently.
-const LEGAL_ACTIONS: Partial<Record<FindingStatus, Array<{ action: string; label: string }>>> = {
+const LEGAL_ACTIONS: Partial<Record<FindingStatus, Array<{ action: string; label: string; title?: string }>>> = {
   open: [{ action: "acknowledge", label: "Acknowledge" }],
   acknowledged: [
     { action: "start_action", label: "Start action" },
     { action: "waive", label: "Waive" },
     { action: "mark_false_positive", label: "Mark false positive" },
   ],
-  action_required: [{ action: "resolve", label: "Mark resolved" }],
+  // Independent-review finding, 2026-09-19 (D-064 item 3): distinguishes
+  // "a human accepted this determination" from "the actual IFC/PDF source
+  // was corrected" -- resolve/approve never touch the real files (SPEC-M17
+  // §6's own invariant), and this button is the one place that could
+  // otherwise be misread as "the system fixed it." "Re-check now" below
+  // is the actual closed-loop proof this milestone's own re-verify
+  // guarantee relies on.
+  action_required: [{
+    action: "resolve", label: "Mark resolved",
+    title: "Records that you've addressed this manually -- it does not modify the IFC model or PDF drawing itself. Use \"Re-check now\" afterward to confirm the real sources actually agree.",
+  }],
 };
 
 export function formatDims(width: number | null | undefined, height: number | null | undefined): string {
   if (width == null && height == null) return "—";
   return `${width != null ? width.toFixed(2) : "?"} × ${height != null ? height.toFixed(2) : "?"} m`;
+}
+
+// Independent-review finding, 2026-09-19 (D-064 item 2): human-readable
+// labels for AgentProposal.verdict -- kept as an explicit switch (not a
+// generic "replace underscores with spaces") so a future verdict value
+// added server-side without a matching case here shows as itself
+// (readable, if unstyled) rather than silently rendering nothing.
+function formatVerdict(verdict: AgentProposal["verdict"]): string {
+  switch (verdict) {
+    case "dimension_confirmed": return "Dimension confirmed";
+    case "genuine_omission": return "Genuine omission";
+    case "found_under_different_reference": return "Found under a different reference";
+    case "inconclusive": return "Inconclusive";
+    default: return verdict ?? "—";
+  }
 }
 
 function errorMessage(err: unknown): string {
@@ -87,11 +120,18 @@ export function Findings({ projectId, onInvestigate, refreshToken, investigating
 
   useEffect(() => { load(); }, [load, refreshToken]);
 
-  async function act(findingId: string, action: string) {
+  // Independent-review finding, 2026-09-19: `proposalId` is required for
+  // approve_proposal/reject_proposal (server-enforced) -- it identifies
+  // exactly which AgentProposal this click reviewed, so a proposal
+  // replaced by a concurrent investigation between page-load and this
+  // click is caught as a 409 instead of silently approving/rejecting
+  // whatever happens to be live by the time the request lands.
+  async function act(findingId: string, action: string, proposalId?: string) {
     setBusyId(findingId); setError(null);
     try {
       const updated = await api<EngineeringFinding>(`/api/v1/findings/${findingId}/transition`, {
-        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action }),
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action, ...(proposalId ? { proposal_id: proposalId } : {}) }),
       });
       setFindings((current) => (current || []).map((f) => (f.finding_id === findingId ? updated : f)));
     } catch (err) { setError(errorMessage(err)); } finally { setBusyId(null); }
@@ -128,8 +168,8 @@ export function Findings({ projectId, onInvestigate, refreshToken, investigating
             <div><dt>Last updated</dt><dd>{new Date(finding.updated_at).toLocaleString()}</dd></div>
           </dl>
           <div className="finding-actions">
-            {(LEGAL_ACTIONS[finding.status] || []).map(({ action, label }) => (
-              <button key={action} type="button" disabled={busyId === finding.finding_id} onClick={() => act(finding.finding_id, action)}>{label}</button>
+            {(LEGAL_ACTIONS[finding.status] || []).map(({ action, label, title }) => (
+              <button key={action} type="button" disabled={busyId === finding.finding_id} onClick={() => act(finding.finding_id, action)} title={title}>{label}</button>
             ))}
             {finding.status === "resolved" && <button type="button" disabled={busyId === finding.finding_id} onClick={() => reverify(finding.finding_id)} title="Re-runs the actual IFC/PDF comparison for this tag -- a human's 'resolved' click is never trusted on its own.">Re-check now</button>}
             {/* SPEC-M17 §4D: additive, not a replacement for "Mark resolved"
@@ -149,26 +189,49 @@ export function Findings({ projectId, onInvestigate, refreshToken, investigating
             {finding.status === "action_required" && (["dimension_mismatch", "missing_in_pdf", "missing_in_ifc"] as const).includes(finding.finding_type) && !finding.pending_proposal &&
               <button type="button" disabled={busyId === finding.finding_id || investigating} onClick={() => onInvestigate(finding)} title="Asks V2's tool-calling agent to investigate this mismatch in the Conversation panel and propose which value is correct -- you still decide whether to approve it.">Ask agent to investigate</button>}
           </div>
-          {/* SPEC-M17, amended 2026-09-18: the agent's actual reasoning
-              already streamed in the Conversation panel when this
-              proposal was generated -- shown here is only the compact
-              result a human needs to decide approve/reject, not a second
-              copy of the full rationale text. */}
+          {/* SPEC-M17, amended 2026-09-18, then 2026-09-19 (independent-
+              review finding): the agent's reasoning streams live in the
+              Conversation panel when a proposal is generated, but a
+              reviewer coming back later -- after a refresh, the next day,
+              or a different person entirely -- has no way to replay that.
+              The compact summary below stays the primary view; the
+              <details> beneath it makes the proposal genuinely self-
+              contained (rationale + evidence, from the finding's own
+              persisted AgentProposal) so approval never has to depend on
+              "you happened to still have the chat open." */}
           {finding.pending_proposal && <div className="finding-proposal">
             <div className="finding-proposal-header">
               <strong>Agent-proposed resolution</strong>
               <span className={finding.pending_proposal.verification.status}>{finding.pending_proposal.verification.status.replace(/_/g, " ")}</span>
             </div>
             <dl className="citation-facts">
-              <div><dt>Proposed dimensions</dt><dd>{formatDims(finding.pending_proposal.proposed_width_m, finding.pending_proposal.proposed_height_m)}</dd></div>
+              {/* Independent-review finding, 2026-09-19 (D-064 item 2):
+                  a dimension_mismatch verdict has an actual number to show;
+                  missing_in_pdf/missing_in_ifc conclude something
+                  categorical instead ("genuine omission" is not a width),
+                  so it gets its own row rather than a permanently-empty
+                  "Proposed dimensions: —". */}
+              {finding.pending_proposal.verdict && <div><dt>Verdict</dt><dd>{formatVerdict(finding.pending_proposal.verdict)}</dd></div>}
+              {(finding.pending_proposal.proposed_width_m != null || finding.pending_proposal.proposed_height_m != null) &&
+                <div><dt>Proposed dimensions</dt><dd>{formatDims(finding.pending_proposal.proposed_width_m, finding.pending_proposal.proposed_height_m)}</dd></div>}
               <div><dt>Evidence</dt><dd>{finding.pending_proposal.citations.length} citation(s) from the investigation</dd></div>
             </dl>
-            <p className="finding-proposal-note">Full reasoning streamed in the Conversation panel when this was generated.</p>
             {finding.pending_proposal.verification.status === "unverified" &&
               <p className="unverified-caveat">⚠ This proposal's own numbers could not be fully confirmed against the agent's own tool results — please double-check before approving it.</p>}
+            <details className="finding-proposal-detail">
+              <summary>Show full reasoning and evidence ({finding.pending_proposal.citations.length} citation(s))</summary>
+              {finding.pending_proposal.verdict_basis && <p className="finding-proposal-verdict-basis"><strong>Basis:</strong> {finding.pending_proposal.verdict_basis}</p>}
+              <p className="finding-proposal-rationale">{finding.pending_proposal.rationale}</p>
+              {finding.pending_proposal.citations.length > 0 && <ul className="finding-proposal-citations">
+                {finding.pending_proposal.citations.map((citation) => <li key={citation.evidence_id}>
+                  <span className={`evidence-badge ${citation.source_type}`}>{citation.source_type}</span> {citation.label}
+                </li>)}
+              </ul>}
+              <p className="finding-proposal-meta">Generated {new Date(finding.pending_proposal.generated_at).toLocaleString()} · also streamed live in the Conversation panel when this was created</p>
+            </details>
             <div className="finding-actions">
-              <button type="button" disabled={busyId === finding.finding_id} onClick={() => act(finding.finding_id, "approve_proposal")}>Approve</button>
-              <button type="button" disabled={busyId === finding.finding_id} onClick={() => act(finding.finding_id, "reject_proposal")}>Reject</button>
+              <button type="button" disabled={busyId === finding.finding_id} onClick={() => act(finding.finding_id, "approve_proposal", finding.pending_proposal!.proposal_id)} title="Records that you accept this conclusion -- it does not modify the IFC model or PDF drawing itself. Use &quot;Re-check now&quot; afterward to confirm the real sources actually agree once someone has made the correction.">Approve</button>
+              <button type="button" disabled={busyId === finding.finding_id} onClick={() => act(finding.finding_id, "reject_proposal", finding.pending_proposal!.proposal_id)} title="Discards this specific proposal (kept in history for the record) -- the finding stays action_required so it can be investigated again or resolved manually.">Reject</button>
             </div>
           </div>}
           <details className="step-trace"><summary>{finding.history.length} history entrie(s)</summary>

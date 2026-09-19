@@ -22,6 +22,7 @@ from app.finding_workflow import (
     validate_transition,
 )
 from app.persistence.conversation_store import ConversationStore
+from app.persistence.finding_store import FindingVersionConflict
 from app.rate_limit import InMemorySlidingWindowRateLimiter
 from app.schemas.models import (
     AgentResponse,
@@ -624,6 +625,12 @@ async def _v2_sse_stream(agent: AgentService, conversations: ConversationStore, 
             project_resources=project_resources, thread_id=thread_id, question=question, viewer_context=viewer_context,
             recent_turns=recent_turns, deadline=deadline, cancel_check=lambda: record.get("status") == "cancel_requested",
             source_preference=source_preference,
+            # Independent-review finding, 2026-09-19 (D-064 item 2): only
+            # a finding investigation gets the extra submit_finding_verdict
+            # tool -- a normal chat question has no structured verdict to
+            # submit, and offering the tool unconditionally would just
+            # confuse the model into thinking every question wants one.
+            include_verdict_tool=investigating_finding is not None,
         ):
             if event["type"] == "final":
                 # Owner-reported, 2026-09-16: V2 responses never carried a
@@ -683,7 +690,25 @@ async def _v2_sse_stream(agent: AgentService, conversations: ConversationStore, 
                 if investigating_finding is not None and final_response.disposition.value in {"answered", "partially_answered"}:
                     proposal = agent.build_finding_proposal(investigating_finding, final_response)
                     try:
-                        await asyncio.to_thread(finding_store.set_pending_proposal, investigating_finding.finding_id, proposal)
+                        # Independent-review finding, 2026-09-19: an
+                        # investigation this slow that a human already
+                        # resolved/waived/marked-false-positive the finding
+                        # while it was still running must not resurrect a
+                        # pending_proposal on it after the fact --
+                        # `expected_status` is checked atomically inside
+                        # the store (not a separate, staler re-read here),
+                        # so a finding that changed mid-investigation gets
+                        # `None` back rather than a silent stale write.
+                        persisted = await asyncio.to_thread(
+                            finding_store.set_pending_proposal, investigating_finding.finding_id, proposal,
+                            expected_status=FindingStatus.ACTION_REQUIRED,
+                        )
+                        if persisted is None:
+                            execution_metadata["finding_proposal_stale"] = (
+                                f"Finding '{investigating_finding.finding_id}' was no longer action_required when this "
+                                "investigation finished (its status changed while the investigation was running) -- "
+                                "this proposal was not saved."
+                            )
                     except Exception as error:
                         execution_metadata["finding_proposal_persist_error"] = str(error)
                 final_response = final_response.model_copy(update={"execution_metadata": execution_metadata})
@@ -909,13 +934,32 @@ def transition_finding(finding_id: str, request: FindingTransitionRequest, x_ses
     # checked here rather than distorting validate_transition's own
     # single-purpose signature (see finding_workflow.py's own comment on
     # PROPOSAL_REQUIRED_ACTIONS for why).
-    if request.action in PROPOSAL_REQUIRED_ACTIONS and finding.pending_proposal is None:
-        raise HTTPException(status_code=409, detail=f"Cannot '{request.action}' a finding with no pending proposal.")
-    updated = container.finding_store.append_transition(
-        finding_id, to_status=target_status, actor_session_id=x_session_id, note=request.note,
-        updates={"pending_proposal": None} if request.action in PROPOSAL_REQUIRED_ACTIONS else None,
-        proposal_snapshot=finding.pending_proposal if request.action == "approve_proposal" else None,
-    )
+    if request.action in PROPOSAL_REQUIRED_ACTIONS:
+        if finding.pending_proposal is None:
+            raise HTTPException(status_code=409, detail=f"Cannot '{request.action}' a finding with no pending proposal.")
+        # Independent-review finding, 2026-09-19: this pre-check alone
+        # only rules out the finding having *no* proposal at the moment
+        # this request happened to arrive -- it says nothing about
+        # whether it's the *same* proposal the caller actually reviewed
+        # before clicking. `proposal_id` is required precisely so the
+        # store's own atomic check (below) can catch a proposal replaced
+        # between page-load and this click, not just "some proposal
+        # exists right now."
+        if request.proposal_id is None:
+            raise HTTPException(status_code=409, detail=f"'{request.action}' requires proposal_id, identifying the specific proposal you reviewed.")
+    try:
+        updated = container.finding_store.append_transition(
+            finding_id, to_status=target_status, actor_session_id=x_session_id, note=request.note,
+            updates={"pending_proposal": None} if request.action in PROPOSAL_REQUIRED_ACTIONS else None,
+            # SPEC-M17 §4C, widened 2026-09-19 (independent-review finding):
+            # a rejected proposal's own snapshot is recorded too, not only
+            # an approved one -- "who rejected which proposal" is exactly
+            # as much an audit fact as "who approved which proposal."
+            proposal_snapshot=finding.pending_proposal if request.action in PROPOSAL_REQUIRED_ACTIONS else None,
+            expected_pending_proposal_id=request.proposal_id if request.action in PROPOSAL_REQUIRED_ACTIONS else None,
+        )
+    except FindingVersionConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from None
     return updated.model_dump()
 
 

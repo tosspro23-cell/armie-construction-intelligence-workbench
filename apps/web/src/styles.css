@@ -222,10 +222,16 @@ pre { max-width: 100%; overflow: auto; white-space: pre-wrap; overflow-wrap: any
 .finding-proposal { margin-top: 10px; padding: 10px; background: #0f1830; border: 1px solid #324068; border-radius: 8px; }
 .finding-proposal-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
 .finding-proposal-header span { font-size: .7rem; text-transform: uppercase; letter-spacing: .04em; }
-/* SPEC-M17, amended 2026-09-18: points back at the Conversation panel,
-   where the actual multi-step investigation streamed -- this card only
-   shows the compact result a human needs to approve/reject. */
-.finding-proposal-note { margin: 6px 0 0; color: #8190ad; font-size: .74rem; font-style: italic; }
+/* Independent-review finding, 2026-09-19: the proposal card must be
+   self-contained (rationale + evidence a reviewer can reopen later, not
+   just "it streamed in the chat once") -- this <details> holds that
+   without duplicating the compact summary above it. */
+.finding-proposal-detail { margin-top: 8px; }
+.finding-proposal-detail summary { cursor: pointer; color: #9fbfff; font-size: .82rem; }
+.finding-proposal-rationale { margin: 8px 0; white-space: pre-wrap; font-size: .82rem; line-height: 1.5; }
+.finding-proposal-verdict-basis { margin: 8px 0 0; font-size: .82rem; line-height: 1.5; }
+.finding-proposal-citations { margin: 0 0 8px; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; font-size: .78rem; }
+.finding-proposal-meta { margin: 0; color: #8190ad; font-size: .72rem; font-style: italic; }
 .reconciliation-table { margin: 0 0 10px; }
 .reconciliation-table table { border-collapse: collapse; width: 100%; font-size: .8rem; }
 .reconciliation-table th, .reconciliation-table td { text-align: left; padding: 4px 8px; border-bottom: 1px solid #26335c; overflow-wrap: anywhere; }

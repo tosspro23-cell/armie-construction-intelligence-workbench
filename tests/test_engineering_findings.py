@@ -403,7 +403,8 @@ def test_approve_proposal_history_snapshot_survives_a_later_overwriting_proposal
         _walk_to_action_required(client, finding_id)
 
         assert _investigate(client, finding_id)["status_code"] == 200
-        approved = client.post(f"/api/v1/findings/{finding_id}/transition", json={"action": "approve_proposal"})
+        first_proposal_id = client.get(f"/api/v1/findings/{finding_id}").json()["pending_proposal"]["proposal_id"]
+        approved = client.post(f"/api/v1/findings/{finding_id}/transition", json={"action": "approve_proposal", "proposal_id": first_proposal_id})
         assert approved.status_code == 200
         approved_rationale = approved.json()["history"][-1]["proposal_snapshot"]["rationale"]
 
@@ -423,3 +424,149 @@ def test_approve_proposal_history_snapshot_survives_a_later_overwriting_proposal
     assert final["pending_proposal"]["rationale"] == "A completely different, later conclusion."
     original_approval_entry = next(entry for entry in final["history"] if entry["proposal_snapshot"] is not None)
     assert original_approval_entry["proposal_snapshot"]["rationale"] == approved_rationale == "The IFC value 1.75 m is correct."
+
+
+# --- Independent-review findings, 2026-09-19: approval version binding ---------------
+
+def test_approve_proposal_requires_a_proposal_id(monkeypatch, tmp_path) -> None:
+    """A live pending_proposal existing is necessary but not sufficient --
+    the caller must also name which one they reviewed."""
+    _configure_env(monkeypatch, tmp_path)
+    import app.main as main_module
+
+    with TestClient(main_module.app) as client:
+        _install_fake_agent(
+            main_module, monkeypatch, ["The IFC value 1.75 m is correct."],
+            tool_calls=[("get_element_properties", {"entity_type": "IfcWindow"})],
+        )
+        client.post("/api/v1/chat", json={"question": RECONCILIATION_QUESTION})
+        finding_id = next(item["finding_id"] for item in client.get("/api/v1/findings").json() if item["tag"] == "W02")
+        _walk_to_action_required(client, finding_id)
+        assert _investigate(client, finding_id)["status_code"] == 200
+
+        response = client.post(f"/api/v1/findings/{finding_id}/transition", json={"action": "approve_proposal"})
+
+    assert response.status_code == 409
+
+
+def test_approve_proposal_is_rejected_when_the_proposal_changed_since_it_was_loaded(monkeypatch, tmp_path) -> None:
+    """Independent-review finding, 2026-09-19 (reproduced): a page that
+    loaded proposal A, then a second investigation (another tab, another
+    reviewer, or just a slow first investigation racing a fast second one)
+    replaces the live pending_proposal with B, must not be able to approve
+    A's own stale proposal_id and have that silently approve B instead.
+    The finding must end up completely unaffected by the rejected request:
+    still ACTION_REQUIRED, still carrying B as its live proposal.
+    """
+    _configure_env(monkeypatch, tmp_path)
+    import app.main as main_module
+
+    with TestClient(main_module.app) as client:
+        fake = _install_fake_agent(
+            main_module, monkeypatch, ["Proposal A: the IFC value 1.75 m is correct."],
+            tool_calls=[("get_element_properties", {"entity_type": "IfcWindow"})],
+        )
+        client.post("/api/v1/chat", json={"question": RECONCILIATION_QUESTION})
+        finding_id = next(item["finding_id"] for item in client.get("/api/v1/findings").json() if item["tag"] == "W02")
+        _walk_to_action_required(client, finding_id)
+        assert _investigate(client, finding_id)["status_code"] == 200
+        stale_proposal_id = client.get(f"/api/v1/findings/{finding_id}").json()["pending_proposal"]["proposal_id"]
+
+        fake.script("v2_tool_turn", ScriptedToolCalls([("get_element_properties", {"entity_type": "IfcWindow"})]))
+        fake.script("v2_tool_turn", ScriptedAnswer(["Proposal B: a completely different, later conclusion."]))
+        assert _investigate(client, finding_id)["status_code"] == 200
+        live_finding_before = client.get(f"/api/v1/findings/{finding_id}").json()
+        live_proposal_id = live_finding_before["pending_proposal"]["proposal_id"]
+        assert live_proposal_id != stale_proposal_id  # sanity: this really is a different proposal now
+
+        response = client.post(f"/api/v1/findings/{finding_id}/transition", json={"action": "approve_proposal", "proposal_id": stale_proposal_id})
+
+        final = client.get(f"/api/v1/findings/{finding_id}").json()
+
+    assert response.status_code == 409
+    assert final["status"] == "action_required"  # never silently resolved
+    assert final["pending_proposal"]["proposal_id"] == live_proposal_id  # B untouched
+    assert final["pending_proposal"]["rationale"] == "Proposal B: a completely different, later conclusion."
+
+
+def test_reject_proposal_keeps_a_snapshot_of_what_was_rejected(monkeypatch, tmp_path) -> None:
+    """Independent-review finding, 2026-09-19 (reproduced): `reject_proposal`
+    used to clear `pending_proposal` with no `proposal_snapshot` recorded at
+    all -- the history showed only `action_required -> action_required`,
+    with no way to answer "who rejected which proposal, and why."
+    """
+    _configure_env(monkeypatch, tmp_path)
+    import app.main as main_module
+
+    with TestClient(main_module.app) as client:
+        _install_fake_agent(
+            main_module, monkeypatch, ["A proposal the human will reject."],
+            tool_calls=[("get_element_properties", {"entity_type": "IfcWindow"})],
+        )
+        client.post("/api/v1/chat", json={"question": RECONCILIATION_QUESTION})
+        finding_id = next(item["finding_id"] for item in client.get("/api/v1/findings").json() if item["tag"] == "W02")
+        _walk_to_action_required(client, finding_id)
+        assert _investigate(client, finding_id)["status_code"] == 200
+        proposal_id = client.get(f"/api/v1/findings/{finding_id}").json()["pending_proposal"]["proposal_id"]
+
+        rejected = client.post(f"/api/v1/findings/{finding_id}/transition", json={"action": "reject_proposal", "proposal_id": proposal_id})
+
+    assert rejected.status_code == 200
+    rejection_entry = rejected.json()["history"][-1]
+    assert rejection_entry["proposal_snapshot"] is not None
+    assert rejection_entry["proposal_snapshot"]["proposal_id"] == proposal_id
+    assert rejection_entry["proposal_snapshot"]["rationale"] == "A proposal the human will reject."
+
+
+# --- Independent-review finding, 2026-09-19: a late investigation must not overwrite a resolved finding ---
+
+def test_a_late_finishing_investigation_does_not_resurrect_a_proposal_on_an_already_resolved_finding(monkeypatch, tmp_path) -> None:
+    """Independent-review finding, 2026-09-19 (fault injection): the guard
+    that started an investigation (status == ACTION_REQUIRED) is checked
+    only once, at the start -- the investigation itself can take many
+    seconds of real model/tool-call time, during which a human (another
+    tab, another reviewer) can resolve the same finding. Simulated by
+    resolving the finding, through the real transition endpoint, at the
+    exact point `build_finding_proposal` is about to run -- the latest
+    point in `_chat_v2`'s own flow a concurrent human action could still
+    land before this turn persists its proposal.
+    """
+    _configure_env(monkeypatch, tmp_path)
+    import app.main as main_module
+    from app.agent.graph import AgentService
+
+    with TestClient(main_module.app) as client:
+        _install_fake_agent(
+            main_module, monkeypatch, ["The IFC value 1.75 m is correct."],
+            tool_calls=[("get_element_properties", {"entity_type": "IfcWindow"})],
+        )
+        client.post("/api/v1/chat", json={"question": RECONCILIATION_QUESTION})
+        finding_id = next(item["finding_id"] for item in client.get("/api/v1/findings").json() if item["tag"] == "W02")
+        _walk_to_action_required(client, finding_id)
+
+        original_build_finding_proposal = AgentService.build_finding_proposal
+
+        def _resolve_then_build(finding, final_response):
+            # A direct store write, not a nested HTTP call through the same
+            # TestClient -- this method runs synchronously inside the SSE
+            # stream's own event loop thread, where a second blocking HTTP
+            # request through the same client would itself raise (an
+            # unrelated technical constraint of nesting TestClient calls,
+            # not something this test is trying to exercise). The store
+            # write is the actual substance of "a concurrent human action
+            # landed here" regardless of which API surface triggered it.
+            main_module.app.state.container.finding_store.append_transition(
+                finding_id, to_status=FindingStatus.RESOLVED, actor_session_id="concurrent-reviewer", note=None,
+            )
+            return original_build_finding_proposal(finding, final_response)
+
+        monkeypatch.setattr(AgentService, "build_finding_proposal", staticmethod(_resolve_then_build))
+
+        result = _investigate(client, finding_id)
+        final = client.get(f"/api/v1/findings/{finding_id}").json()
+
+    assert result["status_code"] == 200
+    final_event = next(event for event in result["events"] if event["type"] == "final")
+    assert "finding_proposal_stale" in final_event["response"]["execution_metadata"]
+    assert final["status"] == "resolved"  # the concurrent human resolve is the one that stuck
+    assert final["pending_proposal"] is None  # never resurrected onto the now-resolved finding
