@@ -2924,3 +2924,34 @@ not reliable enough at directly authoring engineering artifacts to put that in a
 lightly-supervised path, and because V2's own demonstrated value (D-059/D-061) was *interpretation
 over verified data*, not *artifact generation* -- re-litigate only if the underlying product
 positioning changes, not by re-opening the question from scratch in a later session.
+
+**Amended 2026-09-19 -- chat-embedded architecture, not a dedicated endpoint.** Live manual
+testing of the original design (a `propose-resolution` REST endpoint rendering the agent's
+reasoning inside the Findings tab) surfaced a real critique: it read as a second, disconnected
+mini-agent rather than the same V2 agent already visible in the Conversation panel, undermining
+this milestone's own "agent participates in a real business process" positioning. Investigation
+now runs as a normal V2 chat turn (`ChatRequest.finding_id`), streaming into the same Conversation
+panel as any other question; Findings.tsx goes back to being a pure workflow-status list that
+triggers an investigation and shows only its *result* (proposed value + verification badge), never
+a second copy of the reasoning. See SPEC-M17 §13.1 for the full design.
+
+Two pre-existing SPEC-M16 V2 tool bugs were found and fixed during that same live-testing pass,
+both the direct cause of the agent "giving up too easily" that motivated the redesign in the first
+place: `extract_pdf_field`'s deterministic lookup always read page 1 of a multi-page PDF schedule
+regardless of where the requested row actually lived (no `page_hint` parameter exists for the
+model to set), and the tool's own schema description actively told the model to embed a record
+name into the `field` argument, which the deterministic column-matcher can never match against
+anything. See SPEC-M17 §13.2 for both fixes; neither is a new design decision, both are contained
+bug fixes in already-shipped SPEC-M16 infrastructure.
+
+**OD-54, recorded for the durable record (owner-agreed 2026-09-19, live-testing session).**
+Investigation coverage widened from `dimension_mismatch` only to all three SPEC-M11 finding types
+(`missing_in_pdf`, `missing_in_ifc` included), superseding OD-51's original narrower scope, after
+live verification against the real Azure deployment confirmed the architecture and underlying V2
+tooling genuinely support it for all three -- each with its own question template appropriate to
+what that finding type actually asks ("is this a real omission" vs. "which value is correct").
+See SPEC-M17 §13.3, including a disclosed, intentional limitation found live: a `missing_in_ifc`
+investigation can hypothesize a plausible-but-unconfirmed match to a different tag without fully
+ruling out that the candidate element is already accounted for elsewhere -- correctly surfaced as
+`unverified` (D-062) rather than a false confident claim, which is the fail-safe this system is
+designed to produce, not a defect requiring a fix before shipping.

@@ -113,7 +113,9 @@ Checked directly against the current codebase, not assumed:
   apply step in the same commit (D-024's own fix exists precisely because this step was missed
   once before).
 
-**B. Propose-resolution endpoint.**
+**B. Propose-resolution endpoint. (Superseded 2026-09-19 by §13's chat-embedded redesign — kept
+below as the original, as-built-then design for the historical record; do not implement this as
+written.)**
 - `POST /api/v1/findings/{finding_id}/propose-resolution` (`apps/api/app/main.py`), behind the
   existing app-wide `require_api_key`. Legal only when `status == ACTION_REQUIRED` and
   `finding_type == "dimension_mismatch"` (see §6 for why the other two finding types are excluded
@@ -187,11 +189,10 @@ destination rule) is unchanged and not reproduced here.
 
 ## 6. Explicitly excluded scope
 
-- **`missing_in_pdf`/`missing_in_ifc` finding types.** These are presence/absence discrepancies,
-  not a single wrong value to correct — "propose a resolution" is not a well-defined action for
-  them yet. `propose-resolution` returns `409` for these finding types this pass; revisit only
-  against a real, demonstrated need, not speculatively (matches SPEC-M11's own "one fixed
-  severity rule" precedent for not over-generalizing ahead of a real case).
+- **`missing_in_pdf`/`missing_in_ifc` finding types.** (Superseded 2026-09-19 — see §13/OD-54: both
+  are now investigable, using their own dedicated question templates.) Originally excluded because
+  these are presence/absence discrepancies, not a single wrong value to correct — "propose a
+  resolution" was judged not a well-defined action for them without a demonstrated need first.
 - **The agent never edits the real IFC file, PDF, or any drawing.** `propose_finding_resolution`
   is read-only over existing tools, identical to every other V2 question — it produces a proposed
   *number*, never a modified artifact. Applying a fix to the real source remains entirely a human/
@@ -297,3 +298,122 @@ follow-up spec, not for silently broadening this one).
   operator-triggered consumer of that same quota. Confirm the existing app-wide rate limits are
   sufficient, or specify a tighter, finding-specific guard if manual testing shows this feature
   competing meaningfully with normal chat usage for quota.
+- **OD-54 (owner-agreed 2026-09-19, live-testing session; recorded here for the durable record).**
+  Widen investigation coverage from `dimension_mismatch` only to all three SPEC-M11 finding types
+  (`missing_in_pdf`, `missing_in_ifc` included) — supersedes OD-51/§6's original exclusion. See
+  §13 for the trigger and what changed.
+
+## 13. Amendment 2026-09-19 — chat-embedded architecture + scope widening
+
+Two changes landed after subsections A–E were first built and tested, both driven by owner
+feedback during live manual testing against the real Azure deployment — not a new spec, since
+both are additive to this milestone's own already-approved intent (§1) rather than a new
+capability boundary in the OD-15 sense.
+
+**13.1 Chat-embedded investigation, replacing §4B's dedicated endpoint.** Manual testing of the
+original `propose-resolution` design (§4B) surfaced a real product critique: rendering the
+agent's reasoning inside the Findings tab, separately from the normal chat panel, read as a
+second, disconnected "mini-agent" rather than the same V2 agent already visible elsewhere in the
+workbench — undermining the exact "agent participates in a real business process" positioning
+this milestone exists to demonstrate (§1). Owner decision: investigation now runs as a normal V2
+chat turn instead.
+
+- `POST /api/v1/findings/{finding_id}/propose-resolution` is **removed**. `ChatRequest`
+  (`apps/api/app/schemas/models.py`) gains `finding_id: str | None = None`; when set, `_chat_v2`
+  (`apps/api/app/main.py`) looks up and validates the finding (the same three guards §4B had —
+  exists, `ACTION_REQUIRED`, a supported finding type; plus one new guard, the finding's
+  `project_id` must match the thread's own bound project), builds the investigation question
+  server-side (`AgentService.build_finding_investigation_question`, still built entirely from the
+  finding's own stored fields, never from `request.question` — the same prompt-injection-safety
+  property §4B had), and streams the resulting turn through the exact same `_v2_sse_stream` path
+  as any other question — the Conversation panel, not the Findings tab, is where the reasoning now
+  appears.
+- `AgentService.propose_finding_resolution` (the old single method that called and fully consumed
+  `invoke_v2` itself) is replaced by two static methods with no model-calling of their own:
+  `build_finding_investigation_question(finding) -> str` (the question) and
+  `build_finding_proposal(finding, final_response) -> AgentProposal` (maps an already-completed
+  turn's `AgentResponse` onto a persistable proposal) — `_chat_v2` calls the first before
+  `invoke_v2` runs and the second after it completes, so the frontend can stream the turn live
+  instead of waiting for one blocking call to finish.
+- `Findings.tsx` (§4D) is simplified to match: "Ask agent to investigate" hands off to
+  `main.tsx`'s own `investigateFinding` (which calls the same `runV2Turn` the normal chat submit
+  form uses, with `finding_id` set), and the pending-proposal card shows only a compact
+  proposed-value/verification-badge summary with a note pointing back at the Conversation panel —
+  it no longer renders the full rationale/citation list itself, since that already streamed
+  visibly elsewhere.
+- Live-verified against the real Azure `gpt-5-mini` deployment (not a scripted fake): a real
+  investigation turn showed 6–7 real tool calls in the same Conversation panel used for normal
+  chat — `get_element_properties`, `reconcile_doors_windows`, and multiple `extract_pdf_field`
+  retries with different phrasings — reaching a confident, well-reasoned `answered` conclusion,
+  which the human then approved through the normal Findings card, transitioning the finding to
+  `RESOLVED`. This is the concrete evidence this redesign achieves what §1 set out to demonstrate.
+
+**13.2 Two pre-existing V2 tool-layer bugs found and fixed during that same live-testing pass.**
+Neither is part of this milestone's own allowed scope (§4) — both live in SPEC-M16's own V2
+tool-calling infrastructure, used by every V2 question, not something this milestone added — but
+both were the direct, reproducible cause of the agent "giving up too easily" that owner feedback
+first flagged, so fixing them was a prerequisite to honestly claiming §1's demonstration works.
+Recorded here, not as a new D-0xx (both are contained bug fixes, not durable design decisions),
+with tests added alongside the fix in `tests/test_pdf_deterministic_extraction.py`:
+
+- `extract_pdf_field`'s deterministic lookup (`DocumentAnalyzer.native_lookup`,
+  `apps/api/app/tools/document/analyzer.py`) always defaulted to page 1 of a multi-page PDF when
+  the model's own tool call carried no explicit page number — which it never can, since the tool's
+  schema has no page parameter. The real door/window schedule in this project's demo fixture lives
+  on page 2; every one of the model's own retries scanned the wrong page and got the same
+  electrical-schedule miss every time, regardless of phrasing. Fixed with a narrow multi-page
+  fallback: when no `page_hint` was given and the miss is specifically "this page's columns don't
+  contain the requested field at all" (a new `miss_reason: "field_not_on_page"`), keep scanning
+  forward until a page's columns do contain it — never for a caller that already named a page
+  (reconciliation's own schedule reader), and never for a genuinely-absent-everywhere field or an
+  ambiguous match, both of which report a different reason and stop at the first page as before.
+- `extract_pdf_field`'s own tool-schema description (`apps/api/app/agent/tools.py`) actively
+  misled the model: its one example (`'Panel-A connected load'`) embeds a record identifier into
+  the `field` argument, but the deterministic column-matcher only ever matches `field` against a
+  column *header* — a record name there can never match anything, on any page. Fixed by rewording
+  the description to say the field is the column name only, with the record identifier going in
+  `question` instead.
+
+**13.3 Scope widened to all three SPEC-M11 finding types (OD-54).** After 13.1/13.2 confirmed the
+architecture and tooling work for `dimension_mismatch`, the owner asked to widen coverage to
+`missing_in_pdf`/`missing_in_ifc` too, superseding OD-51/§6's original narrower scope.
+
+- `INVESTIGABLE_FINDING_TYPES` (`apps/api/app/finding_workflow.py`) replaces the old
+  `dimension_mismatch`-only check in `_chat_v2` with `{"dimension_mismatch", "missing_in_pdf",
+  "missing_in_ifc"}`.
+- `build_finding_investigation_question` gained two more question templates, one per new finding
+  type — each asks the genuinely different question those types call for ("is this a real
+  omission, or does this element actually appear under a different tag/label," not "which of
+  these two values is correct," which presupposes a value conflict these types don't have).
+- `_extract_proposed_dimension` needed no code change: for these two types one side of the
+  known-values pair is always `None` (e.g. a `missing_in_pdf` finding has real `ifc_width_m` but
+  `pdf_width_m = None`), and its existing `expected is None -> never matches` rule already means
+  the real side's value is proposed when the agent confirms it, never a fabricated value invented
+  for the missing side.
+- `Findings.tsx`'s button visibility gained the same three-type set, mirrored explicitly from the
+  server's own `INVESTIGABLE_FINDING_TYPES` rather than reduced to "any type" — so a future fourth
+  finding type does not silently start showing the button before its own question template and
+  server-side guard exist.
+- Live-verified against the real Azure deployment for both new types: a `missing_in_pdf`
+  investigation (tag D04) correctly concluded a genuine PDF omission after multiple differently-
+  worded schedule lookups and a vision-based page inspection, producing a proposal with the real
+  IFC-side value; a `missing_in_ifc` investigation (tag W05) found IFC windows with matching
+  dimensions and hypothesized (without fully ruling out that those windows were already accounted
+  for under their own tags) that W05 might exist under a different tag — a genuinely interesting,
+  disclosed limitation of open-ended multi-step reasoning: the proposal was correctly marked
+  `unverified` in both the badge and the persisted `AgentProposal`, so a human reviewing it sees
+  the caveat rather than a falsely confident claim. This is the intended fail-safe behavior
+  (D-062), not a defect to chase before shipping.
+
+**Net effect on §7 (affected surfaces):** add `apps/api/app/tools/document/analyzer.py`,
+`apps/api/app/agent/tools.py` (13.2's fixes), and `apps/api/app/schemas/models.py`'s
+`DocumentQueryResult.miss_reason` literal (widened, not narrowed). Remove the old
+`propose-resolution` route from `apps/api/app/main.py`'s surface; add `ChatRequest.finding_id`
+and the `_chat_v2`/`_v2_sse_stream` guard/persistence logic in its place.
+
+**Net effect on §9 (acceptance criteria):** the "`propose-resolution` against a real
+`dimension_mismatch` finding" criterion is satisfied instead through `POST /api/v1/chat` with
+`finding_id` set, streaming into the same SSE path as any other V2 question; the "`409` for
+`missing_in_pdf`/`missing_in_ifc`" criterion is inverted — both are now legal and each produces a
+real persisted proposal, tested end-to-end in `tests/test_engineering_findings.py`
+(`test_investigate_finding_is_now_legal_for_missing_in_pdf_and_missing_in_ifc`).
