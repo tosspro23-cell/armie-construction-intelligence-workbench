@@ -492,7 +492,12 @@ class DocumentQueryResult(BaseModel):
     # to clarification without a vision round-trip, while every other
     # below-threshold case (field absent, multiple candidates) keeps falling
     # through to vision unchanged.
-    miss_reason: Literal["no_matching_record"] | None = None
+    # "field_not_on_page" (added for SPEC-M17's live investigation testing,
+    # 2026-09-18): the requested field's column doesn't exist on the page
+    # that was read at all -- the "wrong page" signature `native_lookup`
+    # uses to decide whether to keep scanning later pages when no explicit
+    # `page_hint` was given (see `DocumentAnalyzer.native_lookup`).
+    miss_reason: Literal["no_matching_record", "field_not_on_page"] | None = None
 
 
 class AuditEvent(BaseModel):

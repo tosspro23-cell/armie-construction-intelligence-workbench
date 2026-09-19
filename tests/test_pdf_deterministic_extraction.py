@@ -48,6 +48,17 @@ def _analyzer(tmp_path: Path) -> DocumentAnalyzer:
     return DocumentAnalyzer(ROOT / "demo_data" / "armie_demo_schedule.pdf", evidence_dir)
 
 
+async def _collect_sse_events(streaming_response) -> list[dict]:
+    import json
+    events = []
+    async for chunk in streaming_response.body_iterator:
+        text = chunk.decode() if isinstance(chunk, bytes) else chunk
+        for line in text.strip().split("\n"):
+            if line.startswith("data: "):
+                events.append(json.loads(line.removeprefix("data: ")))
+    return events
+
+
 def _settings(tmp_path: Path) -> Settings:
     settings = Settings(
         data_dir=ROOT / "demo_data", ifc_file="armie_demo.ifc", pdf_files=["armie_demo_schedule.pdf"],
@@ -258,3 +269,77 @@ def test_vision_extraction_with_a_near_full_page_bbox_is_also_marked_unlocalized
 
     assert response.citations[0].locator["localized"] is False
     assert response.citations[0].locator["bbox"] is None
+
+
+# --- item 19: V2's free-form extract_pdf_field can reach a later page ------------------
+#
+# Found live, 2026-09-18, verifying SPEC-M17's chat-embedded finding
+# investigation against the real Azure deployment: the model made three
+# separate extract_pdf_field attempts (different phrasings) trying to
+# confirm finding W02's PDF height, and every one reported "the visible
+# page is an electrical schedule" -- even though the door/window schedule
+# row for W02 genuinely exists on page 2 of this very fixture (verified
+# directly from the PDF: "W02 L01 Window 1.20 1.70"). The cause: V2's
+# `extract_pdf_field` tool schema has no page parameter for the model to
+# set, and `_execute_pdf` (graph.py) builds `DocumentQueryInput` with no
+# `page_hint`, which `native_lookup` used to default straight to page 1
+# and never look further -- unlike the deterministic
+# `reconcile_doors_windows` tool, whose own PDF subplan hardcodes
+# `page_hint: 2` and so never hit this at all. These tests reproduce the
+# miss exactly as observed (no page_hint, field genuinely on page 2, not
+# page 1) and confirm `native_lookup`'s new multi-page fallback finds it.
+
+def test_native_lookup_with_no_page_hint_finds_a_field_on_a_later_page(tmp_path: Path) -> None:
+    analyzer = _analyzer(tmp_path)
+    query = DocumentQueryInput(field="Height", question="What is the height of W02?")
+
+    result = analyzer.native_lookup(query)
+
+    assert result.value == "1.70"
+    assert result.page == 2
+    assert result.confidence >= Settings().pdf_confidence_threshold
+    assert result.evidence and result.evidence[0].locator["record"] == "W02"
+
+
+def test_native_lookup_with_an_explicit_page_hint_never_scans_past_it(tmp_path: Path) -> None:
+    """The multi-page fallback is for the free-form tool call only -- a
+    caller that already named a page (reconciliation's own schedule
+    reader) must get exactly that page and nothing else, unchanged."""
+    analyzer = _analyzer(tmp_path)
+    query = DocumentQueryInput(field="Height", question="What is the height of W02?", page_hint=1)
+
+    result = analyzer.native_lookup(query)
+
+    assert result.value is None
+    assert result.miss_reason == "field_not_on_page"
+    assert result.page == 1
+
+
+def test_v2_extract_pdf_field_tool_call_finds_a_field_on_page_two_with_zero_page_hint(tmp_path: Path) -> None:
+    """End-to-end proof through the real production dispatch path the live
+    bug actually went through (`_chat_v2` -> `invoke_v2` -> `_execute_pdf`),
+    not just the analyzer in isolation -- the model's own tool call, exactly
+    as V2 would really issue it, carries no page number at all."""
+    import app.main as main_module
+    from app.schemas.models import ChatRequest
+    from fakes.fake_provider import ScriptedAnswer, ScriptedToolCalls
+
+    settings = _settings(tmp_path)
+    fake = FakeModelProvider()
+    fake.script("v2_tool_turn", ScriptedToolCalls([("extract_pdf_field", {"field": "Height", "question": "What is the height of window W02?"})]))
+    fake.script("v2_tool_turn", ScriptedAnswer(["The PDF schedule records W02's height as 1.70 m."]))
+    container = ServiceContainer(settings, text_provider_factory=lambda s: fake, vision_provider_factory=lambda s: fake)
+    service = AgentService(container)
+    main_module.app.state.container = container
+    main_module.app.state.agent = service
+    main_module.app.state.requests = {}
+
+    response = asyncio.run(main_module.chat(ChatRequest(
+        request_id="v2-pdf-page-req-1", thread_id="v2-pdf-page-thread-1",
+        question="What is the height of window W02?", engine="v2",
+    )))
+    events = asyncio.run(_collect_sse_events(response))
+
+    final = next(event for event in events if event["type"] == "final")["response"]
+    assert final["disposition"] == "answered"
+    assert "1.70" in final["answer_markdown"]

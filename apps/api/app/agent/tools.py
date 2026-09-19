@@ -107,7 +107,10 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "field": {"type": "string", "description": "The field/label to look up, e.g. 'Panel-A connected load'."},
+                    "field": {
+                        "type": "string",
+                        "description": "The column/field name only, exactly as it appears as a table header, e.g. 'Connected Load', 'Height', 'Width'. Never include a record identifier here (a board, tag, or mark such as 'Panel-A' or 'W02') -- that goes only in `question`, since matching is done separately for the field/column and for the record/row.",
+                    },
                     "question": {"type": "string", "description": "The original user question, verbatim, for evidence localization."},
                 },
                 "required": ["field", "question"],

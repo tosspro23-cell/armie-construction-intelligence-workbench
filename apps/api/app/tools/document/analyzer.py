@@ -314,10 +314,44 @@ class DocumentAnalyzer:
         (0 or >1 candidate rows, or >1 candidate columns) -> 0.4; the
         requested field absent from the document entirely -> 0.0. No value
         is ever returned that was not read from a uniquely resolved cell.
+
+        Multi-page fallback (added for SPEC-M17's live investigation
+        testing, 2026-09-18): a caller that already knows which page holds
+        the answer (`query.page_hint` set -- e.g. reconciliation's own
+        schedule reader) gets exactly that page and nothing more, unchanged
+        from every prior version of this method. A caller with no page
+        hint at all -- the V2 tool-calling loop's free-form
+        `extract_pdf_field`, which has no page argument for the model to
+        set -- previously always meant page 1 silently, live-verified
+        2026-09-18 to make the agent's own multi-page-document investigation
+        of a real dimension-mismatch finding fail every one of its 3 retries
+        against the wrong page, even though the correct schedule row was on
+        page 2 the whole time (the deterministic `reconcile_doors_windows`
+        tool already knows to read page 2 -- this fixes the model's own
+        free-form lookup to find that out for itself instead of requiring
+        it to guess a page number it has no way to know). Only a
+        `field_not_on_page` miss keeps scanning forward -- that is the
+        "wrong page entirely" signature; every other miss (no record named,
+        multiple candidates, field present but empty) means this page *is*
+        the right one and a different page would not help.
         """
         if not self.available:
             raise FileNotFoundError(self.pdf_path)
         page_number = query.page_hint or 1
+        result = self._native_lookup_on_page(query, page_number)
+        if query.page_hint is not None or result.miss_reason != "field_not_on_page":
+            return result
+        page = page_number + 1
+        while True:
+            table = self._read_table(page)
+            if table is None:
+                return result
+            candidate = self._native_lookup_on_page(query, page)
+            if candidate.miss_reason != "field_not_on_page":
+                return candidate
+            page += 1
+
+    def _native_lookup_on_page(self, query: DocumentQueryInput, page_number: int) -> DocumentQueryResult:
         table = self._read_table(page_number)
         if table is None:
             return DocumentQueryResult(
@@ -337,6 +371,7 @@ class DocumentAnalyzer:
                 value=None, unit=None, page=page_number, bbox=None, extraction_method="native_text",
                 confidence=0.0, evidence=[],
                 ambiguity=f"The document does not contain a '{query.field}' field. Available fields: {available}.",
+                miss_reason="field_not_on_page",
             )
 
         if len(column_matches) == 1 and len(record_matches) == 1:
