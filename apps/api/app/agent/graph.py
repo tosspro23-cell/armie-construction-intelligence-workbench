@@ -3204,6 +3204,7 @@ Return only a corrected MultiQueryPlan JSON object."""
             return (
                 f"**{element.get('entity_type', plan.entity_type)}** — {element.get('name', 'Unnamed')}\n\n"
                 f"- Storey: {record.get('storey') or 'Unassigned'}\n"
+                f"- Tag: {element.get('tag') or '(none)'}\n"
                 f"- GlobalId: `{element.get('global_id')}`\n"
                 f"- ExpressID: `{element.get('express_id')}`\n"
                 f"- Key properties:\n{property_lines}"
