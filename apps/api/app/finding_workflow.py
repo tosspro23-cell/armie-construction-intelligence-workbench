@@ -44,6 +44,20 @@ _TRANSITIONS: dict[str, dict[FindingStatus, FindingStatus]] = {
 # above for why this doesn't live inside that table/function).
 PROPOSAL_REQUIRED_ACTIONS = frozenset({"approve_proposal", "reject_proposal"})
 
+# SPEC-M17, amended 2026-09-19 (owner decision, live-testing session):
+# originally dimension_mismatch only. Live verification against the real
+# Azure deployment confirmed the chat-embedded investigation architecture
+# genuinely demonstrates multi-step, multi-tool reasoning (not a scripted
+# workflow) for a dimension_mismatch finding; the owner then asked to widen
+# coverage to the other two SPEC-M11 finding types for fuller testing.
+# `AgentService.build_finding_proposal`'s numeric extraction already
+# degrades correctly for these (one side of ifc/pdf is always `None` for
+# these two types -- `_extract_proposed_dimension`'s existing `expected is
+# None -> no match` handling means a genuine finding's own real-side value
+# still gets proposed when the agent confirms it, never a fabricated
+# guess for the missing side).
+INVESTIGABLE_FINDING_TYPES = frozenset({"dimension_mismatch", "missing_in_pdf", "missing_in_ifc"})
+
 
 def validate_transition(current_status: FindingStatus, action: str) -> FindingStatus:
     """Returns the target status for `action` from `current_status`, or

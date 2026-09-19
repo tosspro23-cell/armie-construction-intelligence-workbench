@@ -56,7 +56,26 @@ function errorMessage(err: unknown): string {
   try { return JSON.parse(raw).detail || raw; } catch { return raw; }
 }
 
-export function Findings({ projectId }: { projectId: string | undefined }) {
+// SPEC-M17, amended 2026-09-18 (owner decision: one agent, one place it
+// visibly works). `onInvestigate` hands off to main.tsx's own V2
+// conversation flow instead of this component calling a dedicated
+// endpoint and rendering its own copy of the agent's reasoning -- this
+// component goes back to being a pure workflow-status list: it can
+// trigger an investigation and show its *result* (a compact proposed
+// value + verification badge to approve/reject), but the actual
+// multi-step reasoning only ever streams in the Conversation panel.
+// `refreshToken` is bumped by main.tsx once that turn's result has
+// landed on the backend finding, since this component's own `findings`
+// state has no other way to learn about it. `investigating` (main.tsx's
+// own `busy`) disables triggering a second investigation while one V2
+// turn is already in flight -- the Conversation panel is a single shared
+// stream, not one per finding.
+export function Findings({ projectId, onInvestigate, refreshToken, investigating }: {
+  projectId: string | undefined;
+  onInvestigate: (finding: { finding_id: string; tag: string }) => void;
+  refreshToken: number;
+  investigating: boolean;
+}) {
   const [findings, setFindings] = useState<EngineeringFinding[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -66,7 +85,7 @@ export function Findings({ projectId }: { projectId: string | undefined }) {
     api<EngineeringFinding[]>(`/api/v1/findings${query}`).then((value) => { setFindings(value); setError(null); }).catch((err) => setError(errorMessage(err)));
   }, [projectId]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { load(); }, [load, refreshToken]);
 
   async function act(findingId: string, action: string) {
     setBusyId(findingId); setError(null);
@@ -82,18 +101,6 @@ export function Findings({ projectId }: { projectId: string | undefined }) {
     setBusyId(findingId); setError(null);
     try {
       const updated = await api<EngineeringFinding>(`/api/v1/findings/${findingId}/reverify`, { method: "POST" });
-      setFindings((current) => (current || []).map((f) => (f.finding_id === findingId ? updated : f)));
-    } catch (err) { setError(errorMessage(err)); } finally { setBusyId(null); }
-  }
-
-  // SPEC-M17 §4D: this call can take a real V2 model round trip (a genuine
-  // tool-calling investigation, not a cached lookup) -- busyId already
-  // disables the triggering button for exactly this reason, same as every
-  // other action here.
-  async function proposeResolution(findingId: string) {
-    setBusyId(findingId); setError(null);
-    try {
-      const updated = await api<EngineeringFinding>(`/api/v1/findings/${findingId}/propose-resolution`, { method: "POST" });
       setFindings((current) => (current || []).map((f) => (f.finding_id === findingId ? updated : f)));
     } catch (err) { setError(errorMessage(err)); } finally { setBusyId(null); }
   }
@@ -127,10 +134,26 @@ export function Findings({ projectId }: { projectId: string | undefined }) {
             {finding.status === "resolved" && <button type="button" disabled={busyId === finding.finding_id} onClick={() => reverify(finding.finding_id)} title="Re-runs the actual IFC/PDF comparison for this tag -- a human's 'resolved' click is never trusted on its own.">Re-check now</button>}
             {/* SPEC-M17 §4D: additive, not a replacement for "Mark resolved"
                 above -- a human can still resolve manually with no agent
-                involvement at all, exactly as SPEC-M11 shipped it. */}
-            {finding.status === "action_required" && finding.finding_type === "dimension_mismatch" && !finding.pending_proposal &&
-              <button type="button" disabled={busyId === finding.finding_id} onClick={() => proposeResolution(finding.finding_id)} title="Asks V2's tool-calling agent to investigate this mismatch and propose which value is correct -- you still decide whether to approve it.">Ask agent to investigate</button>}
+                involvement at all, exactly as SPEC-M11 shipped it.
+                `investigating` (main.tsx's shared `busy`) disables this
+                while a V2 turn is already streaming -- one Conversation
+                panel, one investigation at a time. Widened 2026-09-19
+                (owner decision, live-testing session) from
+                dimension_mismatch only to all three SPEC-M11 finding
+                types -- mirrors the server's own INVESTIGABLE_FINDING_TYPES
+                (apps/api/app/finding_workflow.py); kept as an explicit
+                literal set here rather than "!== undefined" so a future
+                fourth finding type doesn't silently start showing this
+                button before the server-side question-builder/guard is
+                updated for it too. */}
+            {finding.status === "action_required" && (["dimension_mismatch", "missing_in_pdf", "missing_in_ifc"] as const).includes(finding.finding_type) && !finding.pending_proposal &&
+              <button type="button" disabled={busyId === finding.finding_id || investigating} onClick={() => onInvestigate(finding)} title="Asks V2's tool-calling agent to investigate this mismatch in the Conversation panel and propose which value is correct -- you still decide whether to approve it.">Ask agent to investigate</button>}
           </div>
+          {/* SPEC-M17, amended 2026-09-18: the agent's actual reasoning
+              already streamed in the Conversation panel when this
+              proposal was generated -- shown here is only the compact
+              result a human needs to decide approve/reject, not a second
+              copy of the full rationale text. */}
           {finding.pending_proposal && <div className="finding-proposal">
             <div className="finding-proposal-header">
               <strong>Agent-proposed resolution</strong>
@@ -138,12 +161,11 @@ export function Findings({ projectId }: { projectId: string | undefined }) {
             </div>
             <dl className="citation-facts">
               <div><dt>Proposed dimensions</dt><dd>{formatDims(finding.pending_proposal.proposed_width_m, finding.pending_proposal.proposed_height_m)}</dd></div>
+              <div><dt>Evidence</dt><dd>{finding.pending_proposal.citations.length} citation(s) from the investigation</dd></div>
             </dl>
-            <p className="story-step-body">{finding.pending_proposal.rationale}</p>
+            <p className="finding-proposal-note">Full reasoning streamed in the Conversation panel when this was generated.</p>
             {finding.pending_proposal.verification.status === "unverified" &&
               <p className="unverified-caveat">⚠ This proposal's own numbers could not be fully confirmed against the agent's own tool results — please double-check before approving it.</p>}
-            {finding.pending_proposal.citations.length > 0 &&
-              <p className="story-step-body">{finding.pending_proposal.citations.length} citation(s) from the investigating turn.</p>}
             <div className="finding-actions">
               <button type="button" disabled={busyId === finding.finding_id} onClick={() => act(finding.finding_id, "approve_proposal")}>Approve</button>
               <button type="button" disabled={busyId === finding.finding_id} onClick={() => act(finding.finding_id, "reject_proposal")}>Reject</button>

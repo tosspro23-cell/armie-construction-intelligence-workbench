@@ -942,45 +942,88 @@ Return only a corrected MultiQueryPlan JSON object."""
         other_numbers = [n for n in numbers if not _matches(ifc_value, n) and not _matches(pdf_value, n)]
         return other_numbers[0] if len(other_numbers) == 1 else None
 
-    async def propose_finding_resolution(self, project_resources: ProjectResources, finding: EngineeringFinding) -> AgentProposal:
-        """SPEC-M17 §4B: investigate one `dimension_mismatch` finding and
-        propose which value is actually correct, reusing V2's own
-        tool-calling loop (`invoke_v2`, SPEC-M16) completely unmodified --
-        this method is a caller of it, not a new capability. The question
-        is built entirely from the finding's own already-stored fields
-        (tag, entity type, storey, both sides' stored dimensions) -- never
-        from free-text operator input, which would reopen a prompt-
-        injection surface this design deliberately avoids (SPEC-M17 §3).
+    @staticmethod
+    def build_finding_investigation_question(finding: EngineeringFinding) -> str:
+        """SPEC-M17 §4B, amended (owner decision, 2026-09-18): the question
+        an "investigate this finding" turn actually asks V2, built
+        entirely from the finding's own already-stored fields (tag,
+        detail, both sides' stored dimensions) -- never from free-text
+        operator input, which would reopen a prompt-injection surface
+        this design deliberately avoids (SPEC-M17 §3). Read-only, like
+        every other V2 question -- the tools it can reach never write to
+        the real IFC/PDF sources.
 
-        Read-only: like every other V2 question, this can only call
-        existing, read-only tools -- it never writes to the real IFC/PDF
-        sources (SPEC-M17 §8's own invariant). The caller (main.py) is
-        responsible for confirming the finding is `ACTION_REQUIRED` and
-        `finding_type == "dimension_mismatch"` before calling this -- it
-        does not re-check either, the same "caller enforces legality"
-        convention `FindingStore.append_transition` already documents for
-        itself.
+        Owner-reported, 2026-09-18 (found live): the model gave up too
+        easily ("I cannot determine... please provide the PDF page") when
+        `extract_pdf_field` (a generic Q&A-style tool) failed to relocate
+        a specific schedule row that reconciliation's own deterministic
+        table-reading method (`_reconciliation_pdf_items`) had already
+        read correctly for this exact tag -- the agent had strictly less
+        precise tooling for this than the system already had, and settled
+        for "I don't know" on the first miss instead of trying harder.
+        Now explicitly told not to give up after one failed lookup.
+
+        Owner decision, 2026-09-19 (live-testing session): widened from
+        dimension_mismatch only to all three SPEC-M11 finding types (see
+        `INVESTIGABLE_FINDING_TYPES`) -- each gets its own question, since
+        "which value is correct" only makes sense for a real numeric
+        conflict; missing_in_pdf/missing_in_ifc ask the genuinely
+        different question "is this a real omission, or does this element
+        actually appear under a different tag/label."
         """
-        question = (
+        if finding.finding_type == "missing_in_pdf":
+            return (
+                f"A door/window reconciliation flagged that tag '{finding.tag}' is present in the IFC model "
+                f"(width={finding.ifc_width_m} m, height={finding.ifc_height_m} m) but has no matching row on the "
+                f"PDF schedule: {finding.detail} Investigate using your available tools -- re-check this element's "
+                "own real IFC properties, and try extract_pdf_field more than once with differently-worded "
+                f"questions (e.g. by dimension, by storey, by element type) before concluding tag '{finding.tag}' "
+                "genuinely does not appear anywhere on the schedule; also check nearby/similar elements (same "
+                "storey, same entity type) in case this element was logged under a different mark or tag on the "
+                "PDF. Do not give up after a single failed lookup -- make a genuine multi-step effort before "
+                "concluding this is a real omission. State clearly, as your conclusion, whether this is a genuine "
+                "PDF omission (the schedule needs updating) or whether you found this element under a different "
+                "label (state what you found). Only say you cannot determine this with confidence after actually "
+                "trying more than one approach, not as a first response."
+            )
+        if finding.finding_type == "missing_in_ifc":
+            return (
+                f"A door/window reconciliation flagged that tag '{finding.tag}' is present on the PDF schedule "
+                f"(width={finding.pdf_width_m} m, height={finding.pdf_height_m} m) but has no matching element in "
+                f"the IFC model: {finding.detail} Investigate using your available tools -- re-check the IFC model's "
+                "own elements near this dimension/type (get_element_properties, count_elements) before concluding "
+                f"tag '{finding.tag}' genuinely was never modeled; also check nearby/similar elements (same storey, "
+                "same entity type) in case this element exists in the IFC model under a different tag. Do not give "
+                "up after a single failed lookup -- make a genuine multi-step effort before concluding this element "
+                "is genuinely missing from the model. State clearly, as your conclusion, whether this is a genuine "
+                "IFC omission (the model needs updating) or whether you found this element under a different tag "
+                "(state what you found). Only say you cannot determine this with confidence after actually trying "
+                "more than one approach, not as a first response."
+            )
+        return (
             f"A door/window reconciliation flagged a dimension mismatch for tag '{finding.tag}': {finding.detail} "
             f"The IFC model currently records width={finding.ifc_width_m} m, height={finding.ifc_height_m} m. "
             f"The PDF schedule currently records width={finding.pdf_width_m} m, height={finding.pdf_height_m} m. "
-            "Investigate using your available tools (re-check this element's own real properties, and check "
-            "whether any other configured document corroborates one side) and state clearly, as your conclusion, "
-            "which width and height value is actually correct and why. If you cannot determine this with "
-            "confidence, say so honestly rather than guessing."
+            "Investigate using your available tools -- re-check this element's own real IFC properties, and try "
+            "extract_pdf_field more than once with differently-worded questions before concluding the PDF schedule "
+            "doesn't have this row; also check nearby/similar elements (same storey, same entity type) for a "
+            "consistent pattern that corroborates one side. Do not give up after a single failed lookup -- make a "
+            "genuine multi-step effort before concluding you cannot determine an answer. State clearly, as your "
+            "conclusion, which width and height value is actually correct and why. Only say you cannot determine "
+            "this with confidence after actually trying more than one approach, not as a first response."
         )
-        final_response: AgentResponse | None = None
-        async for event in self.invoke_v2(
-            project_resources=project_resources, thread_id=f"finding-{finding.finding_id}",
-            question=question, viewer_context=None,
-        ):
-            if event["type"] == "final":
-                final_response = event["response"]
-        assert final_response is not None  # invoke_v2 always yields exactly one "final" event
+
+    @staticmethod
+    def build_finding_proposal(finding: EngineeringFinding, final_response: AgentResponse) -> AgentProposal:
+        """SPEC-M17 §4B, amended: maps one completed V2 turn's own
+        `AgentResponse` (produced by a normal `invoke_v2` call asking
+        `build_finding_investigation_question`'s own question -- this
+        method does not call the model itself) onto a persistable
+        `AgentProposal` for the investigated finding.
+        """
         return AgentProposal(
-            proposed_width_m=self._extract_proposed_dimension(final_response.answer_markdown, finding.ifc_width_m, finding.pdf_width_m, final_response.verification.status),
-            proposed_height_m=self._extract_proposed_dimension(final_response.answer_markdown, finding.ifc_height_m, finding.pdf_height_m, final_response.verification.status),
+            proposed_width_m=AgentService._extract_proposed_dimension(final_response.answer_markdown, finding.ifc_width_m, finding.pdf_width_m, final_response.verification.status),
+            proposed_height_m=AgentService._extract_proposed_dimension(final_response.answer_markdown, finding.ifc_height_m, finding.pdf_height_m, final_response.verification.status),
             rationale=final_response.answer_markdown,
             citations=final_response.citations,
             verification=final_response.verification,

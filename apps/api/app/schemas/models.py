@@ -187,6 +187,19 @@ class ChatRequest(BaseModel):
     # an explicit, visible per-question choice (the workbench's own engine
     # toggle), never an automatic/silent substitution for v1.
     engine: Literal["v1", "v2"] = "v1"
+    # SPEC-M17, amended (owner decision, 2026-09-18): when set, this turn
+    # investigates an EngineeringFinding instead of answering `question`
+    # verbatim -- `question` is still required by this model's own
+    # validation (kept unchanged to avoid touching a field V1 also
+    # depends on) but is ignored server-side whenever `finding_id` is
+    # present; the real question is built entirely server-side from the
+    # finding's own stored fields (AgentService.build_finding_
+    # investigation_question), never from client-supplied text. Runs
+    # through the exact same V2 SSE turn as any other question -- the
+    # investigation streams into the same Conversation panel, using the
+    # same tool-status/answer-chunk events, so it reads as the same agent
+    # doing the same kind of work, not a separate, disconnected feature.
+    finding_id: str | None = None
 
 
 class FindingTransitionRequest(BaseModel):

@@ -15,6 +15,7 @@ from opentelemetry import trace as otel_trace
 from app.agent.graph import AgentService
 from app.config import get_settings
 from app.finding_workflow import (
+    INVESTIGABLE_FINDING_TYPES,
     PROPOSAL_REQUIRED_ACTIONS,
     IllegalFindingTransition,
     resolve_reverify_outcome,
@@ -28,6 +29,7 @@ from app.schemas.models import (
     ChatRequest,
     ClarificationResumeRequest,
     Disposition,
+    EngineeringFinding,
     FindingStatus,
     FindingTransitionRequest,
     VerificationStatus,
@@ -585,7 +587,7 @@ async def chat(request: ChatRequest, x_session_id: str | None = Header(default=N
     return _tag_span_with_trace_id(response)
 
 
-async def _v2_sse_stream(agent: AgentService, conversations: ConversationStore, *, project_resources, thread_id: str, question: str, viewer_context: dict | None, recent_turns: list[dict[str, str]], context: dict, memory_turns: int, request_id: str, started: float, deadline: float, record: dict, source_preference: str):
+async def _v2_sse_stream(agent: AgentService, conversations: ConversationStore, *, project_resources, thread_id: str, question: str, viewer_context: dict | None, recent_turns: list[dict[str, str]], context: dict, memory_turns: int, request_id: str, started: float, deadline: float, record: dict, source_preference: str, finding_store=None, investigating_finding: EngineeringFinding | None = None):
     """SPEC-M16 SS F: renders `AgentService.invoke_v2`'s event stream as
     Server-Sent Events. Each line is `data: <json>\\n\\n`, the format
     `EventSource`/a `ReadableStream` reader on the frontend can consume
@@ -603,6 +605,16 @@ async def _v2_sse_stream(agent: AgentService, conversations: ConversationStore, 
     mirroring `chat()`'s own registration) -- read here for cancellation,
     updated here with the real terminal status once the turn actually
     finishes, matching what `chat()` already does for V1.
+
+    `finding_store`/`investigating_finding` (SPEC-M17, amended 2026-09-18):
+    when this turn is investigating an `EngineeringFinding` (`_chat_v2`
+    already validated it and built `question` from it, never from
+    client-supplied text), the resulting `AgentResponse` is additionally
+    mapped onto an `AgentProposal` and persisted as the finding's
+    `pending_proposal` once the turn finishes -- the *only* difference
+    from a normal V2 chat turn; the streaming/persistence logic above is
+    otherwise identical, which is the whole point: one agent, one place
+    it visibly works.
     """
     import json as _json
 
@@ -661,6 +673,19 @@ async def _v2_sse_stream(agent: AgentService, conversations: ConversationStore, 
                         context_persist_error = str(error)
                 if context_persist_error:
                     execution_metadata["context_persist_error"] = context_persist_error
+                # SPEC-M17, amended 2026-09-18: this turn was investigating
+                # a finding -- map the completed AgentResponse onto an
+                # AgentProposal and persist it, the one behavior that
+                # differs from a normal V2 chat turn. A disposition with no
+                # real investigation result (clarification_required,
+                # unsupported, error, timeout, cancelled) has nothing
+                # meaningful to store as a proposal.
+                if investigating_finding is not None and final_response.disposition.value in {"answered", "partially_answered"}:
+                    proposal = agent.build_finding_proposal(investigating_finding, final_response)
+                    try:
+                        await asyncio.to_thread(finding_store.set_pending_proposal, investigating_finding.finding_id, proposal)
+                    except Exception as error:
+                        execution_metadata["finding_proposal_persist_error"] = str(error)
                 final_response = final_response.model_copy(update={"execution_metadata": execution_metadata})
                 # Independent-review finding, 2026-09-17, second pass: this
                 # request's own record was registered with `trace_id=request_id`
@@ -741,14 +766,46 @@ async def _chat_v2(request: ChatRequest, x_session_id: str | None):
         record.update(status="error", stage="context_read_error")
         raise HTTPException(status_code=503, detail=f"Could not read conversation context: {error}") from error
     recent_turns = context.get("v2_recent_turns", [])[-settings.conversation_memory_turns:]
+    # SPEC-M17, amended 2026-09-18: "investigate this finding" runs as a
+    # normal V2 turn instead of a separate REST endpoint -- looked up and
+    # validated here, the same three guards the old dedicated endpoint had
+    # (exists, ACTION_REQUIRED, a supported finding type -- see
+    # INVESTIGABLE_FINDING_TYPES, widened 2026-09-19 from dimension_mismatch
+    # only to all three SPEC-M11 finding types after live verification),
+    # plus one more this design adds for free: the finding must belong to
+    # the thread's own bound project, since investigating a different
+    # project's finding from this conversation would silently answer
+    # against the wrong source data. `effective_question` is what actually
+    # reaches the model -- built entirely server-side from the finding's
+    # own stored fields, never from `request.question`, which is accepted
+    # but ignored whenever `finding_id` is set (kept required by
+    # ChatRequest's own validation so V1's shared field isn't touched).
+    investigating_finding = None
+    effective_question = request.question
+    if request.finding_id is not None:
+        investigating_finding = container.finding_store.get(request.finding_id)
+        if investigating_finding is None:
+            record.update(status="error", stage="finding_not_found")
+            raise HTTPException(status_code=404, detail=f"Finding '{request.finding_id}' was not found.")
+        if investigating_finding.project_id != bound_project_id:
+            record.update(status="error", stage="finding_project_mismatch")
+            raise HTTPException(status_code=409, detail=f"Finding '{request.finding_id}' belongs to project '{investigating_finding.project_id}', not this thread's '{bound_project_id}'.")
+        if investigating_finding.status != FindingStatus.ACTION_REQUIRED:
+            record.update(status="error", stage="finding_not_action_required")
+            raise HTTPException(status_code=409, detail=f"Cannot investigate a finding in status '{investigating_finding.status.value}'; only ACTION_REQUIRED findings are eligible.")
+        if investigating_finding.finding_type not in INVESTIGABLE_FINDING_TYPES:
+            record.update(status="error", stage="finding_type_unsupported")
+            raise HTTPException(status_code=409, detail=f"Investigating a finding is not supported for finding type '{investigating_finding.finding_type}'.")
+        effective_question = agent.build_finding_investigation_question(investigating_finding)
     record["stage"] = "streaming"
     return StreamingResponse(
         _v2_sse_stream(
-            agent, conversations, project_resources=project_resources, thread_id=thread_id, question=request.question,
+            agent, conversations, project_resources=project_resources, thread_id=thread_id, question=effective_question,
             viewer_context=request.viewer_context.model_dump() if request.viewer_context else None,
             recent_turns=recent_turns, context=context, memory_turns=settings.conversation_memory_turns,
             request_id=request_id, started=started, deadline=deadline, record=record,
             source_preference=request.source_preference,
+            finding_store=container.finding_store, investigating_finding=investigating_finding,
         ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Thread-Id": thread_id},
@@ -862,29 +919,16 @@ def transition_finding(finding_id: str, request: FindingTransitionRequest, x_ses
     return updated.model_dump()
 
 
-@app.post("/api/v1/findings/{finding_id}/propose-resolution")
-async def propose_finding_resolution(finding_id: str) -> dict:
-    """SPEC-M17 §4B. Legal only for a `dimension_mismatch` finding
-    currently `ACTION_REQUIRED` -- otherwise `409`, matching
-    `validate_transition`'s own error shape. Does not itself change
-    `status` (see `EngineeringFinding.pending_proposal`'s own field
-    docstring) -- only sets/replaces the finding's live pending proposal;
-    an explicit `approve_proposal`/`reject_proposal` transition (the
-    route above) is what a human uses to actually decide it.
-    """
-    container: ServiceContainer = app.state.container
-    agent: AgentService = app.state.agent
-    finding = container.finding_store.get(finding_id)
-    if finding is None:
-        raise HTTPException(status_code=404, detail=f"Finding '{finding_id}' was not found.")
-    if finding.status != FindingStatus.ACTION_REQUIRED:
-        raise HTTPException(status_code=409, detail=f"Cannot propose a resolution for a finding in status '{finding.status.value}'; only ACTION_REQUIRED findings are eligible.")
-    if finding.finding_type != "dimension_mismatch":
-        raise HTTPException(status_code=409, detail=f"propose-resolution is only supported for dimension_mismatch findings, not '{finding.finding_type}'.")
-    _, resources = await _resolve_project(finding.project_id)
-    proposal = await agent.propose_finding_resolution(resources, finding)
-    updated = container.finding_store.set_pending_proposal(finding_id, proposal)
-    return updated.model_dump()
+    # Note: there used to be a separate `POST /api/v1/findings/{finding_id}/
+    # propose-resolution` REST endpoint here. Retired (owner decision,
+    # 2026-09-18): investigating a finding now runs as a normal V2 chat
+    # turn instead (`ChatRequest.finding_id`, handled in `_chat_v2`/
+    # `_v2_sse_stream` below) so it streams into the same Conversation
+    # panel as every other question -- one agent, one place it visibly
+    # works, not a second, disconnected surface. `pending_proposal` is
+    # still set the same way (`FindingStore.set_pending_proposal`), just
+    # from that turn's own completed `AgentResponse` instead of a
+    # dedicated endpoint's own internal `invoke_v2` call.
 
 
 @app.post("/api/v1/findings/{finding_id}/reverify")
