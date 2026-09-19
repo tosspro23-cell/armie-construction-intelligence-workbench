@@ -570,3 +570,44 @@ def test_a_late_finishing_investigation_does_not_resurrect_a_proposal_on_an_alre
     assert "finding_proposal_stale" in final_event["response"]["execution_metadata"]
     assert final["status"] == "resolved"  # the concurrent human resolve is the one that stuck
     assert final["pending_proposal"] is None  # never resurrected onto the now-resolved finding
+
+
+def test_resolve_clears_a_pre_existing_pending_proposal(monkeypatch, tmp_path) -> None:
+    """Independent-review finding, 2026-09-19, found live against a real
+    Postgres instance under D-064's own new concurrency tests -- and
+    reproduced here with *zero* concurrency, since it turned out not to
+    need any: a finding with an *already-completed* investigation's
+    pending_proposal still attached, then resolved manually (bypassing
+    the agent proposal entirely, exactly as SPEC-M11 always allowed),
+    kept its now-stale proposal forever. The fault-injection test above
+    covers the different case of a resolve landing *during* an
+    in-flight investigation (nothing to clear yet, since that
+    investigation's own proposal was never actually persisted) -- this
+    covers the plainer, more common case: an earlier proposal already
+    sitting there when a human resolves without ever acting on it.
+
+    A stale proposal on an already-resolved finding is not merely
+    cosmetic: Findings.tsx renders the whole proposal card (including
+    live Approve/Reject buttons) whenever `pending_proposal` is truthy,
+    with no separate status gate -- those buttons would 409 if clicked,
+    a confusing dead end for whoever finds the finding next.
+    """
+    _configure_env(monkeypatch, tmp_path)
+    import app.main as main_module
+
+    with TestClient(main_module.app) as client:
+        _install_fake_agent(
+            main_module, monkeypatch, ["The IFC value 1.75 m is correct."],
+            tool_calls=[("get_element_properties", {"entity_type": "IfcWindow"})],
+        )
+        client.post("/api/v1/chat", json={"question": RECONCILIATION_QUESTION})
+        finding_id = next(item["finding_id"] for item in client.get("/api/v1/findings").json() if item["tag"] == "W02")
+        _walk_to_action_required(client, finding_id)
+        assert _investigate(client, finding_id)["status_code"] == 200
+        assert client.get(f"/api/v1/findings/{finding_id}").json()["pending_proposal"] is not None  # sanity: a real proposal exists
+
+        resolved = client.post(f"/api/v1/findings/{finding_id}/transition", json={"action": "resolve"})
+
+    assert resolved.status_code == 200
+    assert resolved.json()["status"] == "resolved"
+    assert resolved.json()["pending_proposal"] is None

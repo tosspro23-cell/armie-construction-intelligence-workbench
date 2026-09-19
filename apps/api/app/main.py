@@ -15,6 +15,7 @@ from opentelemetry import trace as otel_trace
 from app.agent.graph import AgentService
 from app.config import get_settings
 from app.finding_workflow import (
+    ACTIONS_THAT_CLEAR_PENDING_PROPOSAL,
     INVESTIGABLE_FINDING_TYPES,
     PROPOSAL_REQUIRED_ACTIONS,
     IllegalFindingTransition,
@@ -950,7 +951,19 @@ def transition_finding(finding_id: str, request: FindingTransitionRequest, x_ses
     try:
         updated = container.finding_store.append_transition(
             finding_id, to_status=target_status, actor_session_id=x_session_id, note=request.note,
-            updates={"pending_proposal": None} if request.action in PROPOSAL_REQUIRED_ACTIONS else None,
+            # Independent-review finding, 2026-09-19, found live against a
+            # real Postgres instance (no concurrency needed to reproduce):
+            # plain "resolve" (bypassing the agent entirely) never cleared
+            # a pre-existing pending_proposal, leaving a stale proposal --
+            # with live Approve/Reject buttons that would 409 if clicked --
+            # attached to an already-resolved finding forever. `resolve`
+            # needs no proposal_id confirmation (it clears whatever
+            # proposal exists, if any, as a plain consequence of the
+            # finding no longer being actionable, not a decision about a
+            # specific one) -- see ACTIONS_THAT_CLEAR_PENDING_PROPOSAL's
+            # own docstring for why this is a separate set from
+            # PROPOSAL_REQUIRED_ACTIONS below.
+            updates={"pending_proposal": None} if request.action in ACTIONS_THAT_CLEAR_PENDING_PROPOSAL else None,
             # SPEC-M17 §4C, widened 2026-09-19 (independent-review finding):
             # a rejected proposal's own snapshot is recorded too, not only
             # an approved one -- "who rejected which proposal" is exactly

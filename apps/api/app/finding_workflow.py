@@ -44,6 +44,25 @@ _TRANSITIONS: dict[str, dict[FindingStatus, FindingStatus]] = {
 # above for why this doesn't live inside that table/function).
 PROPOSAL_REQUIRED_ACTIONS = frozenset({"approve_proposal", "reject_proposal"})
 
+# Independent-review finding, 2026-09-19, found live against a real
+# Postgres instance under D-064's own new concurrency tests (not just a
+# race -- reproduced with zero concurrency, plain sequential calls): a
+# finding investigated (pending_proposal set), then resolved *manually*
+# via plain "resolve" (bypassing the agent proposal entirely, exactly as
+# SPEC-M11 always allowed), kept its now-stale pending_proposal forever --
+# "resolve" was never in `PROPOSAL_REQUIRED_ACTIONS`, so main.py's
+# `updates={"pending_proposal": None} if action in PROPOSAL_REQUIRED_ACTIONS
+# else None` never cleared it. A stale proposal on an already-resolved
+# finding still renders its Approve/Reject buttons in the UI (that
+# rendering is gated on `pending_proposal` alone, not status), which then
+# 409 if clicked -- confusing, not silently harmful, but wrong. Broader
+# than a race: this widens the actions that clear `pending_proposal` to
+# include plain `resolve` too, distinct from `PROPOSAL_REQUIRED_ACTIONS`
+# (resolve needs no `proposal_id` confirmation -- it clears *whatever*
+# proposal exists, if any, as a simple consequence of the finding no
+# longer being actionable, not a decision about a specific proposal).
+ACTIONS_THAT_CLEAR_PENDING_PROPOSAL = PROPOSAL_REQUIRED_ACTIONS | frozenset({"resolve"})
+
 # SPEC-M17, amended 2026-09-19 (owner decision, live-testing session):
 # originally dimension_mismatch only. Live verification against the real
 # Azure deployment confirmed the chat-embedded investigation architecture
