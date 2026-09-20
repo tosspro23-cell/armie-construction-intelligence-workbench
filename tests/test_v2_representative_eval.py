@@ -544,6 +544,97 @@ def test_narrative_consistency_check_does_not_treat_a_restated_tag_as_a_fabricat
     assert not AgentService._narrative_consistent_with_tool_facts(fabricated, [(door_terms, facts)])
 
 
+def test_narrative_consistency_check_exempts_multiple_restated_tags_via_citations() -> None:
+    """Found live (2026-09-20), the very next real investigation run after
+    the D-065 fix above (same real-browser stress test, finding 146600 on
+    the real "Duplex Apartment" building): a fully correct, tool-grounded
+    `missing_in_ifc` verdict --
+
+        "...get_element_properties returned a sample listing IfcDoor
+        elements including tags 146596 and 146678 (both 1.25x2.01 m) but
+        no element named or tagged 146600; reconcile_doors_windows
+        explicitly reports tag 146600 is present on the PDF schedule but
+        has no matching IFC element."
+
+    -- was flagged unverified again, by the same check D-065 had just
+    fixed, via two new triggers D-065's narrow word list didn't cover:
+
+    1. Plural "tags 146596" (D-065 only matched singular "tag").
+    2. The second item in a list, "146678", which follows "and" -- no
+       reference word precedes it at all, so no word-based rule can catch
+       it without becoming an ever-growing grammar of English list syntax.
+
+    D-066 fixes this at the root instead of chasing more phrasing: this
+    turn's own citations already carry the ground truth for every element
+    actually looked up (`{"tag": "146596", ...}` / `{"record": "146600",
+    ...}`), so restating any of those numbers is now unconditionally
+    exempt regardless of the words around it. The widened `tags?/marks?/
+    ids?` word list stays as a fallback for a restated number that was
+    never independently cited.
+    """
+    door_terms = AgentService._entity_terms_for("IfcDoor")
+    # get_element_properties's own real numeric leaves this turn: both
+    # sampled doors' width/height (146596 and 146678 are each 1.25x2.01 m).
+    facts = AgentService._numeric_tokens_from_result_value({
+        "element": {"entity_type": "IfcDoor"},
+        "properties": {"Width": 1.25, "Height": 2.01},
+    })
+    known_reference_numbers = {146596.0, 146678.0, 146600.0}
+
+    answer = (
+        "Verdict submitted: genuine_omission — basis: extract_pdf_field returned Width=1.25 m and "
+        "Height=2.01 m for the PDF row in question; get_element_properties returned a sample listing "
+        "IfcDoor elements including tags 146596 and 146678 (both 1.25×2.01 m) but no element named or "
+        "tagged 146600; reconcile_doors_windows explicitly reports tag 146600 is present on the PDF "
+        "schedule but has no matching IFC element."
+    )
+
+    # Without the citation-derived exemption (as D-065 alone left it), this
+    # real answer still fails: "146678" is never preceded by any reference
+    # word, so no word list, however widened, saves it.
+    assert not AgentService._narrative_consistent_with_tool_facts(answer, [(door_terms, facts)])
+
+    # With this turn's own real citation tags supplied, the same answer is
+    # correctly recognized as consistent.
+    assert AgentService._narrative_consistent_with_tool_facts(answer, [(door_terms, facts)], known_reference_numbers)
+
+    # A genuinely fabricated measurement must still be caught even when
+    # known reference numbers are present elsewhere in the same answer.
+    fabricated = answer + " The door is actually 99999 m tall."
+    assert not AgentService._narrative_consistent_with_tool_facts(fabricated, [(door_terms, facts)], known_reference_numbers)
+
+
+def test_narrative_consistency_check_does_not_bisect_a_number_at_the_entity_window_edge() -> None:
+    """Found live (2026-09-20), same stress-test session, a second distinct
+    bug in the same real answer as the test above: the entity-bound window
+    used to be built by slicing a fixed +/-15-character substring around
+    each entity-term occurrence and re-scanning *that slice* for numbers --
+    a plain string slice, blind to number boundaries. "...tagged 146600;
+    reconcile_doors_windows explicitly..." sliced to "600; reconcile_doors"
+    around the "doors" inside "reconcile_doors_windows", turning the real,
+    legitimately-cited tag 146600 into a phantom "600" -- a number that
+    exists nowhere in the real answer, matches no known value, and isn't in
+    `known_reference_numbers` either (146600.0, not 600.0). Fixed by finding
+    every number once in the *full* text and comparing character positions
+    to the entity-term occurrence, instead of re-slicing and re-matching
+    around it -- a number's own span is never split.
+    """
+    door_terms = AgentService._entity_terms_for("IfcDoor")
+    facts = AgentService._numeric_tokens_from_result_value({"element": {"entity_type": "IfcDoor"}, "properties": {"Width": 1.25, "Height": 2.01}})
+    known_reference_numbers = {146600.0}
+
+    # "doors" inside "reconcile_doors_windows" sits within 15 chars of the
+    # end of "146600" -- exactly the live-observed adjacency. The width/
+    # height sentence up front satisfies the separate baseline check
+    # (every call's own real number must appear somewhere), isolating this
+    # test to the entity-window bisection bug specifically.
+    answer = (
+        "IFC door properties show Width=1.25 m, Height=2.01 m. Separately, the schedule shows "
+        "tagged 146600; reconcile_doors_windows explicitly reports tag 146600 is present on the schedule."
+    )
+    assert AgentService._narrative_consistent_with_tool_facts(answer, [(door_terms, facts)], known_reference_numbers)
+
+
 def test_v2_respects_an_expired_deadline(tmp_path: Path) -> None:
     """Independent-review finding, 2026-09-17: V2 was bounded only by
     `tool_calling_max_iterations` (iteration *count*), never wall-clock

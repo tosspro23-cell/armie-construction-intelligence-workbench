@@ -2669,7 +2669,38 @@ Return only a corrected MultiQueryPlan JSON object."""
                 # produced verification.status="passed". See
                 # `_narrative_consistent_with_tool_facts`'s own docstring
                 # for this check's real, narrow scope (numeric only).
-                narrative_consistent = self._narrative_consistent_with_tool_facts(narrative, expected_numeric_facts)
+                #
+                # D-066 (2026-09-20), found live via a real-building stress
+                # test of the D-065 fix: D-065's word-based heuristic
+                # ("tag"/"mark"/"id"/"no."/"#" immediately before a number)
+                # only covers the single-restatement phrasing it was found
+                # with. The very next real investigation produced "a sample
+                # listing IfcDoor elements including tags 146596 and 146678"
+                # -- plural "tags" doesn't match the singular word list, and
+                # the second number in the list ("146678") isn't preceded by
+                # a reference word at all, it follows "and". Chasing every
+                # grammatical variant (tags, tagged, marked, IDs, numbered,
+                # a bare list joined by "and"/","/...) word-by-word is not a
+                # tractable fix. This turn's own citations already carry the
+                # ground truth instead: every element/row this turn actually
+                # looked up has its real tag/record in `all_citations`'
+                # locators (`{"tag": "146596", ...}` for IFC, `{"record":
+                # "146600", ...}` for PDF) -- restating any of those numbers
+                # is legitimate no matter how it's phrased, so they're
+                # collected once here and exempted unconditionally in the
+                # entity-window check below, instead of pattern-matching the
+                # English wording around them.
+                known_reference_numbers: set[float] = set()
+                for citation in all_citations:
+                    locator = citation.get("locator") or {}
+                    for key in ("tag", "record"):
+                        raw_value = locator.get(key)
+                        if isinstance(raw_value, (str, int, float)) and not isinstance(raw_value, bool):
+                            try:
+                                known_reference_numbers.add(float(raw_value))
+                            except (TypeError, ValueError):
+                                pass
+                narrative_consistent = self._narrative_consistent_with_tool_facts(narrative, expected_numeric_facts, known_reference_numbers)
                 # Owner decision, 2026-09-17: an inconsistent narrative is
                 # now flagged, not withheld. It used to hard-fail the
                 # whole turn (disposition=error, real narrative replaced
@@ -3123,7 +3154,7 @@ Return only a corrected MultiQueryPlan JSON object."""
         return frozenset(terms)
 
     @staticmethod
-    def _narrative_consistent_with_tool_facts(answer_markdown: str, expected_numeric_facts: list[tuple[frozenset[str], set[float]]]) -> bool:
+    def _narrative_consistent_with_tool_facts(answer_markdown: str, expected_numeric_facts: list[tuple[frozenset[str], set[float]]], known_reference_numbers: set[float] = frozenset()) -> bool:
         """Independent-review finding, 2026-09-17: this turn's own real
         numbers vs. what the model's final prose actually says.
 
@@ -3263,11 +3294,37 @@ Return only a corrected MultiQueryPlan JSON object."""
         # restated right next to its entity noun for clarity -- a normal,
         # correct thing to do -- lands in the window below as an
         # "unexplained number," indistinguishable from a fabricated claim.
-        # A narrow, disclosed heuristic (matching this file's own
-        # `_DIMENSION_REJECTION_PHRASES` style): a number whose immediately
-        # preceding word identifies it as a reference, not a measurement,
-        # is not required to match a known value.
-        _reference_word_pattern = re.compile(r"(?:tag|mark|id|no\.?|#)\s*$")
+        # D-066 (2026-09-20): the fix above only covered the single
+        # phrasing it was found with ("door tag 146596"). The very next
+        # real investigation restated two tags in one clause -- "including
+        # tags 146596 and 146678" -- and neither survived: plural "tags"
+        # doesn't match the singular word list, and the second number
+        # follows "and", no reference word at all. Rather than keep
+        # chasing grammatical variants (tags, tagged, marked, IDs,
+        # numbered, a bare list joined by "and"/","/...), `known_reference_
+        # numbers` (this turn's own real citation tag/record values, see
+        # this method's caller) is checked first and unconditionally
+        # exempts a number regardless of phrasing -- restating any element
+        # this turn actually looked up is always legitimate. The word-based
+        # heuristic remains as a fallback for the rare case a restated
+        # reference number was never independently cited this turn.
+        _reference_word_pattern = re.compile(r"(?:tags?|marks?|ids?|no\.?|#)\s*$")
+
+        # D-066, second bug found by the same stress test: this check used
+        # to slice a fixed +/-15-character substring around each entity-term
+        # occurrence and re-scan *that slice* for numbers -- a plain string
+        # slice, unaware of number boundaries, that can bisect a real number
+        # sitting right at the edge of the window. Reproduced live: "...
+        # tagged 146600; reconcile_doors_windows explicitly..." sliced to
+        # "600; reconcile_doors" around the "doors" inside "reconcile_doors_
+        # windows", turning the real, legitimate, cited tag 146600 into a
+        # phantom "600" that matches nothing. Fixed by finding every number
+        # once in the *full* answer text first, then comparing character
+        # positions (never re-slicing around a match) to decide which
+        # numbers fall within the window of a given entity-term occurrence
+        # -- a number's own span is never split.
+        all_number_matches = list(re.finditer(r"\d+(?:\.\d+)?", answer_lower))
+        window_chars = 15
 
         for entity_terms, combined_expected in combined_by_entity.items():
             # A number within a short window of this entity's own noun must
@@ -3276,13 +3333,22 @@ Return only a corrected MultiQueryPlan JSON object."""
             # comfortably covers "4 doors" / "there are 99999 doors" /
             # "doors: 99999" without reaching into an unrelated sentence.
             for term in entity_terms:
-                for match in re.finditer(re.escape(term), answer_lower):
-                    window = answer_lower[max(0, match.start() - 15): match.end() + 15]
-                    for number_match in re.finditer(r"\d+(?:\.\d+)?", window):
-                        preceding = window[max(0, number_match.start() - 6): number_match.start()]
-                        if _reference_word_pattern.search(preceding):
+                for term_match in re.finditer(re.escape(term), answer_lower):
+                    for number_match in all_number_matches:
+                        if number_match.start() >= term_match.end():
+                            gap = number_match.start() - term_match.end()
+                        elif number_match.end() <= term_match.start():
+                            gap = term_match.start() - number_match.end()
+                        else:
+                            gap = 0
+                        if gap > window_chars:
                             continue
                         actual = float(number_match.group())
+                        if actual in known_reference_numbers:
+                            continue
+                        preceding = answer_lower[max(0, number_match.start() - 6): number_match.start()]
+                        if _reference_word_pattern.search(preceding):
+                            continue
                         if not any(_matches(value, actual) for value in combined_expected):
                             return False
         return True

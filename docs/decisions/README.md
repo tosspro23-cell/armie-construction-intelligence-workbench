@@ -3169,4 +3169,51 @@ reproduces the exact live-observed answer text, fails against the pre-fix code, 
 
 463 tests pass; `ruff` clean; `npm run build` clean.
 
-462 tests pass; `ruff` clean; `npm run build` clean.
+## D-066 — V2 narrative-consistency check, continued: citation-grounded exemption + a window-slicing bisection bug
+
+Owner-requested stress test, same day as D-065: merge D-065, redeploy, then deliberately drive the
+full Acknowledge -> Start action -> "Ask agent to investigate" flow across every finding on both
+real buildings ("Duplex Apartment", "RWTH DigitalHub"), specifically to load-test the
+finding-investigation feature against real building complexity. The very next real investigation
+after D-065 landed (finding `146600`, `missing_in_ifc`) reproduced the same `verification.status ==
+"unverified"` false positive D-065 had just fixed -- via two further, distinct bugs in the same
+check, both found live within one stress-test session:
+
+**1. The word list only ever covered a single restatement.** The real answer read "...
+`get_element_properties` returned a sample listing `IfcDoor` elements including tags 146596 and
+146678 (both 1.25x2.01 m) but no element named or tagged 146600; `reconcile_doors_windows`
+explicitly reports tag 146600 is present...". Plural "tags 146596" doesn't match D-065's singular
+word list; the second number in the list, "146678", follows "and" with no reference word at all.
+Chasing every English grammatical variant (tags, tagged, marked, IDs, numbered, a bare list joined
+by "and"/","/...) word-by-word is not a tractable fix -- there is no finite word list that covers
+free-form list syntax. Fixed at the root instead: this turn's own citations already carry the
+ground truth for every element actually looked up this turn (`{"tag": "146596", ...}` for IFC,
+`{"record": "146600", ...}` for PDF) -- `_narrative_consistent_with_tool_facts` now takes a
+`known_reference_numbers` set (built once per turn from `all_citations`' own locators) and
+unconditionally exempts any number in it, regardless of the words around it. The widened
+`tags?/marks?/ids?` word list stays as a fallback for a restated number that was, unusually, never
+independently cited this same turn.
+
+**2. The entity-bound window used to be built by slicing a fixed +/-15-character substring and
+re-scanning *that slice* for numbers -- blind to number boundaries.** The same real answer's
+"...tagged 146600; `reconcile_doors_windows` explicitly..." sliced the window around the "doors"
+inside `reconcile_doors_windows` to "600; reconcile_doors", turning the real, legitimately-cited
+tag 146600 into a phantom "600" -- a value that matches no known fact and isn't in
+`known_reference_numbers` either (146600.0, not 600.0), so it still failed even with fix 1 applied.
+Fixed by finding every number once in the *full* answer text first, then comparing character
+*positions* to each entity-term occurrence to decide inclusion, instead of re-slicing the string --
+a number's own span can no longer be split.
+
+Both reproduced with dedicated regression tests using the exact live-observed answer text, each
+failing pre-fix and passing post-fix:
+`tests/test_v2_representative_eval.py::test_narrative_consistency_check_exempts_multiple_restated_tags_via_citations`
+and `::test_narrative_consistency_check_does_not_bisect_a_number_at_the_entity_window_edge`.
+
+The broader lesson, worth recording alongside [[feedback_real_db_concurrency_testing_finds_real_bugs]]:
+a narrow heuristic fix verified against the one real answer that found it is not the same as a fix
+verified against real, continued use -- the very next live investigation, on the very next finding,
+reproduced the same symptom through two mechanisms the first fix's own test didn't exercise. The
+owner's instruction to keep stress-testing rather than stop at the first green test is what
+surfaced this.
+
+465 tests pass; `ruff` clean; `npm run build` clean.
