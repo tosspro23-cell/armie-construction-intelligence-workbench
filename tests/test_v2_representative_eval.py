@@ -494,6 +494,56 @@ def test_narrative_consistency_check_tolerates_natural_rounding_of_a_measurement
     assert not AgentService._narrative_consistent_with_tool_facts("There are 5 doors.", [(door_terms, door_count_facts)])
 
 
+def test_narrative_consistency_check_does_not_treat_a_restated_tag_as_a_fabricated_number() -> None:
+    """Found live (2026-09-20), SPEC-M17 finding-investigation flow against
+    the real deployed app and real production data: a fully correct V2
+    investigation answer for finding 146596 ("IFC model: door tag 146596
+    has width = 1.25 m and PSet_Revit_Type_Dimensions.Height = 2.01 m
+    (get_element_properties).") was flagged `verification.status ==
+    "unverified"` even though every real number in it was genuinely
+    correct and tool-grounded.
+
+    Root cause: check 2's entity-bound window (`_narrative_consistent_
+    with_tool_facts`, "door" +/-15 chars) is naive about *which* numbers
+    near the entity noun are claims that must match a known width/height
+    -- it does not distinguish "the element's own tag/id, restated for
+    clarity" from "a stated measurement." IFC's own `Tag` attribute is a
+    string (`apps/api/app/tools/ifc/repository.py`'s own `getattr(element,
+    "Tag", None)`), so it is never one of `get_element_properties`'s own
+    numeric leaves in `_numeric_tokens_from_result_value` -- meaning
+    "door tag 146596" makes "146596" land in the door-entity window as an
+    unexplained number, indistinguishable (to the old code) from a
+    fabricated claim like "there are 146596 doors."
+
+    This is the same class of false positive this check's own docstring
+    already documents three prior rounds of (a decoy real number, a
+    same-entity-different-scope total) -- a new trigger, not a new kind of
+    problem: identifying an element by its own tag/mark/id is a completely
+    normal, correct thing for an investigation answer to do, and doing so
+    must not cost it a false "unverified" caveat.
+    """
+    door_terms = AgentService._entity_terms_for("IfcDoor")
+    facts = AgentService._numeric_tokens_from_result_value({
+        "element": {"entity_type": "IfcDoor", "tag": "146596"},
+        "storey": "Level 01",
+        "properties": {"Width": 1.25, "Height": 2.009999999999999},
+    })
+
+    answer = (
+        "IFC model: door tag 146596 has width = 1.25 m and "
+        "PSet_Revit_Type_Dimensions.Height = 2.01 m (get_element_properties)."
+    )
+    assert AgentService._narrative_consistent_with_tool_facts(answer, [(door_terms, facts)])
+
+    # The check must still catch a genuinely fabricated measurement even
+    # when a harmless tag mention appears earlier in the same answer --
+    # this fix narrows what counts as "a claimed number" near a reference
+    # word, it does not disable the check for a real claim right next to
+    # the entity noun itself.
+    fabricated = "IFC model: door tag 146596 has width = 1.25 m. The door is 99999 m tall."
+    assert not AgentService._narrative_consistent_with_tool_facts(fabricated, [(door_terms, facts)])
+
+
 def test_v2_respects_an_expired_deadline(tmp_path: Path) -> None:
     """Independent-review finding, 2026-09-17: V2 was bounded only by
     `tool_calling_max_iterations` (iteration *count*), never wall-clock
