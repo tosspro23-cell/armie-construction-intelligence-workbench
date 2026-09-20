@@ -3254,6 +3254,21 @@ Return only a corrected MultiQueryPlan JSON object."""
                 continue
             combined_by_entity.setdefault(entity_terms, set()).update(expected)
 
+        # Found live (2026-09-20), SPEC-M17 finding-investigation flow
+        # against the real deployed app and real production data: "IFC
+        # model: door tag 146596 has width = 1.25 m ..." was flagged
+        # unverified even though every number in it was correct. IFC's own
+        # `Tag` is a string (never one of `_numeric_tokens_from_result_
+        # value`'s numeric leaves), so an element's own tag/mark/id,
+        # restated right next to its entity noun for clarity -- a normal,
+        # correct thing to do -- lands in the window below as an
+        # "unexplained number," indistinguishable from a fabricated claim.
+        # A narrow, disclosed heuristic (matching this file's own
+        # `_DIMENSION_REJECTION_PHRASES` style): a number whose immediately
+        # preceding word identifies it as a reference, not a measurement,
+        # is not required to match a known value.
+        _reference_word_pattern = re.compile(r"(?:tag|mark|id|no\.?|#)\s*$")
+
         for entity_terms, combined_expected in combined_by_entity.items():
             # A number within a short window of this entity's own noun must
             # be one of the real values for *any* tool call about this
@@ -3263,8 +3278,11 @@ Return only a corrected MultiQueryPlan JSON object."""
             for term in entity_terms:
                 for match in re.finditer(re.escape(term), answer_lower):
                     window = answer_lower[max(0, match.start() - 15): match.end() + 15]
-                    nearby_numbers = [float(n) for n in re.findall(r"\d+(?:\.\d+)?", window)]
-                    for actual in nearby_numbers:
+                    for number_match in re.finditer(r"\d+(?:\.\d+)?", window):
+                        preceding = window[max(0, number_match.start() - 6): number_match.start()]
+                        if _reference_word_pattern.search(preceding):
+                            continue
+                        actual = float(number_match.group())
                         if not any(_matches(value, actual) for value in combined_expected):
                             return False
         return True

@@ -3137,4 +3137,36 @@ because the interaction only exists between two features (agent proposals, manua
 each read as correct in isolation -- it took actually running concurrent transactions against a
 real database to surface the gap between them.
 
+## D-065 — V2 narrative-consistency check: an element's own tag/mark/id near its entity noun is not a claimed number
+
+Found live, 2026-09-20: after D-064's Postgres gap closed and the branch deployed, a real-browser
+test of the full SPEC-M17 finding-investigation flow against the shared Azure app and real
+production data (the "Duplex Apartment" project's finding `146596`) produced a fully correct,
+tool-grounded investigation answer -- "IFC model: door tag 146596 has width = 1.25 m and
+PSet_Revit_Type_Dimensions.Height = 2.01 m (get_element_properties)." -- that was nonetheless
+flagged `verification.status == "unverified"`.
+
+Root cause, in `AgentService._narrative_consistent_with_tool_facts`'s entity-bound check (D-062,
+hardened three further times per that function's own docstring): a number within ~15 characters of
+an entity noun ("door") must be one of the tool call's own known real values (width/height here).
+IFC's own `Tag` attribute is a string (`apps/api/app/tools/ifc/repository.py`'s
+`getattr(element, "Tag", None)`), so it is never one of `_numeric_tokens_from_result_value`'s own
+numeric leaves -- meaning "door tag 146596" puts `146596` in the door-entity window as an
+"unexplained number," indistinguishable from a fabricated claim like "there are 146596 doors."
+Restating an element's own tag/mark/id next to its entity noun is a completely normal, correct
+thing for an investigation answer to do; this is the same class of false positive the function's
+docstring already records three earlier rounds of (a decoy real number, a same-entity-different-
+scope total), not a new kind of problem.
+
+Fixed with a narrow, disclosed heuristic matching this file's own established style (the
+`_DIMENSION_REJECTION_PHRASES` pattern): a number in the entity window is exempted from the
+match requirement when the word immediately preceding it identifies it as a reference rather than
+a measurement (`tag`, `mark`, `id`, `no.`, `#`). This narrows what counts as "a claimed number
+near the entity noun" -- it does not weaken the check for an actual fabricated measurement placed
+directly next to the entity noun, which the new regression test also covers.
+`tests/test_v2_representative_eval.py::test_narrative_consistency_check_does_not_treat_a_restated_tag_as_a_fabricated_number`
+reproduces the exact live-observed answer text, fails against the pre-fix code, passes after.
+
+463 tests pass; `ruff` clean; `npm run build` clean.
+
 462 tests pass; `ruff` clean; `npm run build` clean.
