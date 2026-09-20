@@ -215,6 +215,23 @@ pre { max-width: 100%; overflow: auto; white-space: pre-wrap; overflow-wrap: any
 .finding-badge.severity-low { background: #1f3a2e; color: #8ff0b1; }
 .finding-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 .finding-actions button { padding: 7px 10px; font-size: .76rem; }
+/* SPEC-M17 §4D: a distinct box for an agent-proposed resolution awaiting
+   approval -- visually set apart from the finding's own detected-mismatch
+   summary above it, since a human is being asked to make a decision here,
+   not just read a status. */
+.finding-proposal { margin-top: 10px; padding: 10px; background: #0f1830; border: 1px solid #324068; border-radius: 8px; }
+.finding-proposal-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.finding-proposal-header span { font-size: .7rem; text-transform: uppercase; letter-spacing: .04em; }
+/* Independent-review finding, 2026-09-19: the proposal card must be
+   self-contained (rationale + evidence a reviewer can reopen later, not
+   just "it streamed in the chat once") -- this <details> holds that
+   without duplicating the compact summary above it. */
+.finding-proposal-detail { margin-top: 8px; }
+.finding-proposal-detail summary { cursor: pointer; color: #9fbfff; font-size: .82rem; }
+.finding-proposal-rationale { margin: 8px 0; white-space: pre-wrap; font-size: .82rem; line-height: 1.5; }
+.finding-proposal-verdict-basis { margin: 8px 0 0; font-size: .82rem; line-height: 1.5; }
+.finding-proposal-citations { margin: 0 0 8px; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; font-size: .78rem; }
+.finding-proposal-meta { margin: 0; color: #8190ad; font-size: .72rem; font-style: italic; }
 .reconciliation-table { margin: 0 0 10px; }
 .reconciliation-table table { border-collapse: collapse; width: 100%; font-size: .8rem; }
 .reconciliation-table th, .reconciliation-table td { text-align: left; padding: 4px 8px; border-bottom: 1px solid #26335c; overflow-wrap: anywhere; }

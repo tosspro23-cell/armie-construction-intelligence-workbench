@@ -638,6 +638,7 @@ class IfcRepository:
                 "global_id": getattr(element, "GlobalId", None),
                 "express_id": element.id(),
                 "entity_type": element.is_a(),
+                "tag": getattr(element, "Tag", None),
                 "storey": self._storey_name(element),
                 "query_operation": query.operation,
                 "property_path": query.property_path,
@@ -754,6 +755,21 @@ class IfcRepository:
             "express_id": element.id(),
             "entity_type": element.is_a(),
             "name": IfcRepository._name_of(element),
+            # Owner-reported, 2026-09-19 (live-testing session): a
+            # missing_in_ifc/missing_in_pdf investigation asks the model to
+            # check whether a candidate element "carries a different tag/
+            # mark" than the one under investigation -- but get_properties
+            # never surfaced this element's own Tag at all, only GlobalId/
+            # ExpressID, which the PDF schedule has no equivalent of. The
+            # model correctly knew Tag was the field it needed (it said so
+            # in its own answer) but had no tool that could return it,
+            # forcing it to ask the human to go look instead of resolving
+            # its own hypothesis. `reconcile_doors_windows` already reads
+            # this exact attribute internally (see _reconciliation_ifc_
+            # items) -- this exposes it through the same general-purpose
+            # element view get_element_properties/inspect_current_view use,
+            # rather than requiring a bespoke tool.
+            "tag": getattr(element, "Tag", None),
         }
 
     def _first(self, entity_type: str) -> Any | None:

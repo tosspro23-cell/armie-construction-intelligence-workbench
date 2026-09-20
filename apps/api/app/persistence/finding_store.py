@@ -3,7 +3,13 @@ from __future__ import annotations
 import threading
 from typing import Protocol
 
-from app.schemas.models import EngineeringFinding, FindingHistoryEntry, FindingStatus, utc_now
+from app.schemas.models import (
+    AgentProposal,
+    EngineeringFinding,
+    FindingHistoryEntry,
+    FindingStatus,
+    utc_now,
+)
 
 # A finding in any of these statuses is still "in flight" -- a fresh
 # reconciliation run detecting the same tag/finding_type updates this row
@@ -14,6 +20,22 @@ from app.schemas.models import EngineeringFinding, FindingHistoryEntry, FindingS
 ACTIVE_STATUSES = frozenset({
     FindingStatus.OPEN, FindingStatus.ACKNOWLEDGED, FindingStatus.ACTION_REQUIRED, FindingStatus.RESOLVED,
 })
+
+
+class FindingVersionConflict(Exception):
+    """Independent-review finding, 2026-09-19 (live-testing session): raised
+    when a write's stated precondition (which specific `pending_proposal`
+    the caller believes they are approving/rejecting) no longer matches the
+    finding's actual current state -- e.g. a second investigation replaced
+    it, or another reviewer already acted on it, in the window between the
+    caller loading the page and clicking a button. The write is rejected
+    entirely, never partially applied and never silently approving/
+    rejecting a different proposal than the one the caller actually saw.
+    `apps/api/app/main.py` turns this into a 409, the same way
+    `IllegalFindingTransition` already is for a state-machine violation --
+    this is a different kind of conflict (identity/version, not legality)
+    but the same "never silently proceed" contract.
+    """
 
 
 class FindingStore(Protocol):
@@ -45,7 +67,8 @@ class FindingStore(Protocol):
 
     def append_transition(
         self, finding_id: str, *, to_status: FindingStatus, actor_session_id: str | None, note: str | None,
-        updates: dict | None = None,
+        updates: dict | None = None, proposal_snapshot: AgentProposal | None = None,
+        expected_pending_proposal_id: str | None = None,
     ) -> EngineeringFinding:
         """Append one `FindingHistoryEntry` and update `status` (plus any
         `updates`, e.g. a re-verify's fresh `detail`/observed values) on the
@@ -53,6 +76,48 @@ class FindingStore(Protocol):
         not exist -- callers are responsible for the state-machine legality
         check (FindingService.transition, apps/api/app/services.py)
         *before* calling this; this method only records the result.
+
+        `proposal_snapshot` (SPEC-M17 §4C, widened 2026-09-19 to `reject_
+        proposal` too -- see D-063's amendment): an immutable copy of the
+        exact `AgentProposal` being approved/rejected, written onto the
+        created `FindingHistoryEntry` itself, independent of whatever
+        `updates` does to the finding's own live `pending_proposal` field
+        (typically clearing it to `None`).
+
+        `expected_pending_proposal_id` (independent-review finding,
+        2026-09-19): when given, this call is atomically checked against
+        the finding's *current* `pending_proposal.proposal_id` (read fresh
+        inside this same lock/transaction, not the caller's possibly-stale
+        snapshot) and raises `FindingVersionConflict` on any mismatch --
+        including the current proposal being `None` entirely. This is how
+        `approve_proposal`/`reject_proposal` guarantee a human approves
+        the *specific* proposal they actually reviewed, not whichever one
+        happens to be live by the time the request reaches the store.
+        """
+        ...
+
+    def set_pending_proposal(
+        self, finding_id: str, proposal: AgentProposal | None, *, expected_status: FindingStatus | None = None,
+    ) -> EngineeringFinding | None:
+        """SPEC-M17 §4B: set (or clear, with `None`) a finding's live
+        `pending_proposal` field. Deliberately not `append_transition`: a
+        `propose-resolution` call is not a state-machine transition (it
+        never changes `status`) and must not create a `FindingHistoryEntry`
+        -- see the finding's own field docstring. Raises `KeyError` if
+        `finding_id` does not exist.
+
+        `expected_status` (independent-review finding, 2026-09-19): when
+        given, checked atomically against the finding's *current* status
+        (read fresh inside this same lock/transaction). On a mismatch --
+        a human resolved/waived/marked-false-positive the finding while
+        this investigation was still running -- the write is skipped
+        entirely and `None` is returned, rather than resurrecting a
+        `pending_proposal` on a finding no longer `ACTION_REQUIRED`. This
+        is a softer contract than `append_transition`'s `FindingVersionConflict`
+        (an investigation completing late is routine, not a caller error),
+        so the caller decides what "skipped" means for it -- see
+        `main.py`'s own handling, which logs it rather than failing the
+        turn that already produced a real, displayed answer.
         """
         ...
 
@@ -116,13 +181,25 @@ class InMemoryFindingStore:
 
     def append_transition(
         self, finding_id: str, *, to_status: FindingStatus, actor_session_id: str | None, note: str | None,
-        updates: dict | None = None,
+        updates: dict | None = None, proposal_snapshot: AgentProposal | None = None,
+        expected_pending_proposal_id: str | None = None,
     ) -> EngineeringFinding:
         with self._lock:
             existing = self._findings.get(finding_id)
             if existing is None:
                 raise KeyError(finding_id)
-            entry = FindingHistoryEntry(from_status=existing.status, to_status=to_status, actor_session_id=actor_session_id, note=note)
+            if expected_pending_proposal_id is not None:
+                current_id = existing.pending_proposal.proposal_id if existing.pending_proposal else None
+                if current_id != expected_pending_proposal_id:
+                    raise FindingVersionConflict(
+                        f"Finding '{finding_id}' pending_proposal has changed since it was loaded "
+                        f"(expected proposal '{expected_pending_proposal_id}', current is {current_id!r}) -- "
+                        "reload the finding and review its current proposal before approving/rejecting."
+                    )
+            entry = FindingHistoryEntry(
+                from_status=existing.status, to_status=to_status, actor_session_id=actor_session_id,
+                note=note, proposal_snapshot=proposal_snapshot,
+            )
             updated = existing.model_copy(update={
                 "status": to_status,
                 "last_actor_session_id": actor_session_id,
@@ -130,5 +207,18 @@ class InMemoryFindingStore:
                 "history": [*existing.history, entry],
                 **(updates or {}),
             })
+            self._findings[finding_id] = updated
+            return updated
+
+    def set_pending_proposal(
+        self, finding_id: str, proposal: AgentProposal | None, *, expected_status: FindingStatus | None = None,
+    ) -> EngineeringFinding | None:
+        with self._lock:
+            existing = self._findings.get(finding_id)
+            if existing is None:
+                raise KeyError(finding_id)
+            if expected_status is not None and existing.status != expected_status:
+                return None
+            updated = existing.model_copy(update={"pending_proposal": proposal, "updated_at": utc_now()})
             self._findings[finding_id] = updated
             return updated

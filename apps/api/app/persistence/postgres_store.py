@@ -9,7 +9,14 @@ from psycopg.conninfo import make_conninfo
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
-from app.schemas.models import AuditEvent, EngineeringFinding, FindingHistoryEntry, FindingStatus
+from app.persistence.finding_store import FindingVersionConflict
+from app.schemas.models import (
+    AgentProposal,
+    AuditEvent,
+    EngineeringFinding,
+    FindingHistoryEntry,
+    FindingStatus,
+)
 
 # The Cognitive Services scope reused for Azure OpenAI (SPEC-M3, OD-23) does
 # not apply here: an Entra ID access token usable as a Postgres password
@@ -315,7 +322,7 @@ class PostgresFindingStore:
             if row is None:
                 return None
             cur.execute(
-                "SELECT id, from_status, to_status, actor_session_id, note, at "
+                "SELECT id, from_status, to_status, actor_session_id, note, proposal_snapshot, at "
                 "FROM engineering_finding_history WHERE finding_id = %s ORDER BY at ASC",
                 (finding_id,),
             )
@@ -343,26 +350,84 @@ class PostgresFindingStore:
 
     def append_transition(
         self, finding_id: str, *, to_status: FindingStatus, actor_session_id: str | None, note: str | None,
-        updates: dict | None = None,
+        updates: dict | None = None, proposal_snapshot: AgentProposal | None = None,
+        expected_pending_proposal_id: str | None = None,
     ) -> EngineeringFinding:
+        """Independent-review finding, 2026-09-19: this used to read
+        `existing` via a separate, unlocked `self.get(finding_id)` call,
+        then update the row in a second connection/transaction entirely --
+        a real TOCTOU window between the two, on top of never checking
+        `expected_pending_proposal_id` at all. Now takes a row lock
+        (`SELECT ... FOR UPDATE`) inside the same transaction that performs
+        the write, so the version check and the update are atomic with
+        respect to a concurrent approve/reject/re-investigate on the same
+        finding, not just "checked, then hopefully still true."
+        """
         from uuid import uuid4
-        existing = self.get(finding_id)
-        if existing is None:
-            raise KeyError(finding_id)
-        set_clauses = ["status = %s", "last_actor_session_id = %s", "updated_at = now()"]
-        params: list[Any] = [to_status.value, actor_session_id]
-        for key, value in (updates or {}).items():
-            set_clauses.append(f"{key} = %s")
-            params.append(value)
-        params.append(finding_id)
-        with self._pool.connection() as conn, conn.cursor() as cur:
+        with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT status, pending_proposal FROM engineering_findings WHERE finding_id = %s FOR UPDATE", (finding_id,))
+            locked = cur.fetchone()
+            if locked is None:
+                raise KeyError(finding_id)
+            if expected_pending_proposal_id is not None:
+                current_proposal = locked.get("pending_proposal")
+                current_id = current_proposal.get("proposal_id") if current_proposal else None
+                if current_id != expected_pending_proposal_id:
+                    conn.rollback()
+                    raise FindingVersionConflict(
+                        f"Finding '{finding_id}' pending_proposal has changed since it was loaded "
+                        f"(expected proposal '{expected_pending_proposal_id}', current is {current_id!r}) -- "
+                        "reload the finding and review its current proposal before approving/rejecting."
+                    )
+            from_status = locked["status"]
+            set_clauses = ["status = %s", "last_actor_session_id = %s", "updated_at = now()"]
+            params: list[Any] = [to_status.value, actor_session_id]
+            for key, value in (updates or {}).items():
+                set_clauses.append(f"{key} = %s")
+                params.append(value)
+            params.append(finding_id)
             cur.execute(f"UPDATE engineering_findings SET {', '.join(set_clauses)} WHERE finding_id = %s", params)
             cur.execute(
                 """
-                INSERT INTO engineering_finding_history (id, finding_id, from_status, to_status, actor_session_id, note)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                INSERT INTO engineering_finding_history
+                    (id, finding_id, from_status, to_status, actor_session_id, note, proposal_snapshot)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """,
-                (str(uuid4()), finding_id, existing.status.value, to_status.value, actor_session_id, note),
+                (
+                    str(uuid4()), finding_id, from_status, to_status.value, actor_session_id, note,
+                    json.dumps(proposal_snapshot.model_dump(mode="json")) if proposal_snapshot is not None else None,
+                ),
+            )
+            conn.commit()
+        return self.get(finding_id)
+
+    def set_pending_proposal(
+        self, finding_id: str, proposal: AgentProposal | None, *, expected_status: FindingStatus | None = None,
+    ) -> EngineeringFinding | None:
+        """SPEC-M17 §4B: updates only `pending_proposal`/`updated_at` -- no
+        history row, no status change (a propose-resolution call is not a
+        state-machine transition).
+
+        `expected_status` (independent-review finding, 2026-09-19): row-
+        locked and checked in the same transaction as the write -- a
+        finding a human resolved/waived while this investigation was
+        still running must not have a `pending_proposal` resurrected onto
+        it after the fact. Returns `None` (not an exception -- this is a
+        routine race, not a caller error) when the check fails; the write
+        is skipped entirely.
+        """
+        payload = json.dumps(proposal.model_dump(mode="json")) if proposal is not None else None
+        with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT status FROM engineering_findings WHERE finding_id = %s FOR UPDATE", (finding_id,))
+            locked = cur.fetchone()
+            if locked is None:
+                raise KeyError(finding_id)
+            if expected_status is not None and locked["status"] != expected_status.value:
+                conn.rollback()
+                return None
+            cur.execute(
+                "UPDATE engineering_findings SET pending_proposal = %s, updated_at = now() WHERE finding_id = %s",
+                (payload, finding_id),
             )
             conn.commit()
         return self.get(finding_id)
@@ -377,10 +442,16 @@ class PostgresFindingStore:
             pdf_width_m=row["pdf_width_m"], pdf_height_m=row["pdf_height_m"],
             evidence_refs=row["evidence_refs"], created_at=row["created_at"], updated_at=row["updated_at"],
             last_actor_session_id=row["last_actor_session_id"],
+            # SPEC-M17: psycopg's own JSONB adapter already deserializes
+            # this column into a plain dict (or None) on fetch -- the same
+            # reason `evidence_refs` above needs no manual json.loads --
+            # Pydantic then validates that dict straight into AgentProposal.
+            pending_proposal=row.get("pending_proposal"),
             history=[
                 FindingHistoryEntry(
                     id=str(item["id"]), from_status=item["from_status"], to_status=item["to_status"],
-                    actor_session_id=item["actor_session_id"], note=item["note"], at=item["at"],
+                    actor_session_id=item["actor_session_id"], note=item["note"],
+                    proposal_snapshot=item.get("proposal_snapshot"), at=item["at"],
                 )
                 for item in history_rows
             ],

@@ -107,7 +107,10 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "field": {"type": "string", "description": "The field/label to look up, e.g. 'Panel-A connected load'."},
+                    "field": {
+                        "type": "string",
+                        "description": "The column/field name only, exactly as it appears as a table header, e.g. 'Connected Load', 'Height', 'Width'. Never include a record identifier here (a board, tag, or mark such as 'Panel-A' or 'W02') -- that goes only in `question`, since matching is done separately for the field/column and for the record/row.",
+                    },
                     "question": {"type": "string", "description": "The original user question, verbatim, for evidence localization."},
                 },
                 "required": ["field", "question"],
@@ -131,6 +134,55 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         },
     },
 ]
+
+# Independent-review finding, 2026-09-19 (D-064 item 2): SPEC-M17's
+# investigation feature originally read its final conclusion out of the
+# model's own free-text answer (`AgentService._extract_proposed_dimension`)
+# -- a real, confirmed fabrication risk (an unrelated tool result number
+# could be adopted as a proposed dimension) and, separately, a shape that
+# cannot express what a missing_in_pdf/missing_in_ifc investigation
+# actually concludes ("is this a real omission, or did you find it under a
+# different tag" is not a width or a height). This tool forces the model
+# to submit its conclusion as typed, code-validated arguments instead --
+# not offered on every V2 turn (see `include_verdict_tool` in
+# `AgentService.invoke_v2`), only during a finding investigation, appended
+# to `TOOL_DEFINITIONS` rather than living inside that list permanently.
+SUBMIT_FINDING_VERDICT_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "submit_finding_verdict",
+        "description": (
+            "Submit your final, structured conclusion for this finding investigation. Call this exactly "
+            "once, as your last action, after you have gathered enough evidence from your other tool calls. "
+            "This structured submission -- not your free-text answer -- is what determines the proposed "
+            "resolution a human will review, so it must reflect your actual, evidence-backed conclusion."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "verdict": {
+                    "type": "string",
+                    "enum": ["dimension_confirmed", "genuine_omission", "found_under_different_reference", "inconclusive"],
+                    "description": (
+                        "'dimension_confirmed': for a dimension-mismatch finding, you determined which side's "
+                        "value is correct -- also fill in confirmed_width_m/confirmed_height_m. "
+                        "'genuine_omission': for a missing-from-one-side finding, the element really is absent "
+                        "from the source you checked, after a genuine multi-step effort to find it. "
+                        "'found_under_different_reference': you found this element on the other side, under a "
+                        "different tag/mark than the one under investigation -- describe what you found in "
+                        "`basis`. 'inconclusive': you could not determine any of the above with confidence "
+                        "after actually trying more than one approach."
+                    ),
+                },
+                "confirmed_width_m": {"type": "number", "description": "Only with verdict='dimension_confirmed', and only if the mismatch concerns width: the width in meters you determined to be correct."},
+                "confirmed_height_m": {"type": "number", "description": "Only with verdict='dimension_confirmed', and only if the mismatch concerns height: the height in meters you determined to be correct."},
+                "basis": {"type": "string", "description": "One or two sentences naming the specific tool result(s) that support this verdict."},
+            },
+            "required": ["verdict", "basis"],
+        },
+    },
+}
+
 
 def build_plan_from_tool_call(tool_name: str, arguments: dict[str, Any]) -> QueryPlan:
     """Convert one model-requested tool call into the canonical QueryPlan

@@ -426,3 +426,70 @@ over from the milestone's own plan, not an oversight discovered afterward -- fla
 per this project's own practice of tracking known gaps explicitly rather than leaving them
 implicit. Resolving it for real would mean building actual per-user authentication, which is
 a materially larger project than this milestone (or D-016) ever set out to be.
+
+## M17: `extract_pdf_field`'s column matcher requires the model's field argument to exactly name a column header, no synonym matching
+
+Found live, 2026-09-19, while verifying M17's chat-embedded investigation: even after fixing the
+two bugs recorded in D-063's amendment (page-1-only default, and the misleading tool-schema
+example), the model's own `extract_pdf_field` calls sometimes still miss when it asks for a
+synonym of the real column header instead of the header itself -- e.g. `field="Tag"` or
+`field="Door Mark"` against a schedule whose actual column header is `"Mark"`. `_match_columns`
+(`apps/api/app/tools/document/analyzer.py`) only ever checks whether the requested field's
+canonical form is a *substring* of a column label's canonical form; it has no synonym table and
+was never designed to be a general natural-language-to-header mapper (SPEC-M2P1 §3's own
+generality caveat covers this whole matching approach, not just this specific gap). When this
+happens the deterministic lookup misses and falls through to a vision-based fallback on the same
+page, which can still succeed (as observed live) -- so this degrades to a slower, model-graded
+path rather than silently fabricating a wrong value, but it is a real, disclosed limitation, not
+a claim that every reasonable phrasing of a field name will resolve deterministically. Revisit
+only if a real case shows this meaningfully hurting investigation quality in practice, not
+speculatively -- matches this project's own "one fixed rule, not configurable this milestone"
+precedent for not over-generalizing pattern-matching heuristics ahead of a demonstrated need.
+
+## M17: narrative-consistency verification can mark a numerically-correct answer "unverified"
+
+Found live, 2026-09-19, during the same investigation testing: a V2 answer whose every stated
+number genuinely traced to this turn's own tool results was still shown with D-062's `unverified`
+caveat. `_narrative_consistent_with_tool_facts` (`apps/api/app/agent/graph.py`) is a narrow,
+disclosed heuristic, not a general semantic fact-checker (its own docstring says so), and the most
+likely cause here is a number the answer echoes from the *investigation prompt itself* (e.g. the
+finding's own `"±0.01 m tolerance"` text, restated for context) landing near an entity term the
+checker tracks, with no tool-call fact to explain it since a fixed tolerance constant was never
+itself a tool's return value. Not chased down to a fix this session, deliberately: this fails
+*safe* (a caveat shown on a correct answer, never a missing caveat on a wrong one), so it does not
+block the human-approval gate this milestone's whole design relies on, and confirming the exact
+trigger would need a dedicated repro this session's own priority (verifying the architecture
+redesign, then widening finding-type scope) didn't leave room for. Revisit if this proves common
+enough in practice to meaningfully erode trust in the `verified` badge's own signal.
+
+## RESOLVED by D-064 follow-up: PostgresFindingStore's row-locked transactions now have a real-Postgres integration test
+
+D-064's fixes for approval version binding and late-investigation guarding added `SELECT ...
+FOR UPDATE` row locking to `PostgresFindingStore.append_transition`/`set_pending_proposal`
+(`apps/api/app/persistence/postgres_store.py`), verified at the time only by code review and by
+`InMemoryFindingStore`'s regression suite passing against the identical `FindingStore` Protocol
+shape -- this repository had no integration test harness against a real Postgres instance for
+either store implementation, so the actual locking behavior under real concurrent connections was
+unverified live.
+
+Owner-requested, 2026-09-19: closed by `tests/test_postgres_finding_store_concurrency.py`, gated
+behind `TEST_DATABASE_URL` exactly like `tests/test_postgres_persistence.py`'s existing pattern
+(already applied automatically in CI, which already runs a real `postgres` service and already
+sets `TEST_DATABASE_URL` for the whole job -- no `ci.yml` change was needed, pytest's own
+discovery picked the new file up). Real threads, released together via `threading.Barrier` to
+maximize genuine overlap, against a real connection pool: ten concurrent approvals of the same
+live proposal confirm exactly one wins and nine get `FindingVersionConflict`; a stale proposal id
+is rejected even surrounded by real concurrent valid attempts; 20 real trials of the
+late-investigation-vs-concurrent-resolve race confirm the safety invariant holds regardless of
+which side a real Postgres transaction lets go first.
+
+**Running this against a real database, not just re-reading the code, found a real, independent
+defect no amount of code review had caught**: plain `resolve` (a human bypassing the agent
+proposal entirely, a path SPEC-M11 always allowed) never cleared a pre-existing `pending_proposal`
+-- reproduced with *zero* concurrency once the race test pointed at it (an investigated finding,
+then manually resolved, kept a stale proposal forever, with live Approve/Reject buttons in the UI
+that would 409 if clicked). Fixed by widening the actions that clear `pending_proposal` from
+`PROPOSAL_REQUIRED_ACTIONS` to a new `ACTIONS_THAT_CLEAR_PENDING_PROPOSAL` including plain
+`resolve` (`apps/api/app/finding_workflow.py`), with its own dedicated regression test
+(`test_resolve_clears_a_pre_existing_pending_proposal`) alongside the concurrency tests. Recorded
+in D-064's own amendment for the durable record.

@@ -108,6 +108,12 @@ function App() {
   // call's own `call_id`, or the fixed id "thinking" for the "thinking"
   // ping) so an update can target the exact entry it belongs to.
   const [v2Streaming, setV2Streaming] = useState<{ question: string; statuses: { id: string; label: string }[]; answer: string } | null>(null);
+  // SPEC-M17, amended 2026-09-18: bumped after a finding-investigation
+  // turn completes (runV2Turn below) so Findings.tsx's own list re-fetches
+  // and picks up the new pending_proposal -- that turn's actual state
+  // lives on the backend finding, not in this component's own `turns`
+  // array, so Findings has no other signal that something changed.
+  const [findingsRefreshToken, setFindingsRefreshToken] = useState(0);
   // Owner-reported, 2026-09-16 (found live: a real Azure 429 mid-stream):
   // submitV2's own catch block used to call setApiError without setting
   // apiState, so the top-level banner (gated on apiState === "unavailable",
@@ -248,10 +254,16 @@ function App() {
   // arrive, then folds the final event into the same `turns` list V1
   // uses, labeled by engine so a benchmark comparison is legible without
   // cross-referencing the audit trail.
-  async function submitV2(event: FormEvent) {
-    event.preventDefault();
-    if (!question.trim() || busy) return;
-    const askedQuestion = question.trim();
+  // SPEC-M17, amended 2026-09-18 (owner decision: one agent, one place it
+  // visibly works): extracted from submitV2's own body so a finding
+  // investigation can drive the exact same request/stream/render path a
+  // normal typed question does -- `findingId`, when given, is threaded
+  // onto the request so the backend investigates that finding instead of
+  // answering `askedQuestion` literally (the backend ignores the text in
+  // that case; a short, readable label is still sent/shown so the
+  // Conversation panel's own "you asked" bubble reads naturally rather
+  // than showing a meaningless placeholder).
+  async function runV2Turn(askedQuestion: string, options?: { findingId?: string }) {
     // Independent-review finding, 2026-09-17: unlike submit() above,
     // this never captured a switch-sequence snapshot or wired an
     // AbortController -- switchProject's own `controllerRef.current?.abort()`
@@ -268,12 +280,12 @@ function App() {
     setBusy(true);
     setV2Error(null);
     setV2Streaming({ question: askedQuestion, statuses: [], answer: "" });
-    setQuestion("");
     try {
       const response = await fetch("/api/v1/chat", withAuthHeader({
         method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({
           thread_id: threadId, project_id: projectId, question: askedQuestion, engine: "v2",
+          finding_id: options?.findingId,
           // Independent-review finding, 2026-09-17: this request never
           // carried viewer_context or source_preference at all (V1's own
           // submit() above sends both) -- inspect_current_view had no
@@ -373,6 +385,11 @@ function App() {
           timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }), trace: responseTrace,
         }]);
         setTrace(responseTrace);
+        // SPEC-M17, amended 2026-09-18: this was a finding investigation --
+        // its result landed on the finding itself (pending_proposal), not
+        // in this component's own turns/trace state above; bump the
+        // refresh token so Findings.tsx re-fetches and shows it.
+        if (options?.findingId) setFindingsRefreshToken((current) => current + 1);
       }
     } catch (error) {
       if ((error as Error).name !== "AbortError") {
@@ -384,6 +401,27 @@ function App() {
       setBusy(false);
       setV2Streaming(null);
     }
+  }
+
+  async function submitV2(event: FormEvent) {
+    event.preventDefault();
+    if (!question.trim() || busy) return;
+    const askedQuestion = question.trim();
+    setQuestion("");
+    await runV2Turn(askedQuestion);
+  }
+
+  // SPEC-M17, amended 2026-09-18: "Ask agent to investigate" (Findings.tsx)
+  // no longer calls a dedicated REST endpoint and renders its own copy of
+  // the agent's reasoning inline in the Findings card -- it drives a real
+  // V2 conversation turn instead, so the investigation streams into the
+  // same Conversation panel (same tool-status/thinking/answer-chunk
+  // events) as any other question. Findings.tsx goes back to being a pure
+  // workflow-status list once this lands; the agent only ever "talks" in
+  // one place.
+  async function investigateFinding(finding: { finding_id: string; tag: string }) {
+    if (busy) return;
+    await runV2Turn(`Investigate why the dimensions don't match for finding ${finding.tag}.`, { findingId: finding.finding_id });
   }
 
   async function stopRequest() {
@@ -526,7 +564,7 @@ function App() {
           </div>
           <div className="drawing-stage" aria-label="Zoomable engineering drawing. Pinch to zoom; two-finger scroll pans." onWheel={onDrawingWheel}><div className="drawing-page" style={{ transform: `scale(${drawingZoom})` }}><AuthedImage src={`/api/v1/project/pdf/pages/${drawingEvidence?.page ?? 1}.png?${new URLSearchParams({ ...(projectId ? { project_id: projectId } : {}), ...(drawingDocument ? { document: drawingDocument } : {}) }).toString()}`} alt={`${drawingDocument || "Engineering load schedule"} page ${drawingEvidence?.page ?? 1}`} />{drawingEvidence?.bbox && <div ref={drawingEvidenceRef} className="drawing-evidence-box" style={evidenceBoxStyle(drawingEvidence.bbox, drawingDocInfo?.page_sizes?.[(drawingEvidence.page || 1) - 1]?.[0] || 1191, drawingDocInfo?.page_sizes?.[(drawingEvidence.page || 1) - 1]?.[1] || 842)} title={`${drawingEvidence.board || "PDF evidence"}${drawingEvidence.field ? ` · ${drawingEvidence.field}` : ""}`} />}</div></div><p className="empty">{drawingEvidence?.localized === false ? "This evidence's location could not be precisely determined; showing the full page for manual review." : drawingEvidence?.bbox ? `Focused evidence: ${drawingEvidence.board || "drawing region"}${drawingEvidence.field ? ` · ${drawingEvidence.field}` : ""}.` : "Pinch to zoom and use two-finger scrolling to pan; citations focus a cited drawing region."}</p></section>}
         {tab === "snapshot" && <section className="snapshot"><h2>Viewer Snapshot</h2>{snapshot ? <img src={snapshot} alt="Captured IFC viewer context" /> : <p className="empty">Capture a BIM view to enable image-grounded inspection.</p>}<p>Selected: {selected?.globalId || "none"}</p></section>}
-        {tab === "findings" && <Findings projectId={projectId} />}
+        {tab === "findings" && <Findings projectId={projectId} onInvestigate={investigateFinding} refreshToken={findingsRefreshToken} investigating={busy} />}
       </aside>
       <section className="chat"><h2>Conversation</h2><div className="messages" ref={timelineRef}>{turns.length === 0 ? <p className="empty">Ask a BIM, drawing, or current-view question. Auto chooses the source; overrides remain in technical details.</p> : turns.map((turn) => <React.Fragment key={turn.id}><div className="message-row user"><article className="message user-message"><div className="message-meta"><span>User</span><time>{turn.timestamp}</time></div><p>{turn.user}</p></article></div><div className="message-row assistant"><article className={`message assistant-message ${turn.assistant.disposition}`}><div className="message-meta"><span>Assistant</span>{/* SPEC-M16: labeled so a V1/V2 benchmark comparison is legible without cross-referencing the audit trail. */}<span className="engine-badge">{turn.assistant.execution_metadata.engine === "v2" ? "V2 (agent)" : "V1"}</span><span>{turn.assistant.disposition.replace(/_/g, " ")}</span><span className={turn.assistant.verification.status}>{turn.assistant.verification.status}</span><time>{turn.timestamp}</time></div><p>{renderAnswerMarkdown(turn.assistant.answer_markdown)}</p>{turn.assistant.verification.status === "unverified" && <p className="unverified-caveat">⚠ This answer's own numbers could not be fully confirmed against this turn's tool results — please double-check before relying on it.</p>}<details className="technical-details"><summary>Technical details</summary><small>Source: {turn.assistant.execution_metadata.source || "—"} · Planner: {turn.assistant.execution_metadata.planning_mode || "—"} · Models: {turn.assistant.execution_metadata.model_call_count || 0} · Tools: {turn.assistant.execution_metadata.tool_call_count || 0} · Latency: {turn.assistant.execution_metadata.latency_ms ? `${turn.assistant.execution_metadata.latency_ms} ms` : "—"} · Trace: {turn.assistant.trace_id}</small></details></article></div></React.Fragment>)}
         {/* SPEC-M16 SS F: V2's own live progress -- tool-use status lines

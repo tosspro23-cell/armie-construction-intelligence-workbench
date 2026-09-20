@@ -72,11 +72,55 @@ class FindingStatus(str, Enum):
     FALSE_POSITIVE = "false_positive"
 
 
+class AgentProposal(BaseModel):
+    """SPEC-M17 §4A: one V2-investigated proposed resolution for a
+    `dimension_mismatch` finding. `citations`/`verification` reuse the
+    exact same types a normal V2 chat answer carries (`Citation`,
+    `VerificationStatus`, defined later in this module) -- forward-
+    referenced here safely because this whole module uses `from
+    __future__ import annotations`: Pydantic resolves the annotation
+    lazily, on first validation, by which point the module has finished
+    loading and both names exist (verified directly, not assumed).
+    """
+
+    proposal_id: str = Field(default_factory=lambda: str(uuid4()))
+    proposed_width_m: float | None = None
+    proposed_height_m: float | None = None
+    # Independent-review finding, 2026-09-19 (D-064 item 2): a numeric
+    # width/height alone cannot express what a missing_in_pdf/missing_in_ifc
+    # investigation actually concludes ("is this a real omission, or did
+    # you find it under a different tag") -- that categorical judgment is
+    # forced into this typed field instead of being inferred from free
+    # text (AgentService._extract_finding_verdict reads it from the
+    # model's own submit_finding_verdict tool call, never guesses it from
+    # `rationale`). `None` only when the investigation ended without ever
+    # calling that tool (e.g. hit the iteration limit first).
+    verdict: Literal["dimension_confirmed", "genuine_omission", "found_under_different_reference", "inconclusive"] | None = None
+    # The model's own one-or-two-sentence justification for `verdict`,
+    # submitted alongside it through the same tool call -- kept separate
+    # from `rationale` (the full turn's own prose) since this is
+    # specifically "what the model itself believes backs its verdict,"
+    # not the whole investigation's narrative.
+    verdict_basis: str | None = None
+    rationale: str
+    citations: list[Citation] = Field(default_factory=list)
+    verification: VerificationStatus
+    trace_id: str
+    generated_at: datetime = Field(default_factory=utc_now)
+
+
 class FindingHistoryEntry(BaseModel):
     """One append-only transition record. `actor_session_id` is the
     caller's `X-Session-Id` (D-016) -- a per-tab correlation token, not a
     real login -- for whichever transition a human triggered; `None` for
     the system's own automatic transitions (initial creation, re-verify).
+
+    `proposal_snapshot` (SPEC-M17 §4A): set only on the history entry an
+    `approve_proposal` transition creates -- an immutable copy of the
+    exact `AgentProposal` that was approved, independent of the
+    finding's own live `pending_proposal` field, which a later
+    `propose-resolution` call can overwrite. The audit trail must always
+    be able to show what was actually approved, even after that.
     """
 
     id: str = Field(default_factory=lambda: str(uuid4()))
@@ -84,6 +128,7 @@ class FindingHistoryEntry(BaseModel):
     to_status: FindingStatus
     actor_session_id: str | None = None
     note: str | None = None
+    proposal_snapshot: AgentProposal | None = None
     at: datetime = Field(default_factory=utc_now)
 
 
@@ -92,6 +137,15 @@ class EngineeringFinding(BaseModel):
     `ReconciliationItem` -- reconciliation's own join/comparison is
     unchanged (OD-15's door/window-only scope is not broadened by this);
     this only adds a lifecycle on top of an already-computed result.
+
+    `pending_proposal` (SPEC-M17 §4A): the live, not-yet-decided
+    `AgentProposal` from the most recent `propose-resolution` call, if
+    any. Nullable, not a new `FindingStatus` value -- a finding is either
+    `ACTION_REQUIRED` with no proposal yet (SPEC-M11's exact original
+    behavior) or `ACTION_REQUIRED` with one pending proposal awaiting an
+    explicit `approve_proposal`/`reject_proposal` human decision. Cleared
+    by either of those two actions; replaced (not accumulated) by a new
+    `propose-resolution` call before either fires.
     """
 
     finding_id: str = Field(default_factory=lambda: str(uuid4()))
@@ -108,6 +162,7 @@ class EngineeringFinding(BaseModel):
     pdf_width_m: float | None = None
     pdf_height_m: float | None = None
     evidence_refs: list[str] = Field(default_factory=list)
+    pending_proposal: AgentProposal | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
     last_actor_session_id: str | None = None
@@ -148,6 +203,19 @@ class ChatRequest(BaseModel):
     # an explicit, visible per-question choice (the workbench's own engine
     # toggle), never an automatic/silent substitution for v1.
     engine: Literal["v1", "v2"] = "v1"
+    # SPEC-M17, amended (owner decision, 2026-09-18): when set, this turn
+    # investigates an EngineeringFinding instead of answering `question`
+    # verbatim -- `question` is still required by this model's own
+    # validation (kept unchanged to avoid touching a field V1 also
+    # depends on) but is ignored server-side whenever `finding_id` is
+    # present; the real question is built entirely server-side from the
+    # finding's own stored fields (AgentService.build_finding_
+    # investigation_question), never from client-supplied text. Runs
+    # through the exact same V2 SSE turn as any other question -- the
+    # investigation streams into the same Conversation panel, using the
+    # same tool-status/answer-chunk events, so it reads as the same agent
+    # doing the same kind of work, not a separate, disconnected feature.
+    finding_id: str | None = None
 
 
 class FindingTransitionRequest(BaseModel):
@@ -158,6 +226,15 @@ class FindingTransitionRequest(BaseModel):
 
     action: str = Field(min_length=1, max_length=64)
     note: str | None = Field(default=None, max_length=2000)
+    # Independent-review finding, 2026-09-19: required (server-enforced,
+    # see main.py's own check) for `approve_proposal`/`reject_proposal` --
+    # identifies which specific AgentProposal the caller actually
+    # reviewed, so the store can atomically reject the action if a
+    # concurrent investigation or another reviewer already replaced it.
+    # Ignored for every other action (kept optional here rather than a
+    # second request schema, matching this endpoint's existing single-body
+    # shape for every action).
+    proposal_id: str | None = Field(default=None, max_length=64)
 
 
 class ClarificationResumeRequest(BaseModel):
@@ -453,7 +530,12 @@ class DocumentQueryResult(BaseModel):
     # to clarification without a vision round-trip, while every other
     # below-threshold case (field absent, multiple candidates) keeps falling
     # through to vision unchanged.
-    miss_reason: Literal["no_matching_record"] | None = None
+    # "field_not_on_page" (added for SPEC-M17's live investigation testing,
+    # 2026-09-18): the requested field's column doesn't exist on the page
+    # that was read at all -- the "wrong page" signature `native_lookup`
+    # uses to decide whether to keep scanning later pages when no explicit
+    # `page_hint` was given (see `DocumentAnalyzer.native_lookup`).
+    miss_reason: Literal["no_matching_record", "field_not_on_page"] | None = None
 
 
 class AuditEvent(BaseModel):

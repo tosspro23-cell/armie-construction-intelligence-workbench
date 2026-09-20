@@ -30,16 +30,18 @@ from app.agent.router import (
     resolve_reference,
     selected_element_plan,
 )
-from app.agent.tools import TOOL_DEFINITIONS, build_plan_from_tool_call
+from app.agent.tools import SUBMIT_FINDING_VERDICT_TOOL, TOOL_DEFINITIONS, build_plan_from_tool_call
 from app.config import Settings
 from app.providers.base import AnswerChunkEvent, ToolCallEvent, TurnCompleteEvent
 from app.schemas.models import (
+    AgentProposal,
     AgentResponse,
     AuditEvent,
     Citation,
     ConversationDelta,
     Disposition,
     DocumentQueryInput,
+    EngineeringFinding,
     Evidence,
     IfcQueryInput,
     MultiQueryPlan,
@@ -894,6 +896,253 @@ Return only a corrected MultiQueryPlan JSON object."""
         ifc_items = self._reconciliation_ifc_items(project_resources)
         pdf_items = self._reconciliation_pdf_items(project_resources)
         return self._compare_reconciliation_item(tag, ifc_items.get(tag), pdf_items.get(tag))
+
+    # Independent-review finding, 2026-09-19 (live-testing session):
+    # rejection/negation phrases checked immediately before a candidate
+    # number, so "Do not use the IFC value of 1.75m" no longer counts
+    # 1.75 as the agent endorsing it. A narrow, disclosed keyword list --
+    # not a claim of general negation understanding -- matching this
+    # function's own already-established "narrow heuristic" framing.
+    _DIMENSION_REJECTION_PHRASES = (
+        "not use", "don't use", "do not use", "should not use", "shouldn't use",
+        "not correct", "not the correct", "not accurate", "not valid",
+        "not confirmed", "not verified", "cannot rely on", "can't rely on",
+        "unreliable", "erroneous", "not trust", "incorrect",
+    )
+
+    @staticmethod
+    def _matches_known_value(candidate: float, *known_values: float | None) -> bool:
+        """Whole-number-exact / 0.05-tolerance match against any of the
+        given known values (`None` entries never match) -- the one
+        numeric-matching rule this project's numeric-consistency checks
+        all share, factored out (D-064 item 2) so a value submitted
+        through `submit_finding_verdict`'s structured arguments is
+        checked against a finding's own known candidates the exact same
+        way a value found in free text already was.
+        """
+        for value in known_values:
+            if value is None:
+                continue
+            if float(value).is_integer():
+                if candidate == value:
+                    return True
+            elif abs(candidate - value) < 0.05:
+                return True
+        return False
+
+    @staticmethod
+    def _extract_proposed_dimension(answer_markdown: str, ifc_value: float | None, pdf_value: float | None) -> float | None:
+        """SPEC-M17 §4B: which of the two known, already-conflicting values
+        the agent's own free-text conclusion actually commits to -- a
+        narrow, disclosed heuristic, not a claim of general free-text
+        understanding, matching this project's own established
+        numeric-consistency check in spirit (reuses the exact same
+        whole-number-exact / 0.05-tolerance matching rule).
+
+        - Only one of the two known values appears in the text, in a
+          context that isn't rejecting it -> that one (the agent picked a
+          side).
+        - Both appear, or neither appears -> `None`: the human reads
+          `rationale` directly rather than being handed a guess.
+
+        Independent-review finding, 2026-09-19 (live-testing session,
+        real Azure gpt-5-mini): this function used to also accept "exactly
+        one number that isn't either known value, on a verified answer" as
+        a genuinely new proposed value -- intended for a real third-source
+        number (e.g. a spec sheet), but reproduced live scripting an
+        investigation whose actual tool call was `count_elements(IfcDoor)`
+        returning 4 doors, with the model's whole answer being "There are
+        4 doors." That 4 is not a dimension at all, yet the old rule
+        persisted `proposed_width_m = proposed_height_m = 4.0` marked
+        `verified` -- confidently wrong, not merely ungrounded. This
+        function cannot tell a genuinely new grounded measurement apart
+        from an unrelated real number that happens to be the answer's only
+        one, so it no longer tries: removed entirely rather than patched,
+        since no version of "guess from whichever numbers are left over"
+        can safely distinguish those two cases from free text alone. A
+        real third-source value now surfaces only in `rationale` for a
+        human to read, never as a silently-adopted `proposed_*_m` field.
+        This is a narrower guarantee than before, deliberately: it can now
+        return `None` in a case where the number really was a genuine new
+        value, but it can no longer confidently return the *wrong* thing.
+        """
+        import re
+
+        rejection_pattern = "|".join(re.escape(phrase) for phrase in AgentService._DIMENSION_REJECTION_PHRASES)
+
+        def _accepted_numbers(expected: float | None) -> list[float]:
+            if expected is None:
+                return []
+            matches = []
+            for match in re.finditer(r"\d+(?:\.\d+)?", answer_markdown):
+                actual = float(match.group())
+                if not AgentService._matches_known_value(actual, expected):
+                    continue
+                context = answer_markdown[max(0, match.start() - 80):match.start()].lower()
+                if re.search(rejection_pattern, context):
+                    continue
+                matches.append(actual)
+            return matches
+
+        ifc_present = bool(_accepted_numbers(ifc_value))
+        pdf_present = bool(_accepted_numbers(pdf_value))
+        if ifc_present and not pdf_present:
+            return ifc_value
+        if pdf_present and not ifc_present:
+            return pdf_value
+        return None
+
+    @staticmethod
+    def build_finding_investigation_question(finding: EngineeringFinding) -> str:
+        """SPEC-M17 §4B, amended (owner decision, 2026-09-18): the question
+        an "investigate this finding" turn actually asks V2, built
+        entirely from the finding's own already-stored fields (tag,
+        detail, both sides' stored dimensions) -- never from free-text
+        operator input, which would reopen a prompt-injection surface
+        this design deliberately avoids (SPEC-M17 §3). Read-only, like
+        every other V2 question -- the tools it can reach never write to
+        the real IFC/PDF sources.
+
+        Owner-reported, 2026-09-18 (found live): the model gave up too
+        easily ("I cannot determine... please provide the PDF page") when
+        `extract_pdf_field` (a generic Q&A-style tool) failed to relocate
+        a specific schedule row that reconciliation's own deterministic
+        table-reading method (`_reconciliation_pdf_items`) had already
+        read correctly for this exact tag -- the agent had strictly less
+        precise tooling for this than the system already had, and settled
+        for "I don't know" on the first miss instead of trying harder.
+        Now explicitly told not to give up after one failed lookup.
+
+        Owner decision, 2026-09-19 (live-testing session): widened from
+        dimension_mismatch only to all three SPEC-M11 finding types (see
+        `INVESTIGABLE_FINDING_TYPES`) -- each gets its own question, since
+        "which value is correct" only makes sense for a real numeric
+        conflict; missing_in_pdf/missing_in_ifc ask the genuinely
+        different question "is this a real omission, or does this element
+        actually appear under a different tag/label."
+
+        Independent-review finding, 2026-09-19 (D-064 item 2): every
+        branch now ends with an explicit instruction to call
+        `submit_finding_verdict` -- the tool's own structured arguments,
+        not this free-text answer, are what `build_finding_proposal`
+        reads (see that method's own docstring). The missing_in_pdf/
+        missing_in_ifc branches also gained an explicit instruction to
+        check `reconcile_doors_windows`'s own matched-item list before
+        concluding a same-dimension candidate is this missing element
+        under a different tag -- found live in this same session: a real
+        investigation matched two IFC windows by dimension alone and
+        proposed one of them might be the missing tag, without checking
+        that both were *already* matched to their own tags in the very
+        reconciliation data it had already read, which alone rules out
+        either one being a second, hidden identity for the tag under
+        investigation.
+        """
+        if finding.finding_type == "missing_in_pdf":
+            return (
+                f"A door/window reconciliation flagged that tag '{finding.tag}' is present in the IFC model "
+                f"(width={finding.ifc_width_m} m, height={finding.ifc_height_m} m) but has no matching row on the "
+                f"PDF schedule: {finding.detail} Investigate using your available tools -- re-check this element's "
+                "own real IFC properties, and try extract_pdf_field more than once with differently-worded "
+                f"questions (e.g. by dimension, by storey, by element type) before concluding tag '{finding.tag}' "
+                "genuinely does not appear anywhere on the schedule; also check nearby/similar elements (same "
+                "storey, same entity type) in case this element was logged under a different mark or tag on the "
+                "PDF. Before concluding any candidate PDF row is this element under a different mark, first run "
+                "reconcile_doors_windows and confirm that candidate row is not already matched to its own, "
+                "different IFC tag -- a row already matched elsewhere cannot also be this one. Do not give up "
+                "after a single failed lookup -- make a genuine multi-step effort before concluding this is a real "
+                "omission. When you are done, call submit_finding_verdict exactly once: verdict='genuine_omission' "
+                "if the schedule truly has no row for this tag, verdict='found_under_different_reference' (with "
+                "basis naming the specific row/mark you found, already confirmed unmatched elsewhere) if it does, "
+                "or verdict='inconclusive' only after genuinely trying more than one approach."
+            )
+        if finding.finding_type == "missing_in_ifc":
+            return (
+                f"A door/window reconciliation flagged that tag '{finding.tag}' is present on the PDF schedule "
+                f"(width={finding.pdf_width_m} m, height={finding.pdf_height_m} m) but has no matching element in "
+                f"the IFC model: {finding.detail} Investigate using your available tools -- re-check the IFC model's "
+                "own elements near this dimension/type (get_element_properties, count_elements) before concluding "
+                f"tag '{finding.tag}' genuinely was never modeled; also check nearby/similar elements (same storey, "
+                "same entity type) in case this element exists in the IFC model under a different tag. Before "
+                "concluding any candidate IFC element is this tag under a different name, first run "
+                "reconcile_doors_windows and confirm that candidate element's own tag is not already matched to a "
+                "different PDF row -- an element already matched elsewhere cannot also be this one. Do not give "
+                "up after a single failed lookup -- make a genuine multi-step effort before concluding this "
+                "element is genuinely missing from the model. When you are done, call submit_finding_verdict "
+                "exactly once: verdict='genuine_omission' if the IFC model truly has no element for this tag, "
+                "verdict='found_under_different_reference' (with basis naming the specific element/tag you found, "
+                "already confirmed unmatched elsewhere) if it does, or verdict='inconclusive' only after genuinely "
+                "trying more than one approach."
+            )
+        return (
+            f"A door/window reconciliation flagged a dimension mismatch for tag '{finding.tag}': {finding.detail} "
+            f"The IFC model currently records width={finding.ifc_width_m} m, height={finding.ifc_height_m} m. "
+            f"The PDF schedule currently records width={finding.pdf_width_m} m, height={finding.pdf_height_m} m. "
+            "Investigate using your available tools -- re-check this element's own real IFC properties, and try "
+            "extract_pdf_field more than once with differently-worded questions before concluding the PDF schedule "
+            "doesn't have this row; also check nearby/similar elements (same storey, same entity type) for a "
+            "consistent pattern that corroborates one side. Do not give up after a single failed lookup -- make a "
+            "genuine multi-step effort before concluding you cannot determine an answer. When you are done, call "
+            "submit_finding_verdict exactly once with verdict='dimension_confirmed' and confirmed_width_m/"
+            "confirmed_height_m set to the value(s) you determined to be correct (only set the one(s) that were "
+            "actually in question), or verdict='inconclusive' only after genuinely trying more than one approach."
+        )
+
+    @staticmethod
+    def build_finding_proposal(finding: EngineeringFinding, final_response: AgentResponse) -> AgentProposal:
+        """SPEC-M17 §4B, amended: maps one completed V2 turn's own
+        `AgentResponse` (produced by a normal `invoke_v2` call asking
+        `build_finding_investigation_question`'s own question -- this
+        method does not call the model itself) onto a persistable
+        `AgentProposal` for the investigated finding.
+
+        Independent-review finding, 2026-09-19 (D-064 item 2): now reads
+        the model's own structured `submit_finding_verdict` call (carried
+        through `final_response.execution_metadata["finding_verdict"]`)
+        instead of guessing from `answer_markdown` -- this is what lets a
+        `missing_in_pdf`/`missing_in_ifc` investigation's conclusion be
+        expressed as `verdict` (a real omission vs. found under a
+        different reference vs. inconclusive) rather than force-fit into
+        a width/height that question was never actually about. A
+        structured `confirmed_width_m`/`confirmed_height_m` is still
+        independently checked against the finding's own known IFC/PDF
+        values (`_matches_known_value`) before being trusted as
+        `proposed_*_m` -- the model stating a number through this tool is
+        not, on its own, sufficient grounds to adopt it; per this
+        project's own established discipline, code still validates a
+        structured claim, not just a free-text one. The free-text
+        extraction remains only as a fallback for the rare turn that
+        never reached `submit_finding_verdict` at all (e.g. the
+        tool-calling loop ended some other way, such as hitting the
+        iteration cap, before the model got the chance).
+        """
+        verdict_args = final_response.execution_metadata.get("finding_verdict")
+        verdict: str | None = None
+        verdict_basis: str | None = None
+        proposed_width_m: float | None = None
+        proposed_height_m: float | None = None
+        if verdict_args:
+            verdict = verdict_args.get("verdict")
+            verdict_basis = verdict_args.get("basis")
+            if verdict == "dimension_confirmed":
+                candidate_width = verdict_args.get("confirmed_width_m")
+                candidate_height = verdict_args.get("confirmed_height_m")
+                if isinstance(candidate_width, (int, float)) and AgentService._matches_known_value(candidate_width, finding.ifc_width_m, finding.pdf_width_m):
+                    proposed_width_m = candidate_width
+                if isinstance(candidate_height, (int, float)) and AgentService._matches_known_value(candidate_height, finding.ifc_height_m, finding.pdf_height_m):
+                    proposed_height_m = candidate_height
+        else:
+            proposed_width_m = AgentService._extract_proposed_dimension(final_response.answer_markdown, finding.ifc_width_m, finding.pdf_width_m)
+            proposed_height_m = AgentService._extract_proposed_dimension(final_response.answer_markdown, finding.ifc_height_m, finding.pdf_height_m)
+        return AgentProposal(
+            proposed_width_m=proposed_width_m,
+            proposed_height_m=proposed_height_m,
+            verdict=verdict,
+            verdict_basis=verdict_basis,
+            rationale=final_response.answer_markdown,
+            citations=final_response.citations,
+            verification=final_response.verification,
+            trace_id=final_response.trace_id,
+        )
 
     def _synthesize_reconciliation_response(self, state: GraphState, multi_plan: MultiQueryPlan) -> dict:
         """SPEC-M2 §4D: join the IFC and PDF door/window sides on Tag/Mark.
@@ -2003,6 +2252,26 @@ Return only a corrected MultiQueryPlan JSON object."""
         unchanged (this module's own established contract) -- no new
         computation logic exists for V2 anywhere in this codebase.
         """
+        if tool_call.tool_name == "submit_finding_verdict":
+            # D-064 item 2: a local, no-op "tool" -- it queries no real
+            # IFC/PDF/viewer source, only records the model's own
+            # structured conclusion so invoke_v2's outer loop can carry it
+            # into this turn's `execution_metadata`. Disposition is
+            # "answered" (this call did exactly what it was asked), not a
+            # judgment on whether the *verdict itself* is well-grounded --
+            # that check happens downstream, in `build_finding_proposal`,
+            # against the finding's own known candidate values.
+            return {
+                "tool_result": {
+                    "answer": tool_call.arguments.get("basis", ""),
+                    "disposition": "answered",
+                    "citations": [],
+                    "verification": VerificationStatus(status="not_applicable", reason="A structured verdict submission, not a data query.").model_dump(),
+                    "result_value": {"status": "verdict recorded"},
+                },
+                "evidence": [], "tool_call_delta": 0, "plan": [],
+                "finding_verdict": tool_call.arguments,
+            }
         if tool_call.tool_name == "reconcile_doors_windows":
             reason = "V2 tool call: door/window width/height reconciliation against the PDF schedule."
             multi_plan = MultiQueryPlan(
@@ -2069,8 +2338,17 @@ Return only a corrected MultiQueryPlan JSON object."""
         deadline: float | None = None,
         cancel_check: Callable[[], bool] | None = None,
         source_preference: str = "auto",
+        include_verdict_tool: bool = False,
     ) -> AsyncIterator[dict[str, Any]]:
         """SPEC-M16: V2's tool-calling agent loop, streamed.
+
+        `include_verdict_tool` (D-064 item 2, independent-review finding,
+        2026-09-19): offers `submit_finding_verdict` alongside every other
+        tool for this turn only -- set exclusively by `_chat_v2` when this
+        turn is investigating a `EngineeringFinding`. A normal chat
+        question never gets it: there is no "finding verdict" to submit,
+        and offering it unconditionally would just invite the model to
+        call an irrelevant tool.
 
         Yields plain dicts for the caller (an SSE endpoint, or a test
         harness collecting them into a list) to forward:
@@ -2121,6 +2399,7 @@ Return only a corrected MultiQueryPlan JSON object."""
         except Exception:
             storey_names = []
         messages: list[dict[str, Any]] = [{"role": "system", "content": self._v2_system_prompt(storey_names, source_preference)}]
+        tool_definitions = [*TOOL_DEFINITIONS, SUBMIT_FINDING_VERDICT_TOOL] if include_verdict_tool else TOOL_DEFINITIONS
         for turn in recent_turns or []:
             messages.append({"role": "user", "content": turn["question"]})
             messages.append({"role": "assistant", "content": turn["answer"]})
@@ -2264,7 +2543,7 @@ Return only a corrected MultiQueryPlan JSON object."""
             # has already been streamed live by then, that path now
             # appends a clear caveat to what was actually shown rather
             # than trying to retroactively hide it.
-            stream_iter = provider.stream_turn(messages=messages, tools=TOOL_DEFINITIONS, purpose="v2_tool_turn").__aiter__()
+            stream_iter = provider.stream_turn(messages=messages, tools=tool_definitions, purpose="v2_tool_turn").__aiter__()
             while True:
                 remaining = (deadline - time.perf_counter()) if deadline is not None else None
                 if remaining is not None and remaining <= 0:
@@ -2429,6 +2708,12 @@ Return only a corrected MultiQueryPlan JSON object."""
                         # sibling execution_metadata construction above, which sets the same
                         # "source" convention this mirrors).
                         "normalized_request": question, "subplans": all_plans, "source": self._v2_source_label(all_plans),
+                        # D-064 item 2: the model's own structured
+                        # submit_finding_verdict call this turn, if any --
+                        # `None` when this wasn't a finding investigation,
+                        # or when it was but the model never called the
+                        # tool (e.g. the turn ended some other way first).
+                        "finding_verdict": state.get("finding_verdict"),
                     },
                     reconciliation_items=[ReconciliationItem.model_validate(item) for item in all_reconciliation_items],
                 )
@@ -2510,6 +2795,14 @@ Return only a corrected MultiQueryPlan JSON object."""
                 # contribution instead of accumulating. See
                 # _v2_dispatch_tool's own "tool_call_delta" comment.
                 state["tool_call_count"] = state.get("tool_call_count", 0) + result.get("tool_call_delta", 0)
+                # D-064 item 2: if this call was submit_finding_verdict,
+                # carry its raw arguments through to the turn's own final
+                # execution_metadata (see the AgentResponse construction
+                # below) -- the last call wins if the model somehow submits
+                # more than once, matching "call this exactly once, as your
+                # last action" in the tool's own description.
+                if "finding_verdict" in result:
+                    state["finding_verdict"] = result["finding_verdict"]
                 # Independent-review finding, 2026-09-17: the turn's overall
                 # disposition used to be decided purely from "did *any*
                 # tool call this turn leave a citation," ignoring every
@@ -3069,6 +3362,7 @@ Return only a corrected MultiQueryPlan JSON object."""
             return (
                 f"**{element.get('entity_type', plan.entity_type)}** — {element.get('name', 'Unnamed')}\n\n"
                 f"- Storey: {record.get('storey') or 'Unassigned'}\n"
+                f"- Tag: {element.get('tag') or '(none)'}\n"
                 f"- GlobalId: `{element.get('global_id')}`\n"
                 f"- ExpressID: `{element.get('express_id')}`\n"
                 f"- Key properties:\n{property_lines}"
