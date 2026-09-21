@@ -17,7 +17,12 @@ import asyncio
 from pathlib import Path
 
 import pytest
-from app.agent.graph import _PROPERTY_SAMPLE_CAP, AgentService
+from app.agent.graph import (
+    _LARGE_LIST_SAMPLE_SIZE,
+    _PROPERTY_SAMPLE_CAP,
+    _V2_TOOL_RESULT_LIST_CAP,
+    AgentService,
+)
 from app.config import Settings
 from app.schemas.models import VerificationStatus
 from app.services import ProjectResources, ServiceContainer
@@ -546,6 +551,69 @@ def test_v2_caps_each_sample_items_own_properties_when_the_list_is_large(tmp_pat
     # A field this test's own question needs survives the alphabetical
     # slice -- the cap is not blind to every real field.
     assert "'Height'" in tool_payload_text or '"Height"' in tool_payload_text
+
+
+def test_v2_shrinks_the_large_list_sample_size_independently_of_the_trigger_threshold(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """D-067 follow-up (2026-09-21): the property-cap fix above (verified
+    against a single `get_element_properties` call) was NOT enough on its
+    own -- a live retest minutes after deploying it reproduced the exact
+    same real Azure OpenAI 429 again on the exact same real building.
+    Measured directly against the real `DigitalHub_FM-ARC_v2.ifc` file
+    post-fix: `_V2_TOOL_RESULT_LIST_CAP` (40) sample items, each already
+    trimmed to `_PROPERTY_SAMPLE_CAP` properties, still cost ~40-42KB
+    (~10K tokens) *per call*, because each item's own fixed metadata
+    (global_id, express_id, a long Revit-style `name`, the JSON key names
+    themselves) is a real cost the per-property trim never touched. Two
+    such calls in one turn (doors, windows -- the exact live-reproduced
+    pattern) still totaled ~20K tokens.
+
+    `total_count`/`distinct_value_summary` already carry the turn's own
+    exhaustive, ungeussed-at facts regardless of how many raw items are
+    sampled, so `_LARGE_LIST_SAMPLE_SIZE` (10) shrinks the actual sample
+    size independently of `_V2_TOOL_RESULT_LIST_CAP` (which stays the
+    *trigger* threshold, unchanged -- a list of 24-40 items, like Duplex's
+    real IfcWindow count, still never engages this path at all). Verified
+    here with the same 45-item, 30-properties-per-item synthetic shape as
+    the test above: asserts at most `_LARGE_LIST_SAMPLE_SIZE` items are
+    actually sent, not `_V2_TOOL_RESULT_LIST_CAP`.
+    """
+    fake = FakeModelProvider()
+    fake.script("v2_tool_turn", ScriptedToolCalls([("get_element_properties", {"entity_type": "IfcDoor"})]))
+    fake.script("v2_tool_turn", ScriptedAnswer(["There are 45 doors."]))
+    _, service, resources = _service(tmp_path, fake)
+
+    items = []
+    for i in range(45):
+        properties = {f"ZVendorParam{n:02d}": f"value{n}" for n in range(29)}
+        properties["Height"] = 2.1
+        # A distinct, greppable tag per item so the actual sample count
+        # sent to the model can be counted directly from the payload text.
+        items.append({"element": {"express_id": 1000 + i, "entity_type": "IfcDoor", "tag": f"UNIQUEDOORTAG{i:03d}"}, "storey": "Level 01", "properties": properties})
+
+    real_dispatch = AgentService._v2_dispatch_tool
+
+    def synthetic_large_property_rich_dispatch(self, tool_call, state):
+        if tool_call.tool_name == "get_element_properties":
+            return {
+                "tool_result": {"answer": "Found 45 matching elements.", "disposition": "answered", "citations": [], "verification": VerificationStatus(status="verified", reason="test").model_dump(), "result_value": items},
+                "evidence": [], "tool_call_delta": 1, "plan": [{"entity_type": "IfcDoor", "source": "ifc"}],
+            }
+        return real_dispatch(self, tool_call, state)
+
+    monkeypatch.setattr(AgentService, "_v2_dispatch_tool", synthetic_large_property_rich_dispatch)
+
+    response = asyncio.run(_run(service, resources, "How many doors are there?", "eval-large-list-sample-size"))
+
+    assert response.disposition.value == "answered"
+    second_call_messages = fake.calls[-1].prompt
+    tool_message_start = second_call_messages.index("'role': 'tool'")
+    tool_payload_text = second_call_messages[tool_message_start:]
+
+    sent_item_count = tool_payload_text.count("UNIQUEDOORTAG")
+    assert sent_item_count <= _LARGE_LIST_SAMPLE_SIZE
+    assert sent_item_count < _V2_TOOL_RESULT_LIST_CAP  # the actual regression: this used to equal the (much larger) trigger cap
+    # The exhaustive total is still exact even though far fewer raw items were sampled.
+    assert "\"total_count\": 45" in tool_payload_text or "'total_count': 45" in tool_payload_text
 
 
 def test_narrative_consistency_check_tolerates_natural_rounding_of_a_measurement() -> None:
