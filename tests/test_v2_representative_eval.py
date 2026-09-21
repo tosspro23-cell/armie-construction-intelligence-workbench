@@ -692,6 +692,66 @@ def test_v2_exempts_a_tag_cited_only_via_reconciliations_pdf_side_mark_locator(t
     assert response.verification.status == "verified"  # not "unverified" -- the mark-cited tag is a real, legitimate restatement
 
 
+def test_v2_recognizes_a_distinct_value_summarys_own_counts_as_real_facts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """D-069 (2026-09-21), found live minutes after redeploying D-068 on the
+    same real DigitalHub building, same finding: a fully correct answer
+    restating "Qto_DoorBaseQuantities.Width = 1.09 for 39 doors" -- a real,
+    exact count taken straight from `distinct_value_summary` (itself
+    computed from the full, real 50-door list) -- was flagged unverified.
+
+    Root cause: `facts` (this call's own recognized numeric facts) is
+    computed from the *raw* tool result, before `distinct_value_summary`
+    is even built for the model-facing payload -- so a per-value count that
+    only exists inside that summary (not as any single item's own leaf
+    value) was never a recognized fact, even though the model is
+    specifically told to use `distinct_value_summary` for exactly this
+    kind of question (see its own "note" field, D-067/D-068's `_V2_TOOL_
+    RESULT_LIST_CAP` branch).
+
+    Verified here with a synthetic 45-item list (over `_V2_TOOL_RESULT_
+    LIST_CAP`) where exactly 39 items share one height value -- asserts an
+    answer restating that real count is verified, and a fabricated count
+    for the same field is still caught.
+    """
+    fake = FakeModelProvider()
+    fake.script("v2_tool_turn", ScriptedToolCalls([("get_element_properties", {"entity_type": "IfcDoor"})]))
+    fake.script("v2_tool_turn", ScriptedAnswer(["Height = 2.045 for 39 doors, and Height = 2.25 for the remaining 6 doors."]))
+    _, service, resources = _service(tmp_path, fake)
+
+    items = []
+    for i in range(45):
+        height = 2.045 if i < 39 else 2.25  # exactly 39 items share this value -- not derivable from any single item alone
+        items.append({"element": {"express_id": 1000 + i, "entity_type": "IfcDoor", "tag": str(2000 + i)}, "storey": "Level 01", "properties": {"Height": height}})
+
+    real_dispatch = AgentService._v2_dispatch_tool
+
+    test_citation = {"evidence_id": "test-citation", "source_type": "ifc", "label": "test", "locator": {}, "project_id": "demo", "source_set_id": "demo-v1", "source_file": "test.ifc"}
+
+    def synthetic_large_list_dispatch(self, tool_call, state):
+        if tool_call.tool_name == "get_element_properties":
+            return {
+                "tool_result": {"answer": "Found 45 matching elements.", "disposition": "answered", "citations": [test_citation], "verification": VerificationStatus(status="verified", reason="test").model_dump(), "result_value": items},
+                "evidence": [], "tool_call_delta": 1, "plan": [{"entity_type": "IfcDoor", "source": "ifc"}],
+            }
+        return real_dispatch(self, tool_call, state)
+
+    monkeypatch.setattr(AgentService, "_v2_dispatch_tool", synthetic_large_list_dispatch)
+
+    response = asyncio.run(_run(service, resources, "How many doors have each height value?", "eval-distinct-value-count-fact"))
+
+    assert response.disposition.value == "answered"
+    assert response.verification.status == "verified"  # the real 39/6 split, straight from distinct_value_summary, is not fabrication
+
+    # A fabricated count for the same field must still be caught.
+    fake_bad = FakeModelProvider()
+    fake_bad.script("v2_tool_turn", ScriptedToolCalls([("get_element_properties", {"entity_type": "IfcDoor"})]))
+    fake_bad.script("v2_tool_turn", ScriptedAnswer(["Height = 2.045 for 99999 doors."]))
+    _, service_bad, resources_bad = _service(tmp_path, fake_bad)
+    monkeypatch.setattr(AgentService, "_v2_dispatch_tool", synthetic_large_list_dispatch)
+    response_bad = asyncio.run(_run(service_bad, resources_bad, "How many doors have each height value?", "eval-distinct-value-count-fact-bad"))
+    assert response_bad.verification.status == "unverified"
+
+
 def test_narrative_consistency_check_tolerates_natural_rounding_of_a_measurement() -> None:
     """Owner-reported, 2026-09-17 (found live): a real space_distance call
     returning {"value_m": 5.234, ...} (the same shape aggregate_quantity

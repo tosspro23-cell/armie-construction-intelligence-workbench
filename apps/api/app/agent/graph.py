@@ -2976,6 +2976,22 @@ Return only a corrected MultiQueryPlan JSON object."""
                     # from the full, untruncated list before capping, so
                     # it stays exhaustive even when sample_items isn't.
                     distinct_value_summary = self._distinct_value_summary(tool_result_value)
+                    # D-069 (2026-09-21), found live minutes after redeploying
+                    # D-068: a fully correct answer restating "39 doors" --
+                    # distinct_value_summary's own real per-value count
+                    # (Qto_DoorBaseQuantities.Width = 1.09 for 39 of the 50
+                    # real doors) -- was flagged unverified. `facts` above is
+                    # computed from the raw, pre-summary list, before this
+                    # summary exists, so it never saw these counts; recorded
+                    # here as this same call's own additional facts, using
+                    # the same rule already established for a plain
+                    # per-bucket-count dict shape (`_numeric_tokens_from_
+                    # result_value`'s "group_elements_by_storey-like" branch
+                    # naturally applies to `distinct_value_summary`'s own
+                    # {value: count} inner dicts with zero new special-casing).
+                    distinct_value_summary_facts = self._numeric_tokens_from_result_value(distinct_value_summary)
+                    if distinct_value_summary_facts:
+                        expected_numeric_facts.append((self._entity_terms_for(result.get("plan", [{}])[0].get("entity_type")), distinct_value_summary_facts))
                     # D-067: each *item* also gets its own `properties` dict
                     # bounded (see `_cap_item_properties`'s own docstring) --
                     # a real, richly-annotated element (a real Revit export's

@@ -3327,5 +3327,39 @@ Regression test, verified end-to-end through `invoke_v2` so the real citation-sc
 exercised, not just its consumer:
 `tests/test_v2_representative_eval.py::test_v2_exempts_a_tag_cited_only_via_reconciliations_pdf_side_mark_locator`.
 
-472 tests pass; `ruff` clean; `npm run build` clean. Pending: live reverification against the real
+472 tests pass; `ruff` clean; `npm run build` clean.
+
+**Amended 2026-09-21, live-reverified once deployed: the two bugs above were fixed, but the very
+next real investigation on the same finding surfaced a sixth bug (D-069) in the same check
+family.** Rejected the stale pre-fix proposal and re-investigated finding 2553900 fresh: no 429
+(D-067 held), and the two just-fixed false positives from D-068 didn't recur -- but a new, fully
+correct answer restating "Qto_DoorBaseQuantities.Width = 1.09 for 39 doors" (a real, exact count
+straight from `distinct_value_summary`, itself built from the real, full 50-door list) was flagged
+unverified. Root-caused directly against the live trace again (same `/api/v1/traces/{id}` method as
+D-068, not guessed): `facts` (this call's own recognized numeric facts, used to build `expected_
+numeric_facts`) is computed from the *raw* tool result *before* `distinct_value_summary` is even
+built for the model-facing payload -- so a per-value count that only exists inside that summary (not
+as any single item's own leaf value, only meaningful in aggregate) was never a recognized fact, even
+though the model is specifically instructed to use `distinct_value_summary` for exactly this kind of
+question. Fixed by additionally running `_numeric_tokens_from_result_value` over `distinct_value_
+summary` itself and recording its own counts as this same call's additional facts -- the existing
+"group_elements_by_storey-like" dict-branch already handles a `{value: count}` shape correctly with
+no new special-casing needed. Regression test constructs a 45-item list with an exact, non-derivable-
+from-any-single-item 39/6 split and asserts an answer restating that real split is verified, while a
+fabricated count for the same field is still caught:
+`tests/test_v2_representative_eval.py::test_v2_recognizes_a_distinct_value_summarys_own_counts_as_real_facts`.
+
+473 tests pass; `ruff` clean; `npm run build` clean. Pending: live reverification against the real
 deployed app once this fix merges and deploys.
+
+**A pattern worth naming plainly, six real defects into the same check across five deploy-and-
+retest cycles in one session:** each fix has been correct and narrowly scoped, and each has closed
+the exact gap it targeted -- but a heuristic verifier built out of an ever-growing set of "numbers
+this call's result could truthfully contain" extraction rules keeps meeting new real shapes a
+complex building's own real data produces (a restated tag, a restated count, a restated distinct-
+value split, ...). If a seventh such gap surfaces on further real use, that repetition itself would
+be a signal worth raising to the owner as its own question -- not "fix the next one" again, but
+whether this class of check should be redesigned around a different contract (e.g., every claimed
+number required to trace to a specific, tagged source value at generation time) rather than
+extended once more. Not yet reached -- but worth naming now rather than only after a seventh
+incident makes it obvious in hindsight.
