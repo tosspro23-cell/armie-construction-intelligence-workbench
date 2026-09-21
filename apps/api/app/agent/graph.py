@@ -127,6 +127,27 @@ _V2_TOOL_RESULT_LIST_CAP = 40
 # established -- see `_cap_item_properties` below.
 _PROPERTY_SAMPLE_CAP = 15
 
+# D-067 follow-up (2026-09-21), found live minutes after the fix above
+# deployed: `_PROPERTY_SAMPLE_CAP` alone was not enough. Measured directly
+# against the real file post-fix: `_V2_TOOL_RESULT_LIST_CAP` (40) sample
+# items, each already trimmed to `_PROPERTY_SAMPLE_CAP` properties, still
+# cost ~40-42KB (~10K tokens) *per call* -- because each item's own fixed
+# metadata (global_id, express_id, a long Revit-style `name`, the JSON key
+# names themselves, repeated 40 times) is a real cost the per-property
+# trim never touched. Two such calls in one turn (doors, windows -- the
+# exact live-reproduced pattern) still totaled ~20K tokens, and a live
+# retest minutes after deploying the property-cap fix alone reproduced the
+# same real 429 again. `total_count` and `distinct_value_summary` already
+# carry the turn's own exhaustive, unguessed facts regardless of how many
+# raw items are sampled (see `_distinct_value_summary`'s own docstring) --
+# so the *sample size itself* is decoupled from the trigger threshold
+# here: a list only needs to be "large" (> `_V2_TOOL_RESULT_LIST_CAP`) to
+# engage this whole path at all, but the actual number of raw items shown
+# is this smaller, separate constant. Measured post-fix: two such calls in
+# one turn now total ~6K tokens combined (down from ~69K pre-fix, ~20K
+# after the property-cap fix alone).
+_LARGE_LIST_SAMPLE_SIZE = 10
+
 
 class AgentService:
     """LangGraph orchestration for safe tool-routed project questions."""
@@ -2953,14 +2974,14 @@ Return only a corrected MultiQueryPlan JSON object."""
                     # `_V2_TOOL_RESULT_LIST_CAP` items' worth of full property
                     # dicts alone exceed a real deployment's per-request
                     # token budget.
-                    sample_items = [self._cap_item_properties(item) for item in tool_result_value[:_V2_TOOL_RESULT_LIST_CAP]]
+                    sample_items = [self._cap_item_properties(item) for item in tool_result_value[:_LARGE_LIST_SAMPLE_SIZE]]
                     any_properties_capped = any("properties_omitted_count" in item for item in sample_items if isinstance(item, dict))
                     tool_result_value = {
                         "total_count": len(tool_result_value),
                         "sample_items": sample_items,
                         "distinct_value_summary": distinct_value_summary,
                         "note": (
-                            f"{len(tool_result_value) - _V2_TOOL_RESULT_LIST_CAP} further item(s) omitted for brevity; the total_count above is exact. "
+                            f"{len(tool_result_value) - len(sample_items)} further item(s) omitted for brevity; the total_count above is exact. "
                             "sample_items is only a partial sample -- do not infer a distinct-value/type/size count from it alone. "
                             "distinct_value_summary is computed from ALL items (not just the sample) and is the exact, exhaustive "
                             "count of distinct values for fields with a small number of distinct values -- use it, not "

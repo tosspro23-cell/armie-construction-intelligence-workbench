@@ -3276,3 +3276,28 @@ a full rewrite of `stream_turn`'s event parsing -- scoped as its own SPEC if pur
 into this fix.
 
 469 tests pass; `ruff` clean; `npm run build` clean.
+
+**Amended 2026-09-21, minutes after deploying: fix 1 above was not enough on its own, confirmed by
+a live retest, not assumed.** The owner retested the exact same real building directly against the
+deployed app and hit the same real 429 again -- on the very next attempt after this fix's own
+deploy finished. Rather than guess again, measured directly against the real file with the fix
+applied: `_V2_TOOL_RESULT_LIST_CAP` (40) sample items, each already trimmed to
+`_PROPERTY_SAMPLE_CAP` properties, still cost ~40-42KB (~10K tokens) *per call* -- because each
+item's own fixed metadata (`global_id`, `express_id`, a long Revit-style `name`, the JSON key names
+themselves, repeated 40 times) is a real cost the per-property trim never touched. Two such calls in
+one turn (doors, windows -- the exact live-reproduced pattern) still totaled ~20K tokens, enough to
+still occasionally exceed the deployment's real per-request budget.
+
+`total_count` and `distinct_value_summary` already carry this turn's own exhaustive, unguessed facts
+regardless of how many raw items are actually sampled (see `_distinct_value_summary`'s own
+docstring) -- so the actual sample size sent to the model is now a separate, smaller constant
+(`_LARGE_LIST_SAMPLE_SIZE = 10`), decoupled from `_V2_TOOL_RESULT_LIST_CAP` (40, unchanged, still
+only the *trigger* threshold for engaging this whole path -- a list of 24-40 items, like Duplex's
+real IfcWindow count, still never enters it at all). Measured post-fix: two such calls in one turn
+now total ~6K tokens combined -- down from ~69K pre-fix, ~20K after the property-cap fix alone.
+Regression test reproduces the same 45-item/30-properties-per-item shape and asserts the actual
+sent item count is bounded by the new, smaller constant, not the trigger threshold:
+`tests/test_v2_representative_eval.py::test_v2_shrinks_the_large_list_sample_size_independently_of_the_trigger_threshold`.
+
+470 tests pass; `ruff` clean; `npm run build` clean. Pending: live reverification against the real
+deployed app once this fix merges and deploys (see PROJECT_STATE.md for the outcome once run).
