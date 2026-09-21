@@ -379,6 +379,13 @@ def test_investigate_finding_question_tells_the_model_the_known_entity_type(monk
     first_prompt = fake.calls[0].prompt
     assert "This element's real IFC entity type is IfcWindow" in first_prompt
     assert "entity_type='IfcWindow'" in first_prompt
+    # D-072: the question must also tell the model how to look this exact
+    # element up precisely (tags=[...]), not just which entity_type to use
+    # -- see build_finding_investigation_question's own D-072 docstring for
+    # the live-observed defect (a Tag passed as global_ids, which can never
+    # match) this closes.
+    assert "tags=['W02']" in first_prompt
+    assert "do not guess a GlobalId" in first_prompt
 
 
 def test_investigate_finding_question_admits_entity_type_is_unknown_for_missing_in_ifc(monkeypatch, tmp_path) -> None:
@@ -400,6 +407,7 @@ def test_investigate_finding_question_admits_entity_type_is_unknown_for_missing_
     assert fake.calls
     first_prompt = fake.calls[0].prompt
     assert "does not indicate whether this element is an IfcDoor or an IfcWindow" in first_prompt
+    assert "tags=['W05']" in first_prompt
     assert "check both entity types" in first_prompt
 
 

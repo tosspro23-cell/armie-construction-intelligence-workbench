@@ -1036,22 +1036,41 @@ Return only a corrected MultiQueryPlan JSON object."""
 
     @staticmethod
     def _entity_type_guidance(finding: EngineeringFinding) -> str:
-        """D-070: the one sentence every investigation-question branch below
-        interpolates so the model is told which IFC entity type this tag
-        actually is, instead of having to guess between IfcDoor and
-        IfcWindow itself -- see build_finding_investigation_question's own
-        docstring for the live-observed defect this closes.
+        """D-070/D-072: the guidance sentence(s) every investigation-question
+        branch below interpolates so the model is told which IFC entity
+        type this tag actually is (D-070), instead of having to guess
+        between IfcDoor and IfcWindow itself, and how to look this exact
+        element up precisely (D-072) -- see build_finding_investigation_
+        question's own docstring for the live-observed defects this closes.
+
+        D-072 (2026-09-21, found live): even once the entity type is
+        correct, a real investigation was observed calling
+        `get_element_properties(entity_type=IfcWindow, global_ids=
+        ['2543664'])` -- passing this finding's own Tag as if it were a
+        GlobalId, which can never match (GlobalId is a different, internal
+        identifier the model has no way to already know). `get_element_
+        properties` now accepts `tags` (matching the element's own real
+        Tag/Mark attribute directly), so the model is told explicitly to
+        use it instead of guessing a GlobalId or relying on an unfiltered
+        query's sample happening to include this one tag.
         """
         if finding.entity_type:
             return (
                 f"This element's real IFC entity type is {finding.entity_type} -- when calling "
                 f"get_element_properties, count_elements, or group_elements_by_storey, use "
                 f"entity_type='{finding.entity_type}' for this tag; do not query a different entity type "
-                "for it."
+                f"for it. To look up this exact element's own properties, call get_element_properties with "
+                f"entity_type='{finding.entity_type}' and tags=['{finding.tag}'] together -- do not guess a "
+                "GlobalId (a different, internal identifier this tag is not), and do not rely on an "
+                "unfiltered entity_type query, which only returns a sample and may not include this tag."
             )
         return (
             "The reconciliation data does not indicate whether this element is an IfcDoor or an IfcWindow -- "
-            "check both entity types when searching the IFC model, rather than assuming one."
+            "check both entity types when searching the IFC model, rather than assuming one. To look up this "
+            f"exact element's own properties under either type, call get_element_properties with "
+            f"tags=['{finding.tag}'] -- do not guess a GlobalId (a different, internal identifier this tag is "
+            "not), and do not rely on an unfiltered entity_type query, which only returns a sample and may "
+            "not include this tag."
         )
 
     @staticmethod
@@ -1115,6 +1134,23 @@ Return only a corrected MultiQueryPlan JSON object."""
         exact type to use when it's known, and says plainly that it isn't
         known otherwise, rather than silently guessing one on the model's
         behalf.
+
+        D-072 (2026-09-21, found live in the very next real investigation
+        after D-070 deployed): the entity-type fix above closed the wrong-
+        *type* mistake, but the same investigation then called `get_
+        element_properties(entity_type="IfcWindow", global_ids=
+        ["2543664"])` -- the correct type, but passing this finding's own
+        Tag as a `global_ids` value, which filters on the IFC model's
+        internal GUID and can never match a Tag string. There was no tool
+        parameter that matched on Tag at all; the only fallback (an
+        unfiltered `entity_type` query) gets capped to a small sample for
+        a real building's element count (D-067), so whether this tag
+        happened to land in that sample was pure luck -- it didn't, and
+        the investigation exhausted its budget checking the wrong rows
+        before genuinely giving up. Fixed at the tool level: `get_element_
+        properties` now accepts `tags` (matches `element.Tag` directly,
+        the same attribute `_reconciliation_ifc_items` already keys on);
+        `_entity_type_guidance` now also tells the model to use it.
         """
         if finding.finding_type == "missing_in_pdf":
             return (
