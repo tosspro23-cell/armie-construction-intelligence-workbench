@@ -3416,5 +3416,59 @@ actually fail against the pre-fix code (temporarily stashed just the source file
 tests, reran) before being confirmed to pass against the fix -- this project's own verification
 standard, not tests-passing alone.
 
-476 tests pass; `ruff` clean; `npm run build` clean. Not yet deployed/live-reverified at the time
-of this entry -- see PROJECT_STATE.md for the current status of that.
+476 tests pass; `ruff` clean; `npm run build` clean. **Merged to `main`; not yet deployed/live-
+reverified at the time of this entry** -- see PROJECT_STATE.md for the current status of that.
+
+## D-071 — finding investigation presentation: promote the verdict's own basis, name the tool calls, tie the trace to the decision
+
+**Owner product feedback, 2026-09-21**, on a live investigation result for finding 2543664
+(verdict `inconclusive`): the "Agent-proposed resolution" card rendered a single long, flat,
+undifferentiated free-text block -- what tools were tried, which failed, the verdict rationale, and
+follow-up suggestions all run together -- which a reviewer deciding approve/reject had to read in
+full to extract the actual reason, with no visible distinction between "the conclusion" and "the
+play-by-play of how it got there." Separately asked whether the right-side Decision Trace panel
+could better surface the decision/tool-calling process it already computes but does not show.
+
+Assessed before changing anything (see this session's own transcript): the underlying data was
+already structured, not the free-text block that looked unstructured -- `submit_finding_verdict`
+(`apps/api/app/agent/tools.py`) already requires a compact `basis` argument ("one or two sentences
+naming the specific tool result(s) that support this verdict"), and `AgentProposal.verdict`/
+`verdict_basis` (D-064 item 2) already carry it as separate fields from the full free-text
+`rationale`. The defect was purely in the presentation layer: `Findings.tsx` buried `verdict_basis`
+inside the same collapsed `<details>` as the full `rationale`, so the structured, compact answer a
+reviewer actually needs was no easier to find than the unstructured transcript around it.
+
+Fixed, `apps/web/src/Findings.tsx`: `verdict_basis` now renders in the always-visible summary,
+directly under the `Verdict` row -- no click needed to see why the agent concluded what it did. The
+collapsed section is relabeled "Full investigation transcript, for audit" (previously "Show full
+reasoning and evidence"), reframing it from "read this to understand the answer" to "open this only
+if you need the raw record." An `inconclusive` verdict gets its own distinct caveat (parallel to the
+existing `unverified` one) -- previously it rendered identically to a confident verdict, when "no
+answer" and "an answer" call for different reviewer action.
+
+Fixed, `apps/api/app/agent/graph.py`/`apps/web/src/DecisionStory.tsx`: the Decision Trace panel's
+Execution step showed a bare tool-call count with no way to see *which* tool was called with *what*
+arguments short of opening a raw JSON trace event per step -- and for the common case of a plain
+(non-grouped) IFC tool call, no distinguishing audit event existed for that step at all (only
+`group_elements_by_storey`'s grouped-execution path audited its own `entity_type`). `_v2_dispatch_
+tool` now audits one `tool_called` event (step `v2_tool_call`) per dispatched call, before it runs
+-- generic to every V2 turn, not just investigations, and directly useful for spotting exactly the
+kind of tool-selection mistake D-070 fixed (a wrong `entity_type` argument) at a glance instead of
+needing the live-trace-fetching diagnostic method D-068/D-069 needed. The Execution step renders
+this list compactly; the Result step additionally surfaces `execution_metadata.finding_verdict`
+(verdict + basis, already computed since D-064 but never shown anywhere in this panel) so the
+trace's own last step ties directly back to the decision it produced, instead of requiring a
+reviewer to leave the Decision Trace panel and go to the Findings tab to see what was concluded.
+
+Verified against a real running instance, not just the test suite: started the real FastAPI app
+locally (`uvicorn`, demo fixture) with a scripted `FakeModelProvider` wired in via a patched
+`lifespan`, drove the actual `Findings`/`DecisionStory` UI in a real browser end-to-end (reconcile
+-> acknowledge -> start action -> investigate -> inconclusive proposal), and confirmed the rendered
+DOM matches the intent: `verdict_basis` visible without expanding anything, the `inconclusive`
+caveat distinct from the `unverified` one, the transcript section collapsed by default, and the
+Decision Trace's Execution/Result steps showing the real dispatched tool calls and the real verdict
+respectively. Regression test, `tests/test_v2_agent_endpoint.py::test_v2_dispatched_tool_calls_are_
+individually_audited`: confirmed to fail against the pre-fix code (temporarily reverted just
+`graph.py`, kept the new test) before confirming it passes against the fix.
+
+474 tests pass; `ruff` clean; `npm run build` clean.

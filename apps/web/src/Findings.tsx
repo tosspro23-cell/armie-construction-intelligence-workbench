@@ -79,7 +79,7 @@ export function formatDims(width: number | null | undefined, height: number | nu
 // generic "replace underscores with spaces") so a future verdict value
 // added server-side without a matching case here shows as itself
 // (readable, if unstyled) rather than silently rendering nothing.
-function formatVerdict(verdict: AgentProposal["verdict"]): string {
+export function formatVerdict(verdict: AgentProposal["verdict"]): string {
   switch (verdict) {
     case "dimension_confirmed": return "Dimension confirmed";
     case "genuine_omission": return "Genuine omission";
@@ -205,6 +205,27 @@ export function Findings({ projectId, onInvestigate, refreshToken, investigating
               contained (rationale + evidence, from the finding's own
               persisted AgentProposal) so approval never has to depend on
               "you happened to still have the chat open." */}
+          {/* Owner product feedback, 2026-09-21: the model's own compact
+              `verdict_basis` (submit_finding_verdict's own required "one or
+              two sentences naming the specific tool result(s) that support
+              this verdict" argument) used to be buried inside the collapsed
+              "Show full reasoning" section, alongside the full free-text
+              `rationale` -- a long, undifferentiated play-by-play of every
+              tool call tried, including failed attempts, that a reviewer
+              deciding approve/reject had to read in full to find the actual
+              reason. The data was already structured (this project's own
+              "code still validates a structured claim, not just a
+              free-text one" discipline -- see build_finding_proposal's own
+              docstring); only the presentation buried it. `verdict_basis`
+              now renders in the always-visible summary, right under the
+              verdict itself; `rationale` moves to a section explicitly
+              relabeled as the full transcript, for audit rather than as
+              the thing a reviewer is expected to read to understand the
+              conclusion. An `inconclusive` verdict also gets its own
+              distinct treatment (parallel to the existing `unverified`
+              caveat below) instead of rendering identically to a confident
+              one -- "no answer" and "an answer" are different things for a
+              reviewer to act on. */}
           {finding.pending_proposal && <div className="finding-proposal">
             <div className="finding-proposal-header">
               <strong>Agent-proposed resolution</strong>
@@ -217,16 +238,18 @@ export function Findings({ projectId, onInvestigate, refreshToken, investigating
                   categorical instead ("genuine omission" is not a width),
                   so it gets its own row rather than a permanently-empty
                   "Proposed dimensions: —". */}
-              {finding.pending_proposal.verdict && <div><dt>Verdict</dt><dd>{formatVerdict(finding.pending_proposal.verdict)}</dd></div>}
+              {finding.pending_proposal.verdict && <div><dt>Verdict</dt><dd className={finding.pending_proposal.verdict === "inconclusive" ? "verdict-inconclusive" : undefined}>{formatVerdict(finding.pending_proposal.verdict)}</dd></div>}
               {(finding.pending_proposal.proposed_width_m != null || finding.pending_proposal.proposed_height_m != null) &&
                 <div><dt>Proposed dimensions</dt><dd>{formatDims(finding.pending_proposal.proposed_width_m, finding.pending_proposal.proposed_height_m)}</dd></div>}
               <div><dt>Evidence</dt><dd>{finding.pending_proposal.citations.length} citation(s) from the investigation</dd></div>
             </dl>
+            {finding.pending_proposal.verdict_basis && <p className="finding-proposal-basis">{finding.pending_proposal.verdict_basis}</p>}
+            {finding.pending_proposal.verdict === "inconclusive" &&
+              <p className="inconclusive-caveat">⚠ The agent could not reach a confident conclusion after genuinely trying more than one approach — this is not a proposed answer to approve, only a record of what was checked. See the full transcript below for what was tried, or investigate again.</p>}
             {finding.pending_proposal.verification.status === "unverified" &&
               <p className="unverified-caveat">⚠ This proposal's own numbers could not be fully confirmed against the agent's own tool results — please double-check before approving it.</p>}
             <details className="finding-proposal-detail">
-              <summary>Show full reasoning and evidence ({finding.pending_proposal.citations.length} citation(s))</summary>
-              {finding.pending_proposal.verdict_basis && <p className="finding-proposal-verdict-basis"><strong>Basis:</strong> {finding.pending_proposal.verdict_basis}</p>}
+              <summary>Full investigation transcript, for audit ({finding.pending_proposal.citations.length} citation(s))</summary>
               <p className="finding-proposal-rationale">{finding.pending_proposal.rationale}</p>
               {finding.pending_proposal.citations.length > 0 && <ul className="finding-proposal-citations">
                 {finding.pending_proposal.citations.map((citation) => <li key={citation.evidence_id}>

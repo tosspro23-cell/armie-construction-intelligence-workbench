@@ -2333,7 +2333,23 @@ Return only a corrected MultiQueryPlan JSON object."""
         Reuses V1's own execution/verification/evidence methods completely
         unchanged (this module's own established contract) -- no new
         computation logic exists for V2 anywhere in this codebase.
+
+        Owner product feedback, 2026-09-21: the Decision Trace panel's
+        Execution step showed a bare tool-call count with no way to see
+        *which* tool was called with *what* arguments short of opening a
+        raw JSON trace event per step -- for a finding investigation in
+        particular, this is exactly the information (which entity type,
+        which field) a reviewer needs to judge whether the investigation
+        actually looked in the right place (see D-070's own tool-selection
+        defect, found the same day). One audit event per dispatched call,
+        logged before any branch below executes, closes this generically
+        for every V2 turn, not just investigations.
         """
+        self._audit(
+            state, "v2_tool_call", "tool_called", f"V2 called {tool_call.tool_name}.",
+            {"tool_name": tool_call.tool_name, "arguments": tool_call.arguments},
+            planning_mode="tool_calling",
+        )
         if tool_call.tool_name == "submit_finding_verdict":
             # D-064 item 2: a local, no-op "tool" -- it queries no real
             # IFC/PDF/viewer source, only records the model's own
