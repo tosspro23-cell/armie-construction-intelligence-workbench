@@ -52,7 +52,7 @@ class FindingStore(Protocol):
         finding_type: str, severity: str, detail: str,
         ifc_width_m: float | None, ifc_height_m: float | None,
         pdf_width_m: float | None, pdf_height_m: float | None,
-        evidence_refs: list[str],
+        evidence_refs: list[str], entity_type: str | None = None,
     ) -> EngineeringFinding:
         """Create a new OPEN finding for (project_id, tag, finding_type), or
         update the existing *active* one in place (new detail/observed
@@ -140,7 +140,7 @@ class InMemoryFindingStore:
         finding_type: str, severity: str, detail: str,
         ifc_width_m: float | None, ifc_height_m: float | None,
         pdf_width_m: float | None, pdf_height_m: float | None,
-        evidence_refs: list[str],
+        evidence_refs: list[str], entity_type: str | None = None,
     ) -> EngineeringFinding:
         with self._lock:
             existing = next(
@@ -156,7 +156,7 @@ class InMemoryFindingStore:
                     "trace_id": trace_id, "detail": detail,
                     "ifc_width_m": ifc_width_m, "ifc_height_m": ifc_height_m,
                     "pdf_width_m": pdf_width_m, "pdf_height_m": pdf_height_m,
-                    "evidence_refs": evidence_refs, "updated_at": utc_now(),
+                    "evidence_refs": evidence_refs, "entity_type": entity_type, "updated_at": utc_now(),
                 })
                 self._findings[updated.finding_id] = updated
                 return updated
@@ -165,6 +165,7 @@ class InMemoryFindingStore:
                 finding_type=finding_type, severity=severity, status=FindingStatus.OPEN, detail=detail,
                 ifc_width_m=ifc_width_m, ifc_height_m=ifc_height_m,
                 pdf_width_m=pdf_width_m, pdf_height_m=pdf_height_m, evidence_refs=evidence_refs,
+                entity_type=entity_type,
                 history=[FindingHistoryEntry(from_status=None, to_status=FindingStatus.OPEN, actor_session_id=None, note="Detected by reconciliation.")],
             )
             self._findings[finding.finding_id] = finding

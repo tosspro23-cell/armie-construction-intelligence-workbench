@@ -157,6 +157,17 @@ class EngineeringFinding(BaseModel):
     severity: Literal["low", "medium", "high"]
     status: FindingStatus = FindingStatus.OPEN
     detail: str
+    # D-070 (2026-09-21, found live): reconciliation already knows this
+    # (ReconciliationItem.entity_type, populated by _synthesize_
+    # reconciliation_response) but it was never carried onto the persisted
+    # finding, so an "investigate this" turn had no way to tell the model
+    # whether a tag belongs to a door or a window -- get_element_properties
+    # requires entity_type and has no tag-lookup path, so the model had to
+    # guess, and a wrong guess (e.g. querying IfcDoor for a window tag)
+    # burned the whole tool-call budget on the wrong element before ending
+    # inconclusive. Nullable only for findings persisted before this field
+    # existed.
+    entity_type: str | None = None
     ifc_width_m: float | None = None
     ifc_height_m: float | None = None
     pdf_width_m: float | None = None

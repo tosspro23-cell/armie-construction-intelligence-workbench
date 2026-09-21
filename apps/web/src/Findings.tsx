@@ -34,6 +34,11 @@ type EngineeringFinding = {
   finding_id: string; project_id: string; source_set_id: string; trace_id: string; tag: string;
   finding_type: "dimension_mismatch" | "missing_in_pdf" | "missing_in_ifc";
   severity: "low" | "medium" | "high"; status: FindingStatus; detail: string;
+  // D-070: the real IFC entity type (IfcDoor/IfcWindow) this tag was
+  // matched to by reconciliation -- null for missing_in_ifc (there is no
+  // IFC element to have read a type from) or for a finding persisted
+  // before this field existed.
+  entity_type: string | null;
   ifc_width_m: number | null; ifc_height_m: number | null; pdf_width_m: number | null; pdf_height_m: number | null;
   evidence_refs: string[]; pending_proposal: AgentProposal | null;
   created_at: string; updated_at: string; last_actor_session_id: string | null;
@@ -158,6 +163,7 @@ export function Findings({ projectId, onInvestigate, refreshToken, investigating
             <span className={`finding-badge status-${finding.status}`}>{finding.status.replace(/_/g, " ")}</span>
             <span className={`finding-badge severity-${finding.severity}`}>{finding.severity}</span>
             <span className="finding-tag">{finding.tag}</span>
+            {finding.entity_type && <span className="finding-entity-type">{finding.entity_type}</span>}
             <span className="finding-type">{finding.finding_type.replace(/_/g, " ")}</span>
           </summary>
           <p className="story-step-body">{finding.detail}</p>

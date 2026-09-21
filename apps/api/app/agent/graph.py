@@ -1035,6 +1035,26 @@ Return only a corrected MultiQueryPlan JSON object."""
         return None
 
     @staticmethod
+    def _entity_type_guidance(finding: EngineeringFinding) -> str:
+        """D-070: the one sentence every investigation-question branch below
+        interpolates so the model is told which IFC entity type this tag
+        actually is, instead of having to guess between IfcDoor and
+        IfcWindow itself -- see build_finding_investigation_question's own
+        docstring for the live-observed defect this closes.
+        """
+        if finding.entity_type:
+            return (
+                f"This element's real IFC entity type is {finding.entity_type} -- when calling "
+                f"get_element_properties, count_elements, or group_elements_by_storey, use "
+                f"entity_type='{finding.entity_type}' for this tag; do not query a different entity type "
+                "for it."
+            )
+        return (
+            "The reconciliation data does not indicate whether this element is an IfcDoor or an IfcWindow -- "
+            "check both entity types when searching the IFC model, rather than assuming one."
+        )
+
+    @staticmethod
     def build_finding_investigation_question(finding: EngineeringFinding) -> str:
         """SPEC-M17 §4B, amended (owner decision, 2026-09-18): the question
         an "investigate this finding" turn actually asks V2, built
@@ -1078,12 +1098,30 @@ Return only a corrected MultiQueryPlan JSON object."""
         reconciliation data it had already read, which alone rules out
         either one being a second, hidden identity for the tag under
         investigation.
+
+        D-070 (2026-09-21, found live): `get_element_properties`/
+        `count_elements`/`group_elements_by_storey` all require an
+        `entity_type` argument and have no way to look an element up by
+        tag alone -- so without being told which one to use, the model
+        had to guess IfcDoor or IfcWindow, and a wrong guess (observed
+        live: `get_element_properties(entity_type="IfcDoor")` for a tag
+        that was actually an IfcWindow) burned the tool-call budget
+        investigating the wrong element entirely before ending
+        `inconclusive`. `finding.entity_type` is populated from
+        `ReconciliationItem.entity_type` -- known whenever the element was
+        actually found in the IFC model (dimension_mismatch, missing_in_pdf)
+        but not for missing_in_ifc (there is, by definition, no IFC element
+        to have read a type from) -- `_entity_type_guidance` states the
+        exact type to use when it's known, and says plainly that it isn't
+        known otherwise, rather than silently guessing one on the model's
+        behalf.
         """
         if finding.finding_type == "missing_in_pdf":
             return (
                 f"A door/window reconciliation flagged that tag '{finding.tag}' is present in the IFC model "
                 f"(width={finding.ifc_width_m} m, height={finding.ifc_height_m} m) but has no matching row on the "
-                f"PDF schedule: {finding.detail} Investigate using your available tools -- re-check this element's "
+                f"PDF schedule: {finding.detail} {AgentService._entity_type_guidance(finding)} Investigate using "
+                "your available tools -- re-check this element's "
                 "own real IFC properties, and try extract_pdf_field more than once with differently-worded "
                 f"questions (e.g. by dimension, by storey, by element type) before concluding tag '{finding.tag}' "
                 "genuinely does not appear anywhere on the schedule; also check nearby/similar elements (same "
@@ -1101,7 +1139,8 @@ Return only a corrected MultiQueryPlan JSON object."""
             return (
                 f"A door/window reconciliation flagged that tag '{finding.tag}' is present on the PDF schedule "
                 f"(width={finding.pdf_width_m} m, height={finding.pdf_height_m} m) but has no matching element in "
-                f"the IFC model: {finding.detail} Investigate using your available tools -- re-check the IFC model's "
+                f"the IFC model: {finding.detail} {AgentService._entity_type_guidance(finding)} Investigate using "
+                "your available tools -- re-check the IFC model's "
                 "own elements near this dimension/type (get_element_properties, count_elements) before concluding "
                 f"tag '{finding.tag}' genuinely was never modeled; also check nearby/similar elements (same storey, "
                 "same entity type) in case this element exists in the IFC model under a different tag. Before "
@@ -1119,7 +1158,8 @@ Return only a corrected MultiQueryPlan JSON object."""
             f"A door/window reconciliation flagged a dimension mismatch for tag '{finding.tag}': {finding.detail} "
             f"The IFC model currently records width={finding.ifc_width_m} m, height={finding.ifc_height_m} m. "
             f"The PDF schedule currently records width={finding.pdf_width_m} m, height={finding.pdf_height_m} m. "
-            "Investigate using your available tools -- re-check this element's own real IFC properties, and try "
+            f"{AgentService._entity_type_guidance(finding)} Investigate using your available tools -- re-check "
+            "this element's own real IFC properties, and try "
             "extract_pdf_field more than once with differently-worded questions before concluding the PDF schedule "
             "doesn't have this row; also check nearby/similar elements (same storey, same entity type) for a "
             "consistent pattern that corroborates one side. Do not give up after a single failed lookup -- make a "
@@ -2083,7 +2123,7 @@ Return only a corrected MultiQueryPlan JSON object."""
                     severity=self._FINDING_SEVERITY_BY_TYPE[item.status.value], detail=item.detail,
                     ifc_width_m=item.ifc_width_m, ifc_height_m=item.ifc_height_m,
                     pdf_width_m=item.pdf_width_m, pdf_height_m=item.pdf_height_m,
-                    evidence_refs=evidence_refs,
+                    evidence_refs=evidence_refs, entity_type=item.entity_type,
                 )
             except Exception as error:
                 self._audit(
