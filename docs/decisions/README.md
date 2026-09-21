@@ -3217,3 +3217,62 @@ owner's instruction to keep stress-testing rather than stop at the first green t
 surfaced this.
 
 465 tests pass; `ruff` clean; `npm run build` clean.
+
+## D-067 — a real building's own property-rich elements can make one tool call exceed the deployment's token budget
+
+Owner-reported: real-browser stress testing paused on RWTH DigitalHub with a real Azure OpenAI 429
+on every investigation attempt, even after 10+ minutes of retries. The owner asked for the actual
+root cause (how many model calls per investigation, why every attempt failed, how to optimize) --
+diagnosed by replaying the exact same tool calls locally against the real `DigitalHub_FM-ARC_v2.ifc`
+file (not guessed): `get_element_properties(entity_type="IfcDoor")`, already capped to
+`_V2_TOOL_RESULT_LIST_CAP` (40) items by D-064/D-065-era work, still measured ~2.2KB/item -- a real,
+professionally-authored Revit export attaches dozens of vendor-specific parameters to every element
+(German property names, e.g. `Abhängigkeiten.*`/`Grafiken.*`/`Sonstige.*`), unlike this project's own
+small synthetic fixtures. 40 such items alone approach ~22K tokens; the live investigation that
+reproduced the 429 called this tool twice in one turn (doors, then windows), together comfortably
+exceeding the deployment's real per-request token budget regardless of how long a retry waits --
+this was never about accumulated quota from repeated calls, a single request was already too large.
+
+Two independent fixes, both regression-tested against the exact failure shape:
+
+**1. Bound each sample item's own `properties` dict, not just how many items are sampled.**
+`_V2_TOOL_RESULT_LIST_CAP`'s existing "many items" branch already samples down to 40 items with an
+exhaustive `distinct_value_summary` computed from the full list -- it never bounded each sampled
+item's own property-dict size. New `_cap_item_properties`/`_PROPERTY_SAMPLE_CAP` (15) slices each
+item's properties to a stable, alphabetically-sorted subset with a disclosed
+`properties_omitted_count`, same "sample + exact count, never silently guessed" contract as the
+existing item-count cap. Deliberately does not try to guess which properties are "relevant" (e.g.
+keyword-matching "width"/"height") -- `get_element_properties` is documented to also answer
+material/fire-rating/load-bearing questions, and silently dropping every non-dimension field would
+quietly break those other, equally legitimate uses; a model that needs a specific omitted property
+can follow up with `global_ids` narrowed to one element to get it in full, uncapped.
+`tests/test_v2_representative_eval.py::test_v2_caps_each_sample_items_own_properties_when_the_list_is_large`.
+
+**2. A transient 429 is now retried, not surfaced as an immediate failure.** `stream_turn`'s model
+call had no retry logic at all -- confirmed by reading `azure_openai_provider.py` directly. Added a
+small, bounded retry (2 attempts, honoring the server's own `Retry-After` header, `openai.
+RateLimitError` specifically) around the streaming call's creation. This is a complementary fix for
+the *ordinary* case a 429 is a genuine short-lived burst, not a substitute for fix 1 above -- a
+request that is fundamentally too large (this incident's own root cause) will still 429 on retry
+regardless, by design (no amount of retrying should turn one slow request into a silent multi-minute
+hang). `tests/test_azure_openai_provider.py::test_stream_turn_retries_a_transient_rate_limit_and_
+then_succeeds`, `::test_stream_turn_gives_up_after_repeated_rate_limits_and_raises`,
+`::test_stream_turn_honors_the_servers_own_retry_after_header`.
+
+Separately researched, not implemented this pass: whether V2's per-tool "thinking" indicator could
+show real reasoning content instead of a bare placeholder. Confirmed live in `stream_turn`'s own
+Chat Completions call: the model's tool-selection decision round is not streamed at all (an
+architectural limit of Chat Completions tool-calling, not a bug) and no reasoning-summary text is
+requested or available via this API surface. Azure OpenAI's Responses API supports a real streamed
+reasoning summary for `gpt-5-mini` (`reasoning: {summary: "auto"}`, `response.reasoning_summary_
+text.delta` events -- confirmed against the installed `openai==1.109.1` SDK's own generated types),
+but this project's own `AzureOpenAIProvider` docstring already records that the Responses API
+returned a 404 against this exact Azure resource when first tried (SPEC-M3's first real deployment)
+and Azure's own docs state the Responses API requires the newer "v1" API surface, not the
+classic `api-version=YYYY-MM-DD` query-param versioning this deployment currently uses -- a
+genuinely different endpoint shape (different tool-call event names too, not just reasoning), not a
+config flag. Adopting it would need re-verifying the 404 against a current API version first, then
+a full rewrite of `stream_turn`'s event parsing -- scoped as its own SPEC if pursued, not bundled
+into this fix.
+
+469 tests pass; `ruff` clean; `npm run build` clean.

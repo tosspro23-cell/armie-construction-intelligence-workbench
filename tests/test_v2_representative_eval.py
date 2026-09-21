@@ -17,7 +17,7 @@ import asyncio
 from pathlib import Path
 
 import pytest
-from app.agent.graph import AgentService
+from app.agent.graph import _PROPERTY_SAMPLE_CAP, AgentService
 from app.config import Settings
 from app.schemas.models import VerificationStatus
 from app.services import ProjectResources, ServiceContainer
@@ -469,6 +469,83 @@ def test_v2_exposes_an_exhaustive_distinct_value_summary_for_a_truncated_list_re
     tool_payload_text = second_call_messages[tool_message_start:]
     assert "distinct_value_summary" in tool_payload_text
     assert "0.9" in tool_payload_text  # the 4th distinct value, only present past the 40-item sample cap
+
+
+def test_v2_caps_each_sample_items_own_properties_when_the_list_is_large(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """D-067 (2026-09-21), found live via an owner-requested stress test of
+    the agent-investigation feature against the real "RWTH DigitalHub"
+    building: `_V2_TOOL_RESULT_LIST_CAP` (above) bounds how many *items* a
+    large list sends back, but not how much each item's own `properties`
+    dict costs. Measured directly against the real IFC file: a single
+    `get_element_properties(entity_type="IfcDoor")` call, already capped to
+    40 items, still cost ~2.2KB/item (~22K tokens for 40 items) because a
+    real, professionally-authored Revit export attaches dozens of vendor-
+    specific parameters to every element -- unlike this project's own small
+    synthetic fixtures. The live investigation that reproduced a persistent
+    real Azure OpenAI 429 called this tool twice in one turn (once for
+    doors, once for windows); together, comfortably over the deployment's
+    per-request token budget regardless of how long a retry waited.
+
+    Verified here with a synthetic 45-item list (over `_V2_TOOL_RESULT_LIST_
+    CAP`) where each item carries 30 properties (more than `_PROPERTY_
+    SAMPLE_CAP`) -- asserts each sample item's own `properties` dict is
+    bounded with a disclosed `properties_omitted_count`, that the untruncated
+    field this test's own question needs (Height) survives the trim (kept
+    because the trim is alphabetically stable, not because it was singled
+    out as "relevant" -- see `_cap_item_properties`'s own docstring for why
+    this cap deliberately does not try to guess relevance), and that
+    `distinct_value_summary` -- computed from the full, untruncated list --
+    is unaffected by the new per-item trim.
+    """
+    fake = FakeModelProvider()
+    fake.script("v2_tool_turn", ScriptedToolCalls([("get_element_properties", {"entity_type": "IfcDoor"})]))
+    fake.script("v2_tool_turn", ScriptedAnswer(["There are 2 distinct heights: 2.1 m and 2.4 m."]))
+    _, service, resources = _service(tmp_path, fake)
+
+    items = []
+    for i in range(45):
+        height = 2.1 if i < 40 else 2.4  # a 2nd distinct value only past the 40-item sample cap
+        # "Height" sorts alphabetically before "ZVendorParam*" -- included
+        # in the 15-key slice not because the cap knows it's "relevant"
+        # (it deliberately doesn't try, see _cap_item_properties's own
+        # docstring) but because a stable alphabetical slice is
+        # deterministic, unlike relying on dict insertion/iteration order.
+        properties = {f"ZVendorParam{n:02d}": f"value{n}" for n in range(29)}
+        properties["Height"] = height
+        items.append({"element": {"express_id": 1000 + i, "entity_type": "IfcDoor", "tag": str(2000 + i)}, "storey": "Level 01", "properties": properties})
+
+    real_dispatch = AgentService._v2_dispatch_tool
+
+    def synthetic_large_property_rich_dispatch(self, tool_call, state):
+        if tool_call.tool_name == "get_element_properties":
+            return {
+                "tool_result": {"answer": "Found 45 matching elements.", "disposition": "answered", "citations": [], "verification": VerificationStatus(status="verified", reason="test").model_dump(), "result_value": items},
+                "evidence": [], "tool_call_delta": 1, "plan": [{"entity_type": "IfcDoor", "source": "ifc"}],
+            }
+        return real_dispatch(self, tool_call, state)
+
+    monkeypatch.setattr(AgentService, "_v2_dispatch_tool", synthetic_large_property_rich_dispatch)
+
+    response = asyncio.run(_run(service, resources, "How many distinct heights of doors are there?", "eval-property-sample-cap"))
+
+    assert response.disposition.value == "answered"
+    second_call_messages = fake.calls[-1].prompt
+    tool_message_start = second_call_messages.index("'role': 'tool'")
+    tool_payload_text = second_call_messages[tool_message_start:]
+
+    # The exhaustive, full-list-computed summary must still see both
+    # distinct heights, including the one only present past index 40.
+    assert "distinct_value_summary" in tool_payload_text
+    assert "2.4" in tool_payload_text
+
+    # Each sample item's own properties dict is capped and discloses how
+    # much was omitted -- not silently truncated.
+    assert "properties_omitted_count" in tool_payload_text
+    assert tool_payload_text.count("ZVendorParam") <= 40 * _PROPERTY_SAMPLE_CAP  # bounded, not one full dump per item
+
+    # A field this test's own question needs survives the alphabetical
+    # slice -- the cap is not blind to every real field.
+    assert "'Height'" in tool_payload_text or '"Height"' in tool_payload_text
 
 
 def test_narrative_consistency_check_tolerates_natural_rounding_of_a_measurement() -> None:

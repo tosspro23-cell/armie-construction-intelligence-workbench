@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any, AsyncIterator, Callable, TypeVar
 
@@ -10,6 +11,52 @@ from app.providers.base import AnswerChunkEvent, ToolCallEvent, TurnCompleteEven
 T = TypeVar("T", bound=BaseModel)
 
 _COGNITIVE_SERVICES_SCOPE = "https://cognitiveservices.azure.com/.default"
+
+# D-067 (2026-09-21): found live, an owner-requested stress test against
+# the real "RWTH DigitalHub" building -- a real Azure OpenAI 429 on
+# `stream_turn`'s model call surfaced immediately as `disposition=error`,
+# with no retry attempted at all. Most of that specific incident's own
+# root cause was request *size* (see graph.py's own `_PROPERTY_SAMPLE_CAP`),
+# which no amount of retrying fixes -- this is a separate, complementary
+# fix for the ordinary case a 429 is a genuine short-lived burst (two
+# real callers landing in the same window), where a brief, bounded retry
+# turns a user-visible failure into an invisible few-second delay. Kept
+# deliberately small (2 retries, short backoff): a request that is
+# fundamentally too large will just 429 again regardless, and this must
+# not turn one slow request into one that silently hangs for minutes.
+_MAX_RATE_LIMIT_RETRIES = 2
+_DEFAULT_RETRY_AFTER_SECONDS = 3.0
+
+
+async def _create_with_rate_limit_retry(create_call: Callable[[], Any]) -> Any:
+    """Await ``create_call()``, retrying a real ``RateLimitError`` (HTTP
+    429) up to `_MAX_RATE_LIMIT_RETRIES` times with a short backoff.
+
+    Honors the server's own `Retry-After` header when present (Azure
+    OpenAI's 429 responses include one) instead of guessing a fixed delay;
+    falls back to `_DEFAULT_RETRY_AFTER_SECONDS` when the header is absent
+    or unparseable. Any other exception (including a 429 on the final
+    attempt) propagates unchanged -- callers already handle "the request
+    failed safely" via their own existing exception handling; this only
+    changes whether a *transient* 429 is ever seen by that path at all.
+    """
+    import openai
+
+    for attempt in range(_MAX_RATE_LIMIT_RETRIES + 1):
+        try:
+            return await create_call()
+        except openai.RateLimitError as error:
+            if attempt >= _MAX_RATE_LIMIT_RETRIES:
+                raise
+            delay = _DEFAULT_RETRY_AFTER_SECONDS
+            header_value = getattr(getattr(error, "response", None), "headers", {}).get("retry-after")
+            if header_value:
+                try:
+                    delay = float(header_value)
+                except (TypeError, ValueError):
+                    pass
+            await asyncio.sleep(delay)
+    raise AssertionError("unreachable: loop always returns or raises")
 
 
 def _build_managed_identity_client(endpoint: str, api_version: str, timeout_seconds: float):
@@ -156,8 +203,8 @@ class AzureOpenAIProvider:
         extra_kwargs: dict[str, Any] = {}
         if self.reasoning_effort:
             extra_kwargs["reasoning_effort"] = self.reasoning_effort
-        stream = await client.chat.completions.create(
-            model=self.model, messages=messages, tools=tools, stream=True, **extra_kwargs,
+        stream = await _create_with_rate_limit_retry(
+            lambda: client.chat.completions.create(model=self.model, messages=messages, tools=tools, stream=True, **extra_kwargs),
         )
         # Keyed by the SDK's own per-call tool_call index -- the model can
         # request several tool calls in one turn, and their argument

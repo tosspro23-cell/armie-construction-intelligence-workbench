@@ -106,6 +106,27 @@ class GraphState(TypedDict, total=False):
 # prompt now tells the model explicitly not to retry when it does.
 _V2_TOOL_RESULT_LIST_CAP = 40
 
+# D-067 (2026-09-21), found live via an owner-requested stress test against
+# the real "RWTH DigitalHub" building: `_V2_TOOL_RESULT_LIST_CAP` above
+# bounds how many *items* a large list sends back, but not how much each
+# item's own `properties` dict costs -- fine for the 85-item
+# IfcFurnishingElement case that first justified the cap (each item's own
+# properties are small), but this real, professionally-authored Revit
+# export attaches dozens of vendor-specific parameters to every element
+# (German property names like "Abhängigkeiten.*"/"Grafiken.*"/"Sonstige.*",
+# unlike this project's own small synthetic fixtures). A single
+# `get_element_properties(entity_type="IfcDoor")` call already capped to 40
+# items still measured ~2.2KB/item (~22K tokens for 40 items) against the
+# real file; the live investigation that triggered a persistent real Azure
+# OpenAI 429 called this tool twice in one turn (once for doors, once for
+# windows), together comfortably exceeding the deployment's per-request
+# token budget regardless of how long a retry waits. `_PROPERTY_SAMPLE_CAP`
+# bounds each sample item's own `properties` dict to a representative
+# subset instead, the same "sample + exact count, never silently guessed"
+# transparency this file's own `_V2_TOOL_RESULT_LIST_CAP` already
+# established -- see `_cap_item_properties` below.
+_PROPERTY_SAMPLE_CAP = 15
+
 
 class AgentService:
     """LangGraph orchestration for safe tool-routed project questions."""
@@ -2925,9 +2946,18 @@ Return only a corrected MultiQueryPlan JSON object."""
                     # from the full, untruncated list before capping, so
                     # it stays exhaustive even when sample_items isn't.
                     distinct_value_summary = self._distinct_value_summary(tool_result_value)
+                    # D-067: each *item* also gets its own `properties` dict
+                    # bounded (see `_cap_item_properties`'s own docstring) --
+                    # a real, richly-annotated element (a real Revit export's
+                    # dozens of vendor-specific parameters) can make even
+                    # `_V2_TOOL_RESULT_LIST_CAP` items' worth of full property
+                    # dicts alone exceed a real deployment's per-request
+                    # token budget.
+                    sample_items = [self._cap_item_properties(item) for item in tool_result_value[:_V2_TOOL_RESULT_LIST_CAP]]
+                    any_properties_capped = any("properties_omitted_count" in item for item in sample_items if isinstance(item, dict))
                     tool_result_value = {
                         "total_count": len(tool_result_value),
-                        "sample_items": tool_result_value[:_V2_TOOL_RESULT_LIST_CAP],
+                        "sample_items": sample_items,
                         "distinct_value_summary": distinct_value_summary,
                         "note": (
                             f"{len(tool_result_value) - _V2_TOOL_RESULT_LIST_CAP} further item(s) omitted for brevity; the total_count above is exact. "
@@ -2935,6 +2965,13 @@ Return only a corrected MultiQueryPlan JSON object."""
                             "distinct_value_summary is computed from ALL items (not just the sample) and is the exact, exhaustive "
                             "count of distinct values for fields with a small number of distinct values -- use it, not "
                             "sample_items, whenever the question is about how many distinct values/types/sizes exist."
+                            + (
+                                " Some sample_items also had their own `properties` trimmed to a representative subset "
+                                "(see each item's `properties_omitted_count`) -- if you need a specific property not shown "
+                                "for a specific element, call get_element_properties again with that element's own "
+                                "global_ids to get it in full."
+                                if any_properties_capped else ""
+                            )
                         ),
                     }
                 messages.append({
@@ -3126,6 +3163,41 @@ Return only a corrected MultiQueryPlan JSON object."""
                     continue
                 per_key[key][str(value)] += 1
         return {key: dict(counts) for key, counts in per_key.items() if 1 < len(counts) <= max_distinct}
+
+    @staticmethod
+    def _cap_item_properties(item: Any, cap: int = _PROPERTY_SAMPLE_CAP) -> Any:
+        """D-067: bounds one sample item's own `properties` dict (get_
+        element_properties'/get_properties' `{"element": ..., "storey":
+        ..., "properties": {...flattened...}}` shape) to a representative
+        subset, disclosed with an exact omitted count -- the same "sample +
+        exact count, never silently guessed" contract `_V2_TOOL_RESULT_
+        LIST_CAP`'s own item-count cap already uses, applied one level
+        deeper.
+
+        Deliberately does not try to guess which properties are "relevant"
+        (e.g. keyword-matching on "width"/"height") -- this tool is
+        documented to also answer material/fire-rating/load-bearing
+        questions, not just dimensions, and silently dropping every field
+        that doesn't look like a measurement would quietly break those
+        other, equally legitimate uses. A fixed, alphabetically-sorted
+        (stable, not dict-insertion-order-dependent) slice keeps this
+        general rather than tuned to today's one failure case; a model that
+        needs a specific property not in the sample can always follow up
+        with `global_ids` narrowed to the one element it cares about, which
+        returns that element's full, uncapped properties (this cap only
+        ever applies within the many-items branch below).
+        """
+        if not isinstance(item, dict):
+            return item
+        properties = item.get("properties")
+        if not isinstance(properties, dict) or len(properties) <= cap:
+            return item
+        kept_keys = sorted(properties.keys())[:cap]
+        return {
+            **item,
+            "properties": {key: properties[key] for key in kept_keys},
+            "properties_omitted_count": len(properties) - cap,
+        }
 
     @staticmethod
     def _entity_terms_for(entity_type: str | None) -> frozenset[str]:
