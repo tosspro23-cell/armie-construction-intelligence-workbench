@@ -2732,10 +2732,19 @@ Return only a corrected MultiQueryPlan JSON object."""
                 # collected once here and exempted unconditionally in the
                 # entity-window check below, instead of pattern-matching the
                 # English wording around them.
+                #
+                # D-068 (2026-09-21): this originally checked only "tag"/
+                # "record", missing `reconcile_doors_windows`'s own PDF-side
+                # citation locator key, `"mark"` (`_synthesize_reconciliation_
+                # response`'s `{"page": 2, "mark": tag}`) -- a finding whose
+                # tag is genuinely absent from the IFC side (missing_in_ifc,
+                # this exact investigated finding's own case) has *only* a
+                # PDF-side citation, so its own tag number was never being
+                # exempted at all before this fix.
                 known_reference_numbers: set[float] = set()
                 for citation in all_citations:
                     locator = citation.get("locator") or {}
-                    for key in ("tag", "record"):
+                    for key in ("tag", "record", "mark"):
                         raw_value = locator.get(key)
                         if isinstance(raw_value, (str, int, float)) and not isinstance(raw_value, bool):
                             try:
@@ -3111,6 +3120,22 @@ Return only a corrected MultiQueryPlan JSON object."""
                 for sub_value in value.values():
                     numbers |= AgentService._numeric_tokens_from_result_value(sub_value)
         elif isinstance(value, list):
+            # D-068 (2026-09-21), found live minutes after redeploying
+            # D-067's payload-size fix on the real DigitalHub building: a
+            # fully correct `get_element_properties(entity_type="IfcDoor")`
+            # answer restating "50 doors in the IFC" (the tool's own real
+            # `total_count`) was flagged unverified, because `len(value)`
+            # used to only ever get added as a fact inside the
+            # reconcile-specific branch below -- for any other list shape
+            # (get_element_properties, count_elements-by-selection, ...),
+            # the real item count was never a recognized fact at all, even
+            # though "there are N of these" is always a truthful thing a
+            # correct answer can state about any list result, not just
+            # reconcile_doors_windows's own per-tag comparison shape.
+            # Moved out so every non-empty list's own length counts,
+            # regardless of what its items look like.
+            if value:
+                _add(len(value))
             if value and all(isinstance(item, dict) and "status" in item for item in value):
                 # reconcile_doors_windows's own shape: a list of per-tag
                 # comparison items, each carrying a "status" (matched/
@@ -3126,7 +3151,6 @@ Return only a corrected MultiQueryPlan JSON object."""
 
                 for count in Counter(item.get("status") for item in value).values():
                     _add(count)
-                _add(len(value))
             for item in value:
                 numbers |= AgentService._numeric_tokens_from_result_value(item)
         return numbers
