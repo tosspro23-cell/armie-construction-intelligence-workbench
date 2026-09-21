@@ -272,7 +272,7 @@ class PostgresFindingStore:
         finding_type: str, severity: str, detail: str,
         ifc_width_m: float | None, ifc_height_m: float | None,
         pdf_width_m: float | None, pdf_height_m: float | None,
-        evidence_refs: list[str],
+        evidence_refs: list[str], entity_type: str | None = None,
     ) -> EngineeringFinding:
         from uuid import uuid4
         finding_id = str(uuid4())
@@ -287,19 +287,20 @@ class PostgresFindingStore:
                 f"""
                 INSERT INTO engineering_findings
                     (finding_id, project_id, source_set_id, trace_id, tag, finding_type, severity,
-                     status, detail, ifc_width_m, ifc_height_m, pdf_width_m, pdf_height_m, evidence_refs)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, 'open', %s, %s, %s, %s, %s, %s)
+                     status, detail, ifc_width_m, ifc_height_m, pdf_width_m, pdf_height_m, evidence_refs, entity_type)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, 'open', %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (project_id, tag, finding_type) WHERE status IN {_ACTIVE_STATUSES_SQL}
                 DO UPDATE SET
                     trace_id = EXCLUDED.trace_id, detail = EXCLUDED.detail,
                     ifc_width_m = EXCLUDED.ifc_width_m, ifc_height_m = EXCLUDED.ifc_height_m,
                     pdf_width_m = EXCLUDED.pdf_width_m, pdf_height_m = EXCLUDED.pdf_height_m,
-                    evidence_refs = EXCLUDED.evidence_refs, updated_at = now()
+                    evidence_refs = EXCLUDED.evidence_refs, entity_type = EXCLUDED.entity_type, updated_at = now()
                 RETURNING *, (xmax = 0) AS inserted
                 """,
                 (
                     finding_id, project_id, source_set_id, trace_id, tag, finding_type, severity,
                     detail, ifc_width_m, ifc_height_m, pdf_width_m, pdf_height_m, json.dumps(evidence_refs),
+                    entity_type,
                 ),
             )
             row = cur.fetchone()
@@ -437,7 +438,7 @@ class PostgresFindingStore:
         return EngineeringFinding(
             finding_id=row["finding_id"], project_id=row["project_id"], source_set_id=row["source_set_id"],
             trace_id=row["trace_id"], tag=row["tag"], finding_type=row["finding_type"], severity=row["severity"],
-            status=row["status"], detail=row["detail"],
+            status=row["status"], detail=row["detail"], entity_type=row.get("entity_type"),
             ifc_width_m=row["ifc_width_m"], ifc_height_m=row["ifc_height_m"],
             pdf_width_m=row["pdf_width_m"], pdf_height_m=row["pdf_height_m"],
             evidence_refs=row["evidence_refs"], created_at=row["created_at"], updated_at=row["updated_at"],

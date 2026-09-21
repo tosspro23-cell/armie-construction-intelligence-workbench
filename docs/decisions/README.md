@@ -3370,3 +3370,51 @@ whether this class of check should be redesigned around a different contract (e.
 number required to trace to a specific, tagged source value at generation time) rather than
 extended once more. Not yet reached -- but worth naming now rather than only after a seventh
 incident makes it obvious in hindsight.
+
+## D-070 — a finding investigation had no way to tell the model which IFC entity type its own tag is
+
+**Found live, 2026-09-21**, following up on the owner's product feedback about the investigation
+answer for finding 2543664 (RWTH DigitalHub, `dimension_mismatch`): a fresh investigation of this
+exact same finding -- previously `VERIFIED`/`dimension_confirmed` at the end of the D-065..D-069
+stress-test session -- came back `inconclusive` this time. Its own Decision Trace showed the model
+calling `get_element_properties(entity_type="IfcDoor")`. Checked directly against the real IFC file
+(`grep "2543664" demo_data/projects/digitalhub/DigitalHub_FM-ARC_v2.ifc`): tag 2543664 is a real
+`IFCWINDOW`, not a door. The model queried the wrong entity type entirely.
+
+Root cause: `get_element_properties`/`count_elements`/`group_elements_by_storey` (`apps/api/app/
+agent/tools.py`) all *require* an `entity_type` argument and have no way to look an element up by
+tag alone. `build_finding_investigation_question` (`apps/api/app/agent/graph.py`) never told the
+model which type a tag actually is, even though reconciliation already knows -- `_compare_
+reconciliation_item` has computed `ReconciliationItem.entity_type` from the real IFC element's own
+`is_a()` since SPEC-M2 -- but `EngineeringFinding` (the persisted object `build_finding_
+investigation_question` is built from) never had a field to carry it. The model had to guess, and
+a wrong guess burns the whole tool-call budget investigating the wrong element before the
+iteration cap forces an `inconclusive` verdict. This is not the same defect class as D-065..D-069
+(a false-positive `unverified` flag on a correct answer) -- it degrades the investigation's own
+quality before verification is ever reached, at the tool-selection level.
+
+Fixed: added `EngineeringFinding.entity_type: str | None` (migration `0009_finding_entity_type.
+sql`, additive `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, also added to `.github/workflows/ci.yml`'s
+migration-apply step -- the exact gap D-024 already fixed once for 0003/0005; not repeated here),
+populated from `ReconciliationItem.entity_type` at `_finding_from_reconciliation` upsert time. A new
+`AgentService._entity_type_guidance` helper, interpolated into all three `build_finding_
+investigation_question` branches: when `entity_type` is known (`dimension_mismatch`, `missing_in_
+pdf` -- both have a real IFC element reconciliation actually read), the question states the exact
+type and instructs the model to use it for every `get_element_properties`/`count_elements`/`group_
+elements_by_storey` call on this tag. `missing_in_ifc` has no IFC element to have read a type
+from by definition, so `entity_type` stays genuinely `None` there -- the question says plainly
+that the type is unknown and both should be checked, rather than silently guessing one on the
+model's behalf (this project's existing "disclose, don't guess" discipline, not new to this fix).
+
+Regression tests, `tests/test_engineering_findings.py`: one confirms `entity_type` is actually
+persisted correctly end-to-end through a real reconciliation run against `armie_demo.ifc` (W02 ->
+`IfcWindow`, D04 -> `IfcDoor`, W05 -> `None`, cross-checked directly against the fixture's own IFC
+lines); two more assert the real question text reaching the model (captured verbatim via
+`FakeModelProvider`'s `RecordedCall.prompt`, not a re-implementation of the question builder)
+states the known type for W02 and admits the type is unknown for W05. All three were confirmed to
+actually fail against the pre-fix code (temporarily stashed just the source files, kept the new
+tests, reran) before being confirmed to pass against the fix -- this project's own verification
+standard, not tests-passing alone.
+
+476 tests pass; `ruff` clean; `npm run build` clean. Not yet deployed/live-reverified at the time
+of this entry -- see PROJECT_STATE.md for the current status of that.

@@ -203,6 +203,7 @@ pre { max-width: 100%; overflow: auto; white-space: pre-wrap; overflow-wrap: any
 .finding-card summary { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; cursor: pointer; }
 .finding-card[open] summary { margin-bottom: 8px; }
 .finding-tag { color: #d5e0f5; font-weight: 700; font-size: .82rem; }
+.finding-entity-type { color: #7a8bb0; font-size: .72rem; font-style: italic; }
 .finding-type { color: #8ab0e6; font-size: .78rem; }
 .finding-badge { padding: 3px 8px; border-radius: 999px; font-size: .68rem; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; background: #233861; color: #dce9ff; }
 .finding-badge.status-open { background: #3a3320; color: #ffcf7a; }

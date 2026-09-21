@@ -109,6 +109,32 @@ def test_reconciliation_creates_exactly_the_three_non_matched_findings(monkeypat
     assert all(item["status"] == "open" for item in findings)
 
 
+def test_reconciliation_records_the_real_entity_type_whenever_an_ifc_element_was_actually_read(monkeypatch, tmp_path) -> None:
+    """D-070: `entity_type` was computed by `_compare_reconciliation_item`
+    (from the real IFC element's own `is_a()`) since SPEC-M2, but never
+    carried onto the persisted `EngineeringFinding` -- so a later
+    "investigate this" turn had no way to tell the model whether a tag was
+    a door or a window, and the model had to guess (see
+    build_finding_investigation_question's own D-070 docstring for the
+    live-observed wrong-entity-type defect this closes). `armie_demo.ifc`
+    tags W02/D04 to a real IFCWINDOW/IFCDOOR respectively (confirmed
+    directly against the fixture: `grep "'W02'\\|'D04'" demo_data/
+    armie_demo.ifc`); W05 (missing_in_ifc) has no IFC element to have read
+    a type from at all, so it stays genuinely unknown rather than guessed.
+    """
+    _configure_env(monkeypatch, tmp_path)
+    import app.main as main_module
+
+    with TestClient(main_module.app) as client:
+        client.post("/api/v1/chat", json={"question": RECONCILIATION_QUESTION})
+        findings = client.get("/api/v1/findings", params={"project_id": "demo"}).json()
+
+    by_tag = {item["tag"]: item for item in findings}
+    assert by_tag["W02"]["entity_type"] == "IfcWindow"
+    assert by_tag["D04"]["entity_type"] == "IfcDoor"
+    assert by_tag["W05"]["entity_type"] is None
+
+
 def test_re_running_reconciliation_updates_the_same_finding_instead_of_duplicating(monkeypatch, tmp_path) -> None:
     _configure_env(monkeypatch, tmp_path)
     import app.main as main_module
@@ -319,6 +345,62 @@ def test_investigate_finding_is_now_legal_for_missing_in_pdf_and_missing_in_ifc(
     proposal = client.get(f"/api/v1/findings/{finding_id}").json()["pending_proposal"]
     assert proposal is not None
     assert fake.calls  # the fake model was actually invoked, not bypassed
+
+
+def test_investigate_finding_question_tells_the_model_the_known_entity_type(monkeypatch, tmp_path) -> None:
+    """D-070: the model must not have to guess IfcDoor vs IfcWindow for a
+    tag reconciliation already resolved -- the actual live-observed defect
+    this closes is `get_element_properties(entity_type="IfcDoor")` called
+    for a tag that was really an IfcWindow, which wasted the whole
+    tool-call budget before ending inconclusive. Asserts the real question
+    text reaching the model (captured verbatim in FakeModelProvider's own
+    `RecordedCall.prompt`, not a re-implementation of the question builder)
+    for both the known case (W02, an IfcWindow) and the genuinely unknown
+    case (W05, missing_in_ifc -- no IFC element exists to have read a type
+    from), so an "unknown" finding is told plainly it's unknown rather than
+    silently defaulted to one type.
+    """
+    _configure_env(monkeypatch, tmp_path)
+    import app.main as main_module
+
+    with TestClient(main_module.app) as client:
+        fake = _install_fake_agent(
+            main_module, monkeypatch,
+            ["I confirmed the IFC value is correct."],
+            tool_calls=[("get_element_properties", {"entity_type": "IfcWindow"})],
+        )
+        client.post("/api/v1/chat", json={"question": RECONCILIATION_QUESTION})
+        finding_id = next(item["finding_id"] for item in client.get("/api/v1/findings").json() if item["tag"] == "W02")
+        _walk_to_action_required(client, finding_id)
+
+        _investigate(client, finding_id)
+
+    assert fake.calls
+    first_prompt = fake.calls[0].prompt
+    assert "This element's real IFC entity type is IfcWindow" in first_prompt
+    assert "entity_type='IfcWindow'" in first_prompt
+
+
+def test_investigate_finding_question_admits_entity_type_is_unknown_for_missing_in_ifc(monkeypatch, tmp_path) -> None:
+    _configure_env(monkeypatch, tmp_path)
+    import app.main as main_module
+
+    with TestClient(main_module.app) as client:
+        fake = _install_fake_agent(
+            main_module, monkeypatch,
+            ["I checked both entity types and this tag genuinely does not appear in the IFC model."],
+            tool_calls=[("get_element_properties", {"entity_type": "IfcWindow"})],
+        )
+        client.post("/api/v1/chat", json={"question": RECONCILIATION_QUESTION})
+        finding_id = next(item["finding_id"] for item in client.get("/api/v1/findings").json() if item["tag"] == "W05")
+        _walk_to_action_required(client, finding_id)
+
+        _investigate(client, finding_id)
+
+    assert fake.calls
+    first_prompt = fake.calls[0].prompt
+    assert "does not indicate whether this element is an IfcDoor or an IfcWindow" in first_prompt
+    assert "check both entity types" in first_prompt
 
 
 def test_approve_and_reject_proposal_are_illegal_with_no_pending_proposal(monkeypatch, tmp_path) -> None:
