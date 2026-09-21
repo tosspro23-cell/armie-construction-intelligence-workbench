@@ -167,6 +167,12 @@ button:disabled { opacity: .6; cursor: wait; }
 .plan-list li { display: grid; gap: 2px; padding: 8px 10px; background: #0c1326; border-radius: 8px; }
 .plan-op { color: #d5e0f5; font-size: .82rem; font-weight: 600; }
 .plan-rationale { color: #8ab0e6; font-size: .76rem; font-style: italic; }
+.tool-call-list { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 4px; }
+.tool-call-list li { padding: 6px 10px; background: #0c1326; border-radius: 8px; font-size: .8rem; color: #d5e0f5; }
+.tool-call-list code { color: #ffcf7a; font-weight: 600; }
+.tool-call-args { color: #8ab0e6; margin-left: 4px; }
+.finding-verdict-result { padding: 8px 10px; background: #0c1326; border-radius: 8px; }
+.finding-verdict-result-basis { color: #8ab0e6; font-style: italic; }
 .evidence-cards { display: grid; gap: 10px; margin-top: 8px; }
 .evidence-card { display: block; padding: 10px; background: #0c1326; border: 1px solid #263457; border-radius: 10px; transition: border-color .12s ease; }
 .evidence-card:hover { border-color: #5994ef; }
@@ -228,8 +234,16 @@ pre { max-width: 100%; overflow: auto; white-space: pre-wrap; overflow-wrap: any
    without duplicating the compact summary above it. */
 .finding-proposal-detail { margin-top: 8px; }
 .finding-proposal-detail summary { cursor: pointer; color: #9fbfff; font-size: .82rem; }
-.finding-proposal-rationale { margin: 8px 0; white-space: pre-wrap; font-size: .82rem; line-height: 1.5; }
-.finding-proposal-verdict-basis { margin: 8px 0 0; font-size: .82rem; line-height: 1.5; }
+.finding-proposal-rationale { margin: 8px 0; white-space: pre-wrap; font-size: .82rem; line-height: 1.5; color: #8190ad; }
+/* Owner product feedback, 2026-09-21: the model's own compact verdict_basis
+   -- always visible now, not buried in the collapsed transcript below --
+   is the actual reason a reviewer approves/rejects, so it reads as
+   primary content (full opacity, tighter to the verdict row above it),
+   not a footnote the way finding-proposal-rationale (the full transcript)
+   deliberately now reads dimmer. */
+.finding-proposal-basis { margin: 6px 0 0; font-size: .84rem; line-height: 1.5; color: #dce9ff; }
+.verdict-inconclusive { color: #ffb454; }
+.inconclusive-caveat { margin: 6px 0 0; color: #ffb454; font-size: .74rem; }
 .finding-proposal-citations { margin: 0 0 8px; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; font-size: .78rem; }
 .finding-proposal-meta { margin: 0; color: #8190ad; font-size: .72rem; font-style: italic; }
 .reconciliation-table { margin: 0 0 10px; }

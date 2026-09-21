@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { AuthedImage } from "./apiClient";
-import { formatDims } from "./Findings";
+import { formatDims, formatVerdict } from "./Findings";
 
 // Interview/demo-facing redesign (2026-09-13, user request): the previous
 // "Evidence Inspector" + "Audit Trail" were two disconnected sections --
@@ -113,6 +113,25 @@ function stepMs(ms: number | undefined): string | null {
 function totalMs(ms: number | undefined): string | null {
   const formatted = formatMs(ms);
   return formatted ? `Total ${formatted} (all steps)` : null;
+}
+
+// Owner product feedback, 2026-09-21: "N tool call(s)" in the Execution
+// header told a reviewer nothing about *which* tool was called with *what*
+// arguments -- finding that out meant opening a raw JSON trace event per
+// call. graph.py's `_v2_dispatch_tool` now audits one `tool_called` event
+// (step `v2_tool_call`) per dispatched call, before it runs; this renders
+// that list compactly, one line per call, no expansion needed for the
+// common case of wanting to see which entity type/field was actually
+// queried -- e.g. surfacing at a glance that a finding investigation
+// queried IfcDoor when the tag under investigation was really an
+// IfcWindow (the exact live-observed defect D-070 fixed).
+function formatToolArgs(args: Record<string, any> | undefined): string {
+  if (!args || Object.keys(args).length === 0) return "";
+  return Object.entries(args).map(([key, value]) => `${key}=${Array.isArray(value) ? value.join(",") : value}`).join(", ");
+}
+
+function toolCallEvents(trace: TraceEvent[]): TraceEvent[] {
+  return trace.filter((event) => event.step === "v2_tool_call" && event.event_type === "tool_called");
 }
 
 function citationFacts(citation: Citation): Array<[string, string]> {
@@ -282,6 +301,11 @@ export function DecisionStory({ latest, trace, projectId, onOpenCitation }: {
             </tbody></table>
           </details>
         </div> : clarificationEvent && <p className="retrieval-absent">No Azure AI Search evidence for this step — {clarificationEvent.summary}</p>}
+        {toolCallEvents(trace).length > 0 && <ul className="tool-call-list">
+          {toolCallEvents(trace).map((event) => <li key={event.id}>
+            <code>{event.payload.tool_name}</code>{formatToolArgs(event.payload.arguments) && <span className="tool-call-args">({formatToolArgs(event.payload.arguments)})</span>}
+          </li>)}
+        </ul>}
         <StepTrace events={byStage("Execution")} />
       </li>
 
@@ -331,6 +355,19 @@ export function DecisionStory({ latest, trace, projectId, onOpenCitation }: {
       <li className="story-step">
         <StepHeader number={6} icon="🏁" title="Result" subtitle={[meta.latency_ms ? totalMs(meta.latency_ms) : null, `${meta.model_call_count || 0} model call(s) total`].filter(Boolean).join(" · ")} />
         <p className="story-step-body">Disposition: <strong>{latest.disposition.replace(/_/g, " ")}</strong></p>
+        {/* Owner product feedback, 2026-09-21: a finding investigation's own
+            conclusion (submit_finding_verdict's structured arguments,
+            already carried through as meta.finding_verdict since D-064)
+            never appeared anywhere in this trace at all -- a reviewer had
+            to leave the Decision Trace panel entirely and go to the
+            Findings tab to see what the investigation actually concluded,
+            with no link back to the plan/execution/verification steps that
+            led there. Shown here, tying the trace's own last step directly
+            to the decision it produced. */}
+        {meta.finding_verdict && <p className="story-step-body finding-verdict-result">
+          Verdict: <strong>{formatVerdict(meta.finding_verdict.verdict)}</strong>
+          {meta.finding_verdict.basis && <span className="finding-verdict-result-basis"> — {meta.finding_verdict.basis}</span>}
+        </p>}
         {/* D-047: owner-requested breakdown showing the per-step numbers
             actually add up to the total above -- the five per-step
             timings are a client-side approximation (see stageTimingsMs's

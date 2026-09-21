@@ -85,6 +85,41 @@ def test_v2_engine_answers_correctly_via_the_real_endpoint(tmp_path: Path) -> No
     assert len(final["citations"]) > 0
 
 
+def test_v2_dispatched_tool_calls_are_individually_audited(tmp_path: Path) -> None:
+    """Owner product feedback, 2026-09-21: the Decision Trace panel's
+    Execution step showed a bare tool-call count, with no way to see which
+    tool was called with which arguments short of a raw JSON trace event
+    per audit-stage bucket that didn't actually exist for a plain (non-
+    grouped) IFC tool call -- a real gap surfaced while diagnosing D-070's
+    wrong-entity-type defect, which is exactly the kind of thing a
+    reviewer needs visible here. `_v2_dispatch_tool` now emits one
+    `tool_called` audit event per dispatched call, before it runs; this
+    reads it back the same way a client would, via `AuditStore.by_trace`
+    (the same store `GET /api/v1/traces/{trace_id}` serves from), not by
+    re-implementing the emission logic.
+    """
+    import app.main as main_module
+
+    settings = _settings(tmp_path)
+    fake = FakeModelProvider()
+    fake.script("v2_tool_turn", ScriptedToolCalls([("get_element_properties", {"entity_type": "IfcWindow"})]))
+    fake.script("v2_tool_turn", ScriptedAnswer(["The windows are 1.2m wide."]))
+    container, service = _build(settings, fake)
+    main_module.app.state.container = container
+    main_module.app.state.agent = service
+    main_module.app.state.requests = {}
+
+    response = asyncio.run(main_module.chat(ChatRequest(request_id="v2-tool-audit-1", thread_id="v2-tool-audit-thread", question=QUESTION, engine="v2")))
+    events = asyncio.run(_collect_sse_events(response))
+
+    final = [event for event in events if event["type"] == "final"][0]["response"]
+    trace_events = container.audit_store.by_trace(final["trace_id"])
+    tool_call_events = [event for event in trace_events if event.event_type == "tool_called" and event.step == "v2_tool_call"]
+    assert len(tool_call_events) == 1
+    assert tool_call_events[0].payload["tool_name"] == "get_element_properties"
+    assert tool_call_events[0].payload["arguments"] == {"entity_type": "IfcWindow"}
+
+
 def test_v2_tool_status_events_carry_a_stable_call_id_for_same_named_calls(tmp_path: Path) -> None:
     """Owner-reported, 2026-09-17 (found live against the real Duplex
     project): several *same-named* tool calls in one turn (here,
