@@ -62,7 +62,8 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 "type": "object",
                 "properties": {
                     "entity_type": {"type": "string", "description": "The canonical IFC entity type, e.g. IfcDoor, IfcWindow."},
-                    "global_ids": {"type": "array", "items": {"type": "string"}, "description": "Optional: specific element GlobalIds to narrow to (e.g. a viewer selection)."},
+                    "global_ids": {"type": "array", "items": {"type": "string"}, "description": "Optional: specific element GlobalIds to narrow to (e.g. a viewer selection). GlobalId is the IFC model's own internal identifier (looks like '0ehNcYPbH3JQicvZQLHP24') -- it is NOT the human-readable Tag/Mark used on a PDF schedule or a finding's own tag. To look up one specific element by that identifier, use `tags` instead."},
+                    "tags": {"type": "array", "items": {"type": "string"}, "description": "Optional: specific elements' own Tag/Mark value to narrow to -- this is the identifier a PDF schedule row or a finding's own tag actually uses (e.g. '2543664' or 'W02'), and the reliable way to look up one specific element by it. Prefer this over trying to guess a GlobalId, and over an unfiltered entity_type query for a large building (an unfiltered query only returns a sample, which may not include the specific element you need)."},
                 },
                 "required": ["entity_type"],
             },
@@ -202,7 +203,11 @@ def build_plan_from_tool_call(tool_name: str, arguments: dict[str, Any]) -> Quer
             expected_result_shape="single_group_extremum" if postprocess in {"argmax", "argmin"} else "grouped_counts", **common,
         )
     if tool_name == "get_element_properties":
-        filters = {"global_ids": arguments["global_ids"]} if arguments.get("global_ids") else {}
+        filters = {}
+        if arguments.get("global_ids"):
+            filters["global_ids"] = arguments["global_ids"]
+        if arguments.get("tags"):
+            filters["tags"] = arguments["tags"]
         return QueryPlan(source="ifc", intent="property_lookup", operation="get_properties", entity_type=arguments["entity_type"], filters=filters, group_by="none", expected_result_shape="properties", **common)
     if tool_name == "aggregate_quantity":
         return QueryPlan(

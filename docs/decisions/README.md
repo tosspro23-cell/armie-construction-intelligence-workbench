@@ -3504,3 +3504,55 @@ verified here. Confirmed D-071's own rendering directly in the real Findings tab
 visible in the always-open summary (no click needed), the `inconclusive` caveat rendering distinct
 from a confident verdict, and the collapsed section correctly relabeled "Full investigation
 transcript, for audit."
+
+## D-072 — no tool could look up one specific IFC element by its own Tag; the 3D viewer never showed it either
+
+**Owner-reported, 2026-09-21**, testing D-070 live on RWTH DigitalHub finding 2543664 (a real
+`IfcWindow`): the investigation still ended `inconclusive`, and its own Decision Trace showed the
+model calling `get_element_properties(entity_type=IfcWindow, global_ids=['2543664'])`. D-070 had
+already fixed the entity-*type* mistake -- this was a second, different bug in the same call.
+
+Root cause, confirmed directly against `apps/api/app/tools/ifc/repository.py`'s own
+`_matching_elements` (not guessed): `global_ids` matches `element.GlobalId`, the IFC model's
+internal identifier (e.g. `0ehNcYPbH3JQicvZQLHP24`) -- never `element.Tag`, the human-facing
+identifier a PDF schedule row or a finding's own tag actually uses (e.g. `2543664`). The model
+passed its Tag as a `global_ids` value, which can never match, on any real building, regardless of
+which element it meant -- confirmed with a direct unit test
+(`test_passing_a_tag_as_global_ids_finds_nothing_the_exact_defect_this_closes`). The only other
+path -- an unfiltered `entity_type` query -- gets capped to a small sample for a real building's
+element count (D-067's `_LARGE_LIST_SAMPLE_SIZE`), so whether the target tag happened to land in
+that sample was pure luck; for RWTH DigitalHub's 47 windows it didn't, and the investigation
+exhausted its tool-call budget checking the wrong rows before genuinely giving up. **No tool
+exposed to the model could look up one specific element by Tag at all** -- the actual identifier
+every finding investigation is fundamentally about.
+
+Fixed: `get_element_properties` gained a `tags` parameter, matching `element.Tag` directly
+(`IfcRepository._matching_elements`, the same attribute `_reconciliation_ifc_items` already keys
+on) -- exposed in the tool's own JSON schema with an explicit note that `global_ids` is a different,
+internal identifier. `_entity_type_guidance` (D-070) now also tells the model to call
+`get_element_properties(entity_type=..., tags=[finding.tag])` directly, instead of guessing a
+GlobalId or relying on an unfiltered query's sample. Regression tests:
+`tests/test_ifc_tag_based_lookup.py` (tool-schema wiring and the real repository-level fix,
+including a direct reproduction of the exact live-observed mistake) and updated assertions in
+`tests/test_engineering_findings.py` confirming the investigation question states `tags=[...]`.
+
+**Separately, the owner also observed the 3D viewer's own selection details panel never showed an
+element's Tag at all** -- only GlobalId/ExpressID, neither of which has any equivalent on a PDF
+schedule, making it hard for a human to visually cross-check a clicked 3D element against a
+schedule row. `IfcRepository.viewer_elements`/`mesh_elements` (the two methods backing `GET /api/
+v1/project/viewer-elements`/`viewer-mesh`) never included `tag` in their per-element dicts, even
+though `_compact_element` (used by `get_element_properties`/citation locators) already had since an
+earlier owner-reported fix (`test_ifc_element_tag_exposure.py`). Fixed by adding `tag` to both
+methods' output; `apps/web/src/IfcViewer.tsx`'s `SelectedElement`/`ViewerElement` types and its
+`onSelection` call now carry it through, and `main.tsx`'s selection-details panel (and its citation-
+jump call site) gained a `Tag` row alongside the existing `IFC type`/`ExpressID`/`GlobalId` ones.
+Regression tests: `tests/test_viewer_element_tag_exposure.py`, against the same real, known element
+(`W01`) `test_ifc_element_tag_exposure.py` already established.
+
+Both fixes verified against a real running instance, not just the test suite: a live V2 turn
+against the real demo fixture showed the Decision Trace's own Execution step rendering
+`get_element_properties(entity_type=IfcWindow, tags=W01)` (confirming the tool wiring end-to-end,
+not just the schema), and clicking that turn's own citation's "Jump to this evidence" populated the
+IFC Viewer's selection details panel with `Tag: W01` for the first time.
+
+483 tests pass; `ruff` clean; `npm run build` clean.

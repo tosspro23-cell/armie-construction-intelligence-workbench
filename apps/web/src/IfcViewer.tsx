@@ -8,6 +8,14 @@ type SelectedElement = {
   expressId?: number;
   type?: string;
   name?: string;
+  // Owner-reported, 2026-09-21: the selection details panel showed
+  // GlobalId/ExpressID (the IFC model's own internal identifiers) but
+  // never Tag/Mark -- the identifier a PDF schedule row actually uses,
+  // and the one a human visually cross-checking model vs. schedule
+  // actually needs. Already read server-side (get_element_properties,
+  // citation locators) since D-070/D-072's own owner-reported fix; this
+  // carries it into the 3D viewer's own selection, not a new read.
+  tag?: string | null;
 };
 
 type ViewerElement = {
@@ -15,6 +23,7 @@ type ViewerElement = {
   express_id?: number;
   entity_type?: string;
   name?: string;
+  tag?: string | null;
   // SPEC-M12: `/api/v1/project/viewer-mesh`'s real triangulated geometry --
   // flat IFC world-space coordinates (`vertices`, 3 floats per vertex) and
   // triangle indices into them (`faces`, 3 indices per triangle), in place
@@ -466,7 +475,7 @@ export function IfcViewer({ onSelection, onSnapshot, onStatus, highlightedGlobal
       }) || hits[0];
       const mesh = preferredHit.object as THREE.Mesh;
       const element = mesh.userData as ViewerElement;
-      onSelection({ globalId: element.global_id, expressId: element.express_id, type: element.entity_type, name: element.name });
+      onSelection({ globalId: element.global_id, expressId: element.express_id, type: element.entity_type, name: element.name, tag: element.tag });
       if (element.global_id) onToggleHighlight(element.global_id);
     };
 

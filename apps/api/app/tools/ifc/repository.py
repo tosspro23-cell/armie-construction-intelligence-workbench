@@ -216,6 +216,7 @@ class IfcRepository:
                     output.append({
                         "express_id": element.id(), "global_id": getattr(element, "GlobalId", None),
                         "entity_type": element.is_a(), "name": self._name_of(element),
+                        "tag": getattr(element, "Tag", None),
                         "storey": self._storey_name(element), "center": origin,
                         "dimensions": dimensions, "color": self._PALETTE.get(element.is_a(), "#cdc6b8"),
                         "is_external": self._is_external(element),
@@ -227,6 +228,18 @@ class IfcRepository:
                     "global_id": getattr(element, "GlobalId", None),
                     "entity_type": element.is_a(),
                     "name": self._name_of(element),
+                    # Owner-reported, 2026-09-21: this element's own real
+                    # Tag/Mark (the identifier a PDF schedule row actually
+                    # uses to cross-reference it, e.g. "W02"/"2543664") was
+                    # already surfaced by `get_element_properties`
+                    # (`_compact_element`, D-070/D-072's own owner-reported
+                    # fix) and in citation evidence locators, but never in
+                    # the 3D viewer's own selection details -- a human
+                    # visually cross-checking the model against a PDF
+                    # schedule had no way to see which schedule row a
+                    # clicked element corresponds to without going through
+                    # the chat tool instead.
+                    "tag": getattr(element, "Tag", None),
                     "storey": self._storey_name(element),
                     "center": [(minimum[index] + maximum[index]) / 2 for index in range(3)],
                     "dimensions": dimensions,
@@ -289,6 +302,7 @@ class IfcRepository:
                     output.append({
                         "express_id": element.id(), "global_id": getattr(element, "GlobalId", None),
                         "entity_type": element.is_a(), "name": self._name_of(element),
+                        "tag": getattr(element, "Tag", None),
                         "storey": self._storey_name(element), "color": self._PALETTE.get(element.is_a(), "#cdc6b8"),
                         "is_external": self._is_external(element), "vertices": vertices, "faces": faces,
                     })
@@ -298,6 +312,12 @@ class IfcRepository:
                     "global_id": getattr(element, "GlobalId", None),
                     "entity_type": element.is_a(),
                     "name": self._name_of(element),
+                    # Owner-reported, 2026-09-21: see viewer_elements's own
+                    # matching comment -- this element's real Tag/Mark was
+                    # already available server-side but never reached the
+                    # 3D viewer's own selection details, only the chat
+                    # tool's get_element_properties.
+                    "tag": getattr(element, "Tag", None),
                     "storey": self._storey_name(element),
                     "color": self._PALETTE.get(entity_type, "#cdc6b8"),
                     "is_external": self._is_external(element),
@@ -516,6 +536,21 @@ class IfcRepository:
     def _matching_elements(self, entity_type: str | None, filters: dict[str, Any]) -> list[Any]:
         candidates = list(self.model.by_type(entity_type)) if entity_type else list(self.model.by_type("IfcProduct"))
         selected_ids = set(filters.get("global_ids", []))
+        # D-072 (2026-09-21, found live): `global_ids` matches the IFC
+        # model's own internal GUID (e.g. "0ehNcYPbH3JQicvZQLHP24"), never
+        # the human-facing Tag/Mark a finding investigation actually knows
+        # (e.g. "2543664") -- there was previously no way to look up one
+        # specific element by that identifier at all, so a real investigation
+        # (get_element_properties(global_ids=["2543664"])) reliably matched
+        # nothing, every time, on every real building, regardless of which
+        # element it actually meant. The only other path -- an unfiltered
+        # entity_type query -- gets capped to a small sample for a large
+        # real building's element count (D-067/_LARGE_LIST_SAMPLE_SIZE), so
+        # whether the target tag happened to land in that sample was pure
+        # luck. Matches `str(element.Tag)` exactly, mirroring how
+        # `_compare_reconciliation_item`/`_reconciliation_ifc_items` already
+        # key everything off this same attribute.
+        selected_tags = {str(item) for item in filters.get("tags", [])}
         selected_express_ids = {int(item) for item in filters.get("express_ids", [])}
         name_contains = str(filters.get("name_contains", "")).lower().strip()
         storey_filter = str(filters.get("storey", "")).lower().strip()
@@ -524,6 +559,8 @@ class IfcRepository:
         output: list[Any] = []
         for element in candidates:
             if selected_ids and getattr(element, "GlobalId", None) not in selected_ids:
+                continue
+            if selected_tags and str(getattr(element, "Tag", None)) not in selected_tags:
                 continue
             if selected_express_ids and element.id() not in selected_express_ids:
                 continue

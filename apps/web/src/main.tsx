@@ -16,7 +16,7 @@ type Response = {
   answer_markdown: string; citations: Citation[]; verification: { status: string; reason?: string };
   execution_metadata: Record<string, any>; reconciliation_items?: ReconciliationItem[];
 };
-type Selected = { globalId?: string; expressId?: number; type?: string; name?: string };
+type Selected = { globalId?: string; expressId?: number; type?: string; name?: string; tag?: string | null };
 type ConversationTurn = { id: string; user: string; assistant: Response; timestamp: string; trace: TraceEvent[] };
 
 // `_natural_answer` (apps/api/app/agent/graph.py) intentionally wraps
@@ -503,7 +503,7 @@ function App() {
     // recently, regardless of which direction its highlight just toggled.
     if (citation.source_type === "ifc") {
       setTab("bim");
-      setSelected({ globalId: citation.locator.global_id, expressId: citation.locator.express_id, type: citation.locator.entity_type, name: citation.label });
+      setSelected({ globalId: citation.locator.global_id, expressId: citation.locator.express_id, type: citation.locator.entity_type, name: citation.label, tag: citation.locator.tag });
       if (citation.locator.global_id) toggleHighlight(citation.locator.global_id);
     }
     if (citation.source_type === "pdf") {
@@ -553,7 +553,16 @@ function App() {
     </div>
     <section className="workspace">
       <aside className="viewer"><div className="tabs"><button className={tab === "bim" ? "active" : ""} onClick={() => setTab("bim")}>BIM Model</button><button className={tab === "drawing" ? "active" : ""} onClick={() => setTab("drawing")}>Drawing</button><button className={tab === "snapshot" ? "active" : ""} onClick={() => setTab("snapshot")}>Viewer Snapshot</button><button className={tab === "findings" ? "active" : ""} onClick={() => setTab("findings")}>Findings</button></div>
-        {tab === "bim" && <><h2>IFC Viewer</h2><IfcViewer projectId={projectId} onSelection={handleSelection} onSnapshot={(value) => { setSnapshot(value); setSnapshotCleared(false); }} onStatus={setViewerStatus} highlightedGlobalIds={highlightedIds} onToggleHighlight={toggleHighlight} /><dl className="selection-details"><div><dt>Element</dt><dd>{selected ? `${selected.type}: ${selected.name}` : "No IFC element selected"}</dd></div><div><dt>IFC type</dt><dd>{selected?.type || "—"}</dd></div><div><dt>ExpressID</dt><dd>{selected?.expressId ?? "—"}</dd></div><div><dt>GlobalId</dt><dd>{selected?.globalId || "—"}</dd></div></dl></>}
+        {tab === "bim" && <><h2>IFC Viewer</h2><IfcViewer projectId={projectId} onSelection={handleSelection} onSnapshot={(value) => { setSnapshot(value); setSnapshotCleared(false); }} onStatus={setViewerStatus} highlightedGlobalIds={highlightedIds} onToggleHighlight={toggleHighlight} /><dl className="selection-details"><div><dt>Element</dt><dd>{selected ? `${selected.type}: ${selected.name}` : "No IFC element selected"}</dd></div><div><dt>IFC type</dt><dd>{selected?.type || "—"}</dd></div>
+          {/* Owner-reported, 2026-09-21: this panel showed GlobalId/ExpressID
+              (the IFC model's own internal identifiers) but never Tag/Mark --
+              the identifier a PDF schedule row actually uses, and the one a
+              human visually cross-checking model vs. schedule needs to match
+              a clicked 3D element to a schedule row. Already read server-side
+              (get_element_properties, citation locators) since D-070/D-072's
+              own fix; this is the first place it reaches this panel too. */}
+          <div><dt>Tag</dt><dd>{selected?.tag || "—"}</dd></div>
+          <div><dt>ExpressID</dt><dd>{selected?.expressId ?? "—"}</dd></div><div><dt>GlobalId</dt><dd>{selected?.globalId || "—"}</dd></div></dl></>}
         {tab === "drawing" && <section className="drawing"><h2>Engineering Drawing</h2>
           <div className="drawing-toolbar">
             {(metadata?.pdf_files?.length || 0) > 1 && <label>Document <select value={drawingDocument || ""} onChange={(e) => changeDrawingDocument(e.target.value)}>{metadata!.pdf_files.map((name: string) => <option key={name} value={name}>{name}</option>)}</select></label>}
