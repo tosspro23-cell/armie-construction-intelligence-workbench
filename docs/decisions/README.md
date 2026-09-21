@@ -3472,3 +3472,35 @@ individually_audited`: confirmed to fail against the pre-fix code (temporarily r
 `graph.py`, kept the new test) before confirming it passes against the fix.
 
 474 tests pass; `ruff` clean; `npm run build` clean.
+
+**Deployed and live-reverified against the real production app, 2026-09-21.** `armiem3-api`
+redeployed to image `d91dee6` (the exact merge commit carrying both D-070 and D-071) with the full
+existing parameter set, all post-deploy smoke tests passing. One real deployment gap found and
+closed in the process, not previously hit by any earlier migration: `azure-deploy.yml` has no
+migration-apply step against the real production Postgres (by design -- the same "applied by hand,
+no framework" pattern this repo has followed since `0001`), so migration `0009_finding_entity_
+type.sql` was never actually run against it. The redeployed code's `PostgresFindingStore.upsert_
+from_reconciliation` therefore silently failed to persist `entity_type` on every write (caught by
+the method's own best-effort `except Exception`, logged as a `finding_upsert`/`error` audit event,
+never surfacing as a user-visible failure) until the migration was applied by hand -- the same
+method `docs/reports/2026-09-09-m4-azure-deployment-baseline.md` used for `0001`/`0002a`/`0002b`:
+an AAD access token via `az account get-access-token --resource-type oss-rdbms`, connected as the
+server's own Microsoft Entra admin (not the app's `armiem3-identity` managed identity, which cannot
+generate this token type for itself), `psql` (available this time; no need to fall back to raw
+`psycopg`).
+
+Once applied, re-ran reconciliation against the real `RWTH DigitalHub` project to backfill `entity_
+type` on the existing findings (2543664 -> `IfcWindow`, 2434145/2432934 -> `IfcDoor`, 2553900 ->
+still `null`, correctly -- `missing_in_ifc`, no IFC element exists to have read a type from),
+rejected finding 2543664's stale pre-fix `inconclusive` proposal, and re-investigated it fresh
+through the real production model. Confirmed D-070's own fix directly: the model's first IFC call
+was `get_element_properties(entity_type=IfcWindow, ...)` -- IfcWindow, not the live-observed
+IfcDoor mistake this fix targets. It still ended `inconclusive` this run, but for a genuinely
+different, legitimate reason unrelated to entity-type selection (`extract_pdf_field` could not
+locate this tag's schedule row across several differently-worded attempts, and `global_ids=
+['2543664']` is not a real IFC GlobalId, so that lookup correctly found nothing) -- exactly the
+honest "tried, couldn't confirm" case `inconclusive` exists for, not the wrong-element defect being
+verified here. Confirmed D-071's own rendering directly in the real Findings tab: `verdict_basis`
+visible in the always-open summary (no click needed), the `inconclusive` caveat rendering distinct
+from a confident verdict, and the collapsed section correctly relabeled "Full investigation
+transcript, for audit."
