@@ -78,6 +78,7 @@ jobs:
           # add every new migration here going forward, not just this one.
           psql "$TEST_DATABASE_URL" -f apps/api/migrations/0006_engineering_findings.sql
           psql "$TEST_DATABASE_URL" -f apps/api/migrations/0008_agent_proposal.sql
+          psql "$TEST_DATABASE_URL" -f apps/api/migrations/0009_finding_entity_type.sql
       - name: Run backend test suite
         run: PYTHONPATH=apps/api python3 -m pytest -q
 
