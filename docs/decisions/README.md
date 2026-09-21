@@ -3349,8 +3349,15 @@ from-any-single-item 39/6 split and asserts an answer restating that real split 
 fabricated count for the same field is still caught:
 `tests/test_v2_representative_eval.py::test_v2_recognizes_a_distinct_value_summarys_own_counts_as_real_facts`.
 
-473 tests pass; `ruff` clean; `npm run build` clean. Pending: live reverification against the real
-deployed app once this fix merges and deploys.
+473 tests pass; `ruff` clean; `npm run build` clean.
+
+Live-reverified after this third fix deployed: rejected the stale pre-fix proposal and
+re-investigated finding 2553900 fresh -- `VERIFIED`, `genuine_omission`, no 429, no false-positive
+`unverified`. The other 3 real DigitalHub findings (already `VERIFIED` from the earlier D-067 round,
+untouched by this fix) were spot-checked and remain correct: 2543664 (`dimension_confirmed`), 2434145
+(`genuine_omission`), 2432934 (`dimension_confirmed`). Finding 2553900 -- the one that had failed
+three times in a row across D-067, D-068, and D-069 -- is now confirmed working end-to-end with the
+final, current code.
 
 **A pattern worth naming plainly, six real defects into the same check across five deploy-and-
 retest cycles in one session:** each fix has been correct and narrowly scoped, and each has closed
