@@ -3299,5 +3299,33 @@ Regression test reproduces the same 45-item/30-properties-per-item shape and ass
 sent item count is bounded by the new, smaller constant, not the trigger threshold:
 `tests/test_v2_representative_eval.py::test_v2_shrinks_the_large_list_sample_size_independently_of_the_trigger_threshold`.
 
-470 tests pass; `ruff` clean; `npm run build` clean. Pending: live reverification against the real
-deployed app once this fix merges and deploys (see PROJECT_STATE.md for the outcome once run).
+470 tests pass; `ruff` clean; `npm run build` clean.
+
+**Amended 2026-09-21, live-reverified once deployed: the 429 was gone, but the very next real
+investigation surfaced a fifth bug (D-068) in the same narrative-consistency check family.** Once
+deployed, a real `get_element_properties(entity_type="IfcDoor")` investigation on finding 2553900
+completed with no 429 -- confirming this fix -- but its fully correct answer, restating "total_count:
+50 doors in the IFC" (the tool's own real count), was flagged `unverified`. Root-caused directly
+against the live trace (fetched via the app's own `/api/v1/traces/{id}` endpoint, not guessed) in
+`_numeric_tokens_from_result_value`: `_add(len(value))` -- recording a list's own length as a real
+fact -- only ever ran inside the `reconcile_doors_windows`-specific branch (items with a `status`
+key), never for any other list shape. A plain `get_element_properties` list's own real total item
+count was therefore never a recognized fact, even though "there are N of these" is always a truthful
+thing a correct answer can state about any list result. Fixed by moving the length-recording outside
+the reconcile-specific branch so it applies to every non-empty list. Regression test:
+`tests/test_v2_representative_eval.py::test_narrative_consistency_check_recognizes_a_lists_own_length_as_a_real_fact`.
+
+**A second, adjacent gap found reading the same code while investigating the above (not the one
+actually observed live, but real and now closed defensively):** `known_reference_numbers` (D-066)
+only ever checked citation locators for a `"tag"` or `"record"` key, missing `reconcile_doors_
+windows`'s own PDF-side citation locator key, `"mark"` (`_synthesize_reconciliation_response`'s
+`{"page": 2, "mark": tag}`). A finding whose tag is genuinely absent from the IFC side
+(`missing_in_ifc` -- this exact investigated finding's own case) has *only* a PDF-side citation, so
+its own tag number was never exempted at all when restated without a preceding reference word (the
+same D-066 gap, on a different locator key). Fixed by adding `"mark"` to the checked keys.
+Regression test, verified end-to-end through `invoke_v2` so the real citation-scanning code is
+exercised, not just its consumer:
+`tests/test_v2_representative_eval.py::test_v2_exempts_a_tag_cited_only_via_reconciliations_pdf_side_mark_locator`.
+
+472 tests pass; `ruff` clean; `npm run build` clean. Pending: live reverification against the real
+deployed app once this fix merges and deploys.

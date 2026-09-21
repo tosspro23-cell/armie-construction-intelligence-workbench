@@ -616,6 +616,82 @@ def test_v2_shrinks_the_large_list_sample_size_independently_of_the_trigger_thre
     assert "\"total_count\": 45" in tool_payload_text or "'total_count': 45" in tool_payload_text
 
 
+def test_narrative_consistency_check_recognizes_a_lists_own_length_as_a_real_fact() -> None:
+    """D-068 (2026-09-21), found live minutes after redeploying D-067's
+    payload-size fix, on the real "RWTH DigitalHub" building: a fully
+    correct `get_element_properties(entity_type="IfcDoor")` investigation
+    answer restating "total_count: 50 doors in the IFC" (the tool's own
+    real, verified total match count) was flagged unverified.
+
+    Root cause, in `_numeric_tokens_from_result_value`: `_add(len(value))`
+    -- recording a list's own length as one of "this call's own real
+    facts" -- only ever ran inside the `reconcile_doors_windows`-specific
+    branch (items carrying a `status` key), never for any other list
+    shape. For a plain `get_element_properties` list (items shaped like
+    `{"element": ..., "storey": ..., "properties": ...}`, no `status` key),
+    the real total item count was never a recognized fact at all -- even
+    though "there are N of these" is always a truthful thing a correct
+    answer can state about any list result. "50 doors" then landed in the
+    door-entity window (D-065/D-066's own check) as an unexplained number,
+    indistinguishable from a fabricated count.
+
+    Fixed by moving the length-recording out of the reconcile-specific
+    branch so it applies to every non-empty list, regardless of shape.
+    """
+    door_terms = AgentService._entity_terms_for("IfcDoor")
+    items = [{"element": {"express_id": 1000 + i, "entity_type": "IfcDoor", "tag": str(2000 + i)}, "storey": "Level 01", "properties": {"Height": 2.045}} for i in range(50)]
+    facts = AgentService._numeric_tokens_from_result_value(items)
+
+    answer = "get_element_properties (IfcDoor) result: total_count: 50 doors in the IFC."
+    assert AgentService._narrative_consistent_with_tool_facts(answer, [(door_terms, facts)])
+
+    # A genuinely fabricated count must still be caught.
+    fabricated = "get_element_properties (IfcDoor) result: total_count: 99999 doors in the IFC."
+    assert not AgentService._narrative_consistent_with_tool_facts(fabricated, [(door_terms, facts)])
+
+
+def test_v2_exempts_a_tag_cited_only_via_reconciliations_pdf_side_mark_locator(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """D-068 follow-up, found reading the code while investigating the bug
+    above: `known_reference_numbers` (D-066) only ever checked citation
+    locators for a `"tag"` or `"record"` key -- missing `reconcile_doors_
+    windows`'s own PDF-side citation locator key, `"mark"`
+    (`_synthesize_reconciliation_response`'s `{"page": 2, "mark": tag}`,
+    see graph.py around its `_citations` call). A finding whose tag is
+    genuinely absent from the IFC side (`missing_in_ifc` -- this exact
+    investigated finding's own case on the real DigitalHub building) has
+    *only* a PDF-side citation, so its own tag number was never being
+    exempted at all, regardless of phrasing, before this fix.
+
+    Verified end-to-end through `invoke_v2` (not by hand-constructing
+    `known_reference_numbers`, unlike the D-066 tests above) so the actual
+    citation-scanning code is exercised, not just its consumer.
+    """
+    fake = FakeModelProvider()
+    fake.script("v2_tool_turn", ScriptedToolCalls([("count_elements", {"entity_type": "IfcDoor"})]))
+    # No preceding reference word ("tag"/"mark"/...) before the restated
+    # number -- isolates the citation-based exemption from D-065/D-066's
+    # own word-based fallback, which would otherwise mask this gap.
+    fake.script("v2_tool_turn", ScriptedAnswer(["There are 4 doors, and door 999999 does not appear in the IFC model at all."]))
+    _, service, resources = _service(tmp_path, fake)
+
+    real_dispatch = AgentService._v2_dispatch_tool
+
+    def dispatch_with_mark_only_citation(self, tool_call, state):
+        result = real_dispatch(self, tool_call, state)
+        result["tool_result"]["citations"] = [
+            *result["tool_result"].get("citations", []),
+            {"evidence_id": "test-mark-citation", "source_type": "pdf", "label": "PDF schedule row Mark=999999.", "locator": {"page": 2, "mark": "999999"}, "project_id": "demo", "source_set_id": "demo-v1", "source_file": "test.pdf"},
+        ]
+        return result
+
+    monkeypatch.setattr(AgentService, "_v2_dispatch_tool", dispatch_with_mark_only_citation)
+
+    response = asyncio.run(_run(service, resources, "How many doors are there, and is any tag missing from the IFC?", "eval-mark-only-citation"))
+
+    assert response.disposition.value == "answered"
+    assert response.verification.status == "verified"  # not "unverified" -- the mark-cited tag is a real, legitimate restatement
+
+
 def test_narrative_consistency_check_tolerates_natural_rounding_of_a_measurement() -> None:
     """Owner-reported, 2026-09-17 (found live): a real space_distance call
     returning {"value_m": 5.234, ...} (the same shape aggregate_quantity
