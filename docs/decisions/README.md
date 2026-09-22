@@ -3555,4 +3555,45 @@ against the real demo fixture showed the Decision Trace's own Execution step ren
 not just the schema), and clicking that turn's own citation's "Jump to this evidence" populated the
 IFC Viewer's selection details panel with `Tag: W01` for the first time.
 
-483 tests pass; `ruff` clean; `npm run build` clean.
+483 tests pass; `ruff` clean; `npm run build` clean. **Merged and deployed (2026-09-21).**
+
+## D-073 — narrative-consistency check's seventh real gap: a real GlobalId's own digits misread as a claimed number
+
+**Found live, 2026-09-22, live-verifying D-072 immediately after it deployed:** re-investigated
+finding 2543664 fresh. D-072's own fix worked exactly as intended -- the model's first and only IFC
+call was `get_element_properties(entity_type=IfcWindow, tags=['2543664'])`, found the element
+directly, and correctly confirmed `verdict=dimension_confirmed, confirmed_width_m=6.0` (the same
+correct conclusion this finding reached at the end of the D-065..D-069 session). But the answer was
+flagged `unverified` again.
+
+Root-caused directly, not guessed (matching [[feedback_measure_dont_guess_root_causes]]): the
+model's own answer echoed back the element's real GlobalId in prose ("GlobalId:
+0ehNcYPbH3JQicvZQLHP24") -- a genuinely correct, tool-derived value that D-072 made routine to state
+(a precise single-element lookup naturally reports the element's own identifying fields), but not a
+number. `_narrative_consistent_with_tool_facts`'s `\d+(?:\.\d+)?` regex extracted "24" out of the
+middle of it (confirmed with a two-line Python repro: `re.findall(r"\d+(?:\.\d+)?",
+"0ehNcYPbH3JQicvZQLHP24")` -> `['0', '3', '24']`), and "24" happened to land within the entity-bound
+check's 15-character window of the "IfcWindow" mention two lines above, with no real IfcWindow fact
+equal to 24 -- flagging a fully correct, fully tool-grounded answer as if it had fabricated a
+number.
+
+**This is the seventh real gap in this exact check family (D-065, D-066, two in D-068, D-069, and
+now this)** -- exactly the threshold D-069's own entry flagged as worth raising to the owner as its
+own question rather than extending the rule set again. Raised it; owner's explicit decision
+(2026-09-22): fix this one narrowly, the same scope as the six before it, not a redesign -- consistent
+with each prior fix in this family being correct and proportionate to the actual shape it closed,
+and a GUID-embedded digit is a distinct, narrow, well-understood shape (unlike, say, a systemic
+flaw in the check's core contract).
+
+Fixed: an IFC GlobalId is not free-form text -- it is the schema's own fixed-shape compressed GUID,
+always exactly 22 characters from `[0-9A-Za-z_$]`. `_narrative_consistent_with_tool_facts` now
+strips any such token from the answer text before any number extraction, the same "narrow,
+disclosed heuristic" scope as the adjacent `_reference_word_pattern`, not a general "ignore
+alphanumeric tokens" rule that could also blind the check to a real fabricated number. Regression
+test, `tests/test_v2_representative_eval.py::test_narrative_consistency_check_ignores_digits_embedded_in_a_real_globalid`:
+reproduces the exact live-observed answer shape verbatim, confirmed to fail against the pre-fix
+code before confirming it passes against the fix, and separately confirms a genuinely fabricated
+number sitting right next to the same real GlobalId is still caught (the fix strips only the
+GlobalId's own digits, not every number near one).
+
+484 tests pass; `ruff` clean; `npm run build` clean.

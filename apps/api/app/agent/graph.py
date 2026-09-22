@@ -3477,6 +3477,25 @@ Return only a corrected MultiQueryPlan JSON object."""
                 return actual == expected
             return abs(actual - expected) < 0.05
 
+        # D-073 (2026-09-22, found live immediately after D-072 deployed):
+        # D-072 gave a finding investigation a precise way to look up one
+        # element by Tag, and the model's own answer started echoing back
+        # that element's real GlobalId in prose (e.g. "GlobalId:
+        # 0ehNcYPbH3JQicvZQLHP24") -- a real, correct, tool-derived value,
+        # but not a number. `\d+(?:\.\d+)?` still extracted "24" out of the
+        # middle of it (the digits after "...QLHP"), and that "24" happened
+        # to land within `window_chars` of an "IfcWindow" mention with no
+        # matching real fact, flagging a fully correct, fully verified
+        # answer `unverified` -- the seventh real gap in this exact check
+        # family (D-065..D-069), each closing a different real shape a
+        # correct answer's own prose can take. An IFC GlobalId is a
+        # standard, fixed-shape compressed GUID (22 characters from
+        # `[0-9A-Za-z_$]`, per the IFC schema) -- stripped from the text
+        # before any number extraction below, the same "narrow, disclosed
+        # heuristic" scope as `_reference_word_pattern` two lines down, not
+        # a general "ignore alphanumeric tokens" rule that could also
+        # swallow a real number.
+        answer_markdown = re.sub(r"\b[0-9A-Za-z_$]{22}\b", "", answer_markdown)
         answer_lower = answer_markdown.lower()
         answer_numbers = [float(match) for match in re.findall(r"\d+(?:\.\d+)?", answer_markdown)]
 
