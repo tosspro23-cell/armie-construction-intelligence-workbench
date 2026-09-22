@@ -650,6 +650,60 @@ def test_narrative_consistency_check_recognizes_a_lists_own_length_as_a_real_fac
     assert not AgentService._narrative_consistent_with_tool_facts(fabricated, [(door_terms, facts)])
 
 
+def test_narrative_consistency_check_ignores_digits_embedded_in_a_real_globalid() -> None:
+    """D-073 (2026-09-22), found live minutes after redeploying D-072's
+    tags-based-lookup fix, on the real "RWTH DigitalHub" building: a
+    fully correct `get_element_properties(entity_type=IfcWindow,
+    tags=["2543664"])` investigation answer restating the element's own
+    real GlobalId ("GlobalId: 0ehNcYPbH3JQicvZQLHP24" -- D-072 made this
+    kind of direct, single-element lookup routine, so the model started
+    echoing the returned GlobalId back in its own prose) was flagged
+    `unverified`.
+
+    Root cause: `\\d+(?:\\.\\d+)?` extracted "24" out of the middle of the
+    GlobalId string (the digits following "...QLHP"), and that "24"
+    happened to land within the entity-bound check's 15-character window
+    of the "IfcWindow" mention two lines above it, with no real IfcWindow
+    fact equal to 24 -- flagging a fully correct, fully tool-grounded
+    answer as if it had fabricated a number. A GlobalId is not a number at
+    all; it is IFC's own standard fixed-shape compressed GUID (22
+    characters from `[0-9A-Za-z_$]`).
+
+    Fixed by stripping any 22-character GlobalId-shaped token from the
+    answer text before any number extraction -- confirmed here against
+    the exact live-observed shape, not a simplified stand-in, and
+    confirmed a genuinely fabricated width right next to the same
+    GlobalId is still caught (the fix does not blind the check to real
+    numbers merely because a GlobalId sits nearby).
+    """
+    window_terms = AgentService._entity_terms_for("IfcWindow")
+    facts = {6.0, 1.5}
+    # The finding's own tag, restated in "tags=['2543664']" right next to
+    # the "IfcWindow" mention -- exempted the same way a real citation's
+    # locator tag already would be (D-065/D-066), not part of what this
+    # test is about; included here so the GlobalId fix is isolated as the
+    # only thing under test.
+    known_reference_numbers = {2543664.0}
+
+    answer = (
+        "IFC properties (get_element_properties, entity_type=IfcWindow, tags=['2543664']):\n"
+        "- GlobalId: 0ehNcYPbH3JQicvZQLHP24\n"
+        "- Qto_WindowBaseQuantities.Width = 6.0 m\n"
+        "- Qto_WindowBaseQuantities.Height = 1.5 m"
+    )
+    assert AgentService._narrative_consistent_with_tool_facts(answer, [(window_terms, facts)], known_reference_numbers)
+
+    # A genuinely fabricated width sitting right next to the same real
+    # GlobalId must still be caught -- the fix strips the GlobalId's own
+    # digits, not every number anywhere near one.
+    fabricated = (
+        "IFC properties (get_element_properties, entity_type=IfcWindow, tags=['2543664']):\n"
+        "- GlobalId: 0ehNcYPbH3JQicvZQLHP24\n"
+        "- Qto_WindowBaseQuantities.Width = 99999 m"
+    )
+    assert not AgentService._narrative_consistent_with_tool_facts(fabricated, [(window_terms, facts)], known_reference_numbers)
+
+
 def test_v2_exempts_a_tag_cited_only_via_reconciliations_pdf_side_mark_locator(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """D-068 follow-up, found reading the code while investigating the bug
     above: `known_reference_numbers` (D-066) only ever checked citation
