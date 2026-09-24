@@ -131,7 +131,7 @@ jobs:
       AZURE_TENANT_ID_FOR_CLOUD_LINK: ${{ secrets.AZURE_TENANT_ID }}
       APP_INSIGHTS_RESOURCE_ID: ${{ inputs.app_insights_resource_id }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # A repository secret (unlike a required workflow_dispatch input)
       # cannot be enforced as "required" by GitHub itself -- an unset repo
