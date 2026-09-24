@@ -14,7 +14,7 @@ dependencies = [
   "ifcopenshell>=0.8,<1",
   "PyMuPDF>=1.24,<2",
   "httpx>=0.27,<1",
-  "openai>=1.0,<2",
+  "openai>=1.0,<4",
   "python-multipart>=0.0.9,<1",
   "azure-identity>=1.17,<2",
   # azure.identity.aio's DefaultAzureCredential needs an async HTTP
