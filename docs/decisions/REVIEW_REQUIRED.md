@@ -446,7 +446,39 @@ only if a real case shows this meaningfully hurting investigation quality in pra
 speculatively -- matches this project's own "one fixed rule, not configurable this milestone"
 precedent for not over-generalizing pattern-matching heuristics ahead of a demonstrated need.
 
-## M17: narrative-consistency verification can mark a numerically-correct answer "unverified"
+## UPDATED, not resolved: narrative-consistency verification can mark a numerically-correct answer "unverified" -- six distinct real causes found and fixed, owner explicitly declined to redesign at the seventh
+
+First found live, 2026-09-19 (see this entry's own original text below, kept for the record): a
+V2 answer whose every stated number genuinely traced to this turn's own tool results was still
+shown with D-062's `unverified` caveat. The original entry speculated the cause was the
+investigation prompt's own restated `"±0.01 m tolerance"` text -- **that guess was never
+confirmed and, in hindsight, was not any of the real causes actually found.** A later live
+stress-testing session (2026-09-21/22, both real Dataset Pack buildings) measured the real trigger
+directly against each occurrence instead of guessing further, finding six distinct real causes in
+this same check, each narrow and independently fixed: a restated tag/mark with no preceding
+reference word (D-065), the same gap for plural tags and a window-slicing edge bug (D-066), a
+list's own length never recognized outside one specific tool's own branch (D-068), an adjacent gap
+where `mark`-only citations were never exempted (also D-068), a `distinct_value_summary`'s own
+per-value counts computed *after* the facts were already extracted (D-069), and a real IFC
+GlobalId's own embedded digits misread as a claimed number once D-072 made the model start
+reporting GlobalIds in prose (D-073). Full accounts: `docs/decisions/README.md` D-065 through
+D-073.
+
+At six confirmed real gaps in the same check across five separate deploy-and-retest cycles, this
+was explicitly raised to the owner as the question this entry originally deferred: keep patching
+narrowly, or redesign the check's core contract (e.g. require every claimed number to trace to a
+specific, tagged source value at generation time, not a post-hoc regex scan). **Owner's explicit
+decision (2026-09-22, at the seventh occurrence, D-073): keep the narrow-patch approach** -- each
+gap so far has been a distinct, well-understood, narrowly-fixable shape (not a flaw in the check's
+core contract), so redesigning was not judged worth the cost yet. This remains a live, disclosed
+risk by design (`_narrative_consistent_with_tool_facts`'s own docstring: "a narrow heuristic, not
+a general fact-checker"), fails safe (a caveat on a correct answer, never a missing caveat on a
+wrong one), and does not block the human-approval gate the finding-resolution workflow's whole
+design relies on. Revisit the redesign question again if an eighth real gap surfaces -- that
+would mean seven incidents have not actually converged the check toward completeness.
+
+<details>
+<summary>Original entry, 2026-09-19 (superseded by the above -- kept for the record, not for its since-unconfirmed hypothesis)</summary>
 
 Found live, 2026-09-19, during the same investigation testing: a V2 answer whose every stated
 number genuinely traced to this turn's own tool results was still shown with D-062's `unverified`
@@ -461,6 +493,8 @@ block the human-approval gate this milestone's whole design relies on, and confi
 trigger would need a dedicated repro this session's own priority (verifying the architecture
 redesign, then widening finding-type scope) didn't leave room for. Revisit if this proves common
 enough in practice to meaningfully erode trust in the `verified` badge's own signal.
+
+</details>
 
 ## RESOLVED by D-064 follow-up: PostgresFindingStore's row-locked transactions now have a real-Postgres integration test
 
@@ -493,3 +527,31 @@ that would 409 if clicked). Fixed by widening the actions that clear `pending_pr
 `resolve` (`apps/api/app/finding_workflow.py`), with its own dedicated regression test
 (`test_resolve_clears_a_pre_existing_pending_proposal`) alongside the concurrency tests. Recorded
 in D-064's own amendment for the durable record.
+
+## Operational gap, found live 2026-09-21: `azure-deploy.yml` never applies a new migration to the real production database
+
+Found while deploying D-070 (adds `EngineeringFinding.entity_type`, migration `0009`): the
+deployed code's `PostgresFindingStore.upsert_from_reconciliation` silently failed to persist the
+new column (caught by its own best-effort `except Exception`, logged as a `finding_upsert`/`error`
+audit event, never surfacing as a visible failure) until the migration was applied by hand. Root
+cause, confirmed directly (`grep "migrations/\|psql" .github/workflows/azure-deploy.yml` returns
+nothing): the deploy workflow builds and ships the new image and redeploys the Container Apps, but
+never applies a pending SQL migration file against the real Azure Database for PostgreSQL --
+consistent with this repo's own deliberate "no migration framework, applied by hand" choice
+(`apps/api/migrations/0001_conversations_and_audit_events.sql`'s own header comment), but that
+choice's actual consequence -- a schema-dependent code change is silently inert in production
+until someone remembers the separate manual step -- had not previously been exercised end-to-end
+and written down.
+
+Not fixed this session: adding an automated migration-apply step to `azure-deploy.yml` is a real
+design decision (which credential runs it, whether a failed migration should block the image
+deploy or vice versa, how a destructive/irreversible migration would be gated differently from an
+additive one) that deserves its own scoped spec, not a reflexive fix bolted onto an unrelated
+finding-workflow change. Worked around this one instance by applying migration `0009` by hand: an
+AAD access token via `az account get-access-token --resource-type oss-rdbms`, connected as the
+server's actual Microsoft Entra admin (`az postgres flexible-server microsoft-entra-admin list` --
+the app's own managed identity cannot generate this token type for itself), then `psql -f`. The
+same manual method the M4 baseline session already used for `0001`/`0002a`/`0002b` -- this is a
+recurring, not a one-off, operational cost every future schema-touching redeploy will keep paying
+until this gap is closed. Revisit before the next milestone that adds a new column/table it
+expects live traffic to exercise immediately after deploy.

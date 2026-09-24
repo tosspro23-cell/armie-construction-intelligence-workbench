@@ -48,9 +48,40 @@ The UI groups existing audit events into intent, normalization, planning, execut
 Gen2 when configured (`ADLS_ACCOUNT_URL`), with a frozen `source_set_id` provenance value
 recorded on every citation and audit event. `ConversationStore.bind_project` binds one thread to
 exactly one project for its lifetime, enforced backend-side. This is not a hypothetical future
-abstraction: two independently-isolated projects (`demo`, `westgate`) run against the real
-deployed slice today, each with its own directory-level POSIX ACL on the underlying storage
-account, verified with a minimal service principal holding zero RBAC roles.
+abstraction: four independently-isolated projects run against the real deployed slice today
+(`demo`, `westgate` -- synthetic fixtures; `duplex`, `digitalhub` -- real, openly-licensed
+buildings, SPEC-M13, see README.md's "Real Dataset Pack"), each with its own directory-level
+POSIX ACL on the underlying storage account, verified with a minimal service principal holding
+zero RBAC roles.
+
+## Tool-calling agent and finding resolution (SPEC-M16/M17, D-061/D-063/D-064)
+
+A second engine, selectable per conversation, replaces the fixed plan → execute → verify pipeline
+above with a bounded iteration loop (`AgentService.invoke_v2`): each iteration either dispatches
+every tool call the model requested this turn (`asyncio.gather`, same underlying deterministic
+IFC/PDF tools as V1) or produces a final streamed answer. A narrative-consistency check
+(`_narrative_consistent_with_tool_facts`) cross-references every number the final answer states
+against this turn's own real tool results before the answer is shown `verified` -- a disclosed
+heuristic, not a general semantic fact-checker, closed against six distinct real false-positive
+shapes found by live stress-testing (D-065, D-066, D-068, D-069, D-073).
+
+Every non-matched item a door/window reconciliation detects is promoted into a persisted
+`EngineeringFinding` (`apps/api/app/finding_workflow.py`'s own enforced state machine: open →
+acknowledged → action required → resolved → re-verified/closed). The V2 agent can investigate one,
+making several real tool calls before submitting a typed, structured verdict via
+`submit_finding_verdict` -- never a free-text guess, and the agent never writes to the real IFC
+model or PDF drawing itself. A human explicitly approves or rejects the resulting proposal;
+"re-verify" re-reads the real sources afresh rather than trusting either side's own say-so.
+
+## Real Dataset Pack (SPEC-M13)
+
+Two of the four configured projects are real, unmodified, openly-licensed buildings (Duplex
+Apartment, CC BY 4.0; RWTH DigitalHub, MIT -- full attribution in each
+`demo_data/projects/<name>/ATTRIBUTION.md`), used specifically because a synthetic-only fixture
+cannot exercise a real building's own scale and property-richness: DigitalHub alone carries 111
+real door/window openings and dozens of vendor-specific IFC properties per element, which drove
+several real fixes to token-budget handling and tool-selection precision (D-067, D-070, D-072)
+that a small synthetic fixture never surfaced.
 
 Still bounded, deliberately: one project per thread, no cross-project query, and no general
 `SourceRegistry`/`CapabilityRegistry` abstraction beyond what `ServiceContainer`/`ProjectResources`

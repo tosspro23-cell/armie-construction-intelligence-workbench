@@ -6,10 +6,13 @@
 A cloud-native, auditable multimodal AI reference platform for turning fragmented construction
 information -- BIM models, engineering drawings, schedules, and viewer screenshots -- into
 verified, evidenced answers with typed planning, controlled execution, independent verification,
-and a full audit trail. Runs two ways from the same codebase: **fully local** (Ollama, one
-synthetic project) for a zero-cost walkthrough, or **fully deployed on Azure** (Container Apps,
-Azure OpenAI, Azure AI Search, PostgreSQL, ADLS Gen2, Blob Storage, Application Insights, all
-behind Managed Identity) for a real multi-project, multi-document, cloud-native slice.
+and a full audit trail. A tool-calling agent can additionally investigate a flagged IFC↔drawing
+discrepancy across several real tool calls and propose a resolution for a human to approve or
+reject -- never applied automatically. Runs two ways from the same codebase: **fully local**
+(Ollama, one synthetic project) for a zero-cost walkthrough, or **fully deployed on Azure**
+(Container Apps, Azure OpenAI, Azure AI Search, PostgreSQL, ADLS Gen2, Blob Storage, Application
+Insights, all behind Managed Identity) for a real multi-project, multi-document, cloud-native
+slice covering both synthetic fixtures and two real, openly-licensed buildings.
 
 This is an independent ARMIE AI Labs reference implementation. It is not a production SaaS,
 compliance engine, unrestricted BIM reasoning system, or multi-tenant platform -- see
@@ -38,11 +41,14 @@ A handful of scenarios to try immediately, no setup required, on the **ARMIE Dem
 | `Reconcile the doors and windows between the model and the schedule.` | Cross-source IFC↔drawing reconciliation joined on a shared identifier |
 | `What is the connected load for Panel-B?` | An honest precision refusal -- the same field genuinely exists in two documents, and the system says so instead of guessing |
 | `What is the connected load for Panel-E?` | Azure AI Search hybrid retrieval directing an honest miss to the most relevant document, with the full relevance table one click away |
+| `Reconcile the doors and windows...` (against **Duplex Apartment** or **RWTH DigitalHub**), then **Findings → Ask agent to investigate** on a flagged item | Tool-calling agent (V2) makes several real, independently verified IFC/PDF tool calls to investigate a real discrepancy on a real building and proposes a resolution -- shown with its own basis and evidence, for a human to approve or reject; the source files are never modified |
 
-Switch the **Project** selector to **Westgate Distribution Center** to see the same corpus of
-capabilities running against an independently isolated second project -- different IFC, different
-documents, same shared board names resolving to different values, proving one project's data can
-never leak into another's answer.
+Switch the **Project** selector to see the same capability surface run against four independently
+isolated projects: two synthetic fixtures (**ARMIE Demo Project**, **Westgate Distribution
+Center**) and two real, openly-licensed buildings (**Duplex Apartment**, **RWTH DigitalHub** --
+see [Real Dataset Pack](#real-dataset-pack) below) -- different IFC, different documents, same
+shared board/tag names resolving to different values, proving one project's data can never leak
+into another's answer.
 
 ## Two ways to run this
 
@@ -133,6 +139,25 @@ Vision models interpret drawing or viewer pixels as a bounded fallback; they nev
 structured IFC computation, and a code-level guard rejects any answer-polish rewrite that changes
 even one number.
 
+## Agent-assisted finding resolution
+
+A separate engine (**V2**, selectable per conversation) trades the fixed pipeline above for a
+bounded tool-calling agent loop: the model chooses from a fixed set of read-only IFC/PDF tools
+across several iterations, and a heuristic check cross-references its final answer's own stated
+numbers against what those tool calls actually returned before the answer is shown as `verified`.
+
+Every non-matching item a door/window reconciliation finds is promoted into a persisted,
+human-reviewable `EngineeringFinding` (open → acknowledged → action required → resolved →
+re-verified/closed) in the **Findings** tab, not just reported once and forgotten. From there,
+**Ask agent to investigate** hands one finding to the V2 agent, which makes several real tool
+calls -- re-checking the element's own IFC properties, trying multiple worded lookups against the
+PDF schedule, cross-checking the reconciliation's own matched-item list -- and submits a typed,
+structured verdict (confirmed dimension, genuine omission, found under a different reference, or
+a disclosed inconclusive) with its own evidence-backed basis. A human reviews and explicitly
+approves or rejects it; **the agent never writes to the IFC model or PDF drawing itself** --
+"Re-check now" re-reads the real sources afresh to confirm a claimed fix actually landed, rather
+than trusting either the agent or the human's own say-so.
+
 ## Design principles
 
 - One typed `QueryPlan`/`MultiQueryPlan` contract for heuristic and semantic planning, across
@@ -164,14 +189,32 @@ even one number.
 
 ## Public demo workspace
 
-The repository includes only synthetic assets in `demo_data/`:
+The repository includes only synthetic assets and openly-licensed real building data in
+`demo_data/` -- no private, customer, or proprietary project files:
 
-- `armie_demo.ifc` / `demo_data/westgate/`: two independently-isolated project fixtures, each a
-  BIM model with walls, doors, windows, storey containment, and controlled heights.
+- `armie_demo.ifc` / `demo_data/westgate/`: two independently-isolated synthetic project
+  fixtures, each a BIM model with walls, doors, windows, storey containment, and controlled
+  heights.
 - `armie_demo_schedule.pdf` plus an 18-document synthetic corpus (`demo_data/corpus/`): schedules,
   door/window spec sheets, RFI logs, and meeting-minutes excerpts, covering both a genuine
   precision collision (the same field answerable from more than one document) and a genuine
   recall failure (an answer that exists only under vocabulary no table uses).
+
+### Real Dataset Pack
+
+Two of the four configured projects are real, unmodified, openly-licensed buildings, each with a
+full attribution record (`demo_data/projects/<name>/ATTRIBUTION.md`):
+
+| Project | Real IFC source | License | Scale |
+|---|---|---|---|
+| **Duplex Apartment** | buildingSMART International's Community Sample Test Files (originally CERL/NIBS) | CC BY 4.0 | 2-storey residential, ~38 real doors/windows |
+| **RWTH DigitalHub** | RWTH Aachen University E3D Institute | MIT | Multi-storey institutional building, 111 real openings |
+
+Neither building ships with a real door/window schedule in its own source repository -- each
+project's PDF schedule is ARMIE-generated (`scripts/generate_duplex_schedule.py`/
+`generate_digitalhub_schedule.py`) from that building's own real IFC `Tag` values and real
+dimensions, with a small number of deliberately planted discrepancies documented in each script's
+own header, at real-building scale and complexity a synthetic-only fixture cannot exercise.
 
 The workbench has three source modes -- BIM Model, Engineering Drawing, and Viewer Snapshot --
 plus a Project selector when more than one project is configured. The Decision Trace panel shows
@@ -211,6 +254,10 @@ The following screenshots were captured locally from the synthetic public fixtur
   checked against a drawing schedule, joined on each element's `Tag`, reporting per-item matches,
   dimension mismatches, and omissions on either side (see "Known limitations" for what remains
   out of scope).
+- Promoting a reconciliation discrepancy into a persisted, human-reviewable `EngineeringFinding`
+  with an explicit lifecycle (open → acknowledged → action required → resolved →
+  re-verified/closed), and a tool-calling agent that can investigate one and propose a resolution
+  for a human to approve or reject -- see "Agent-assisted finding resolution" above.
 - Optional answer-wording polish: a final model call may reword an already-computed answer for
   tone, gated by a code-level check that rejects any rewrite whose set of numbers doesn't
   exactly match the original -- off by default, opt-in per deployment.
@@ -228,30 +275,36 @@ PYTHONPATH=apps/api python3 -m pytest -q
 cd apps/web && npm run build
 ```
 
-295 tests run against the public synthetic fixtures, covering: deterministic-contract tests for
-the router/plan-validation/verification modules; provider failure-path evals driven by a fake,
-no-network provider; deterministic document-extraction tests across every board/field combination
-plus ambiguity, vision-fallback, and bbox-plausibility paths; an explicit disposition-taxonomy
-contract suite; cross-source reconciliation's ground truth, detector precision, and fixture
-isolation; multi-project ADLS opt-in/download/concurrency/failure-contract tests, including a
-real thread-pool race; the Azure AI Search retrieval seam; per-caller and global rate limiting;
-the answer-polish number-preservation guard's full truth table; and the Cloud Provenance
-Application Insights link's span-tagging, proven via a real HTTP request against a recording-span
-double, not just a unit check on the URL-building helper. CI runs the full suite on Python
-3.9-3.12 (`.github/workflows/ci.yml`); see `docs/specs/` (one file per milestone, M1 through M10)
-for the full test inventory and `docs/decisions/README.md` for every fix's own verification
-account. Azure-specific behavior (real deployment, real Azure OpenAI/Search/ADLS/Application
+494 tests run against the public synthetic fixtures and the two real, openly-licensed Dataset Pack
+buildings, covering: deterministic-contract tests for the router/plan-validation/verification
+modules; provider failure-path evals driven by a fake, no-network provider; deterministic
+document-extraction tests across every board/field combination plus ambiguity, vision-fallback,
+and bbox-plausibility paths; an explicit disposition-taxonomy contract suite; cross-source
+reconciliation's ground truth, detector precision, and fixture isolation; multi-project ADLS
+opt-in/download/concurrency/failure-contract tests, including a real thread-pool race; the V2
+tool-calling agent's own representative-question suite and narrative-consistency verification;
+the Engineering Finding lifecycle, including real-Postgres concurrent-transaction tests; the
+Azure AI Search retrieval seam; per-caller and global rate limiting; the answer-polish
+number-preservation guard's full truth table; and the Cloud Provenance Application Insights
+link's span-tagging, proven via a real HTTP request against a recording-span double, not just a
+unit check on the URL-building helper. CI runs the full suite on Python 3.9-3.12
+(`.github/workflows/ci.yml`); see `docs/specs/` (one file per milestone, M1 through M17) for the
+full test inventory and `docs/decisions/README.md` for every fix's own verification account.
+Azure-specific behavior (real deployment, real Azure OpenAI/Search/ADLS/Application
 Insights) is additionally verified against the live subscription on every deploy via
 `azure-deploy.yml`'s own post-deploy smoke tests, and by hand -- see `docs/reports/` for the
-dated deployment-baseline reports and `docs/decisions/README.md`'s D-024 through D-031 for live
-fixes found and verified directly against production.
+dated deployment-baseline reports and `docs/decisions/README.md` (73 decision-log entries and
+counting) for every live fix found and verified directly against production, including several
+found only by stress-testing the agent against the two real Dataset Pack buildings above.
 
 ## Privacy and data
 
 This public repository contains no original recruitment, customer, or proprietary project data.
-Demo assets are synthetic and generated by `scripts/generate_demo_data.py`. Do not add supplied
-IFC/PDF files, evidence crops, screenshots, model caches, runtime traces, secrets, or private
-paths.
+Synthetic demo assets are generated by `scripts/generate_demo_data.py`; the two real Dataset Pack
+buildings are unmodified, openly-licensed third-party files with a full attribution record (see
+"Real Dataset Pack" above) -- not proprietary, not customer data, and not a claim of authorship.
+Do not add supplied IFC/PDF files, evidence crops, screenshots, model caches, runtime traces,
+secrets, or private paths.
 
 ## Known limitations
 
@@ -284,11 +337,10 @@ paths.
 
 ## Roadmap
 
-Ideas under active evaluation, not commitments: promoting a reconciliation finding into a typed,
-human-reviewable business object (accept/reject a discrepancy, not just report it); revision-aware
-source governance (a superseded document should not be citable as authoritative); an explicit
-data-readiness/quality gate ahead of automation; Entra ID-backed per-project authorization; and a
-generalized connector abstraction over today's local-filesystem/ADLS source registry. See
+Ideas under active evaluation, not commitments: revision-aware source governance (a superseded
+document should not be citable as authoritative); an explicit data-readiness/quality gate ahead
+of automation; Entra ID-backed per-project authorization; and a generalized connector abstraction
+over today's local-filesystem/ADLS source registry. See
 `docs/decisions/REVIEW_REQUIRED.md` and `docs/decisions/README.md` for every currently-tracked
 gap and the reasoning behind each milestone's own scope boundary.
 

@@ -46,6 +46,9 @@ This is a cold-start guide for a new vendor or frontier coding agent. Read this 
 | Optional answer-wording polish (opt-in, `ENABLE_ANSWER_POLISH`) -- number-preservation guard is the actual enforcement, not the prompt (SPEC-M10, D-025) | `apps/api/app/agent/graph.py` (`_polish_answer`, `_polish_preserves_facts`) |
 | Cloud Provenance -> Application Insights deep link (opt-in, `AZURE_TENANT_ID`/`APP_INSIGHTS_RESOURCE_ID`) -- tags the OpenTelemetry span with `AgentService.invoke`'s own `trace_id`, not the request-lifecycle `request_id` (D-028, fixed in D-031 after shipping with the wrong ID) | `apps/api/app/main.py` (`_tag_span_with_trace_id`), `apps/api/app/agent/graph.py` (`_cloud_trace_url`, `_cloud_trace_query`) |
 | Independent and invariant verification | `apps/api/app/verification/verifiers.py` |
+| **V2 tool-calling agent** -- a bounded iteration loop (`invoke_v2`) where each iteration either dispatches model-requested tool calls or produces a final answer; narrative-consistency verification cross-checks the final answer's own numbers against this turn's real tool results (SPEC-M16, D-061/D-062, plus six real false-positive fixes D-065/D-066/D-068/D-069/D-073) | `apps/api/app/agent/graph.py` (`invoke_v2`, `_v2_dispatch_tool`, `_narrative_consistent_with_tool_facts`), `apps/api/app/agent/tools.py` (tool schemas) |
+| **Engineering Finding workflow** -- promotes a non-matched reconciliation item into a persisted, human-reviewable object with an enforced state machine (open → acknowledged → action required → resolved → re-verified/closed); the V2 agent can investigate one and submit a typed verdict via `submit_finding_verdict`, never writing to the real IFC/PDF sources itself (SPEC-M11, SPEC-M17, D-063/D-064) | `apps/api/app/finding_workflow.py` (state machine), `apps/api/app/persistence/finding_store.py` (`InMemoryFindingStore`/`PostgresFindingStore`), `apps/api/app/agent/graph.py` (`build_finding_investigation_question`, `build_finding_proposal`, `_upsert_findings_from_reconciliation`), `apps/web/src/Findings.tsx` |
+| Decision Trace panel -- linear Question/Plan/Execution/Evidence/Verification/Result trace with per-step raw audit events, real dispatched tool calls/arguments, and cloud provenance one click away | `apps/web/src/DecisionStory.tsx` |
 | Browser state, viewer, citations, audit grouping, cancellation | `apps/web/src/main.tsx`, `apps/web/src/IfcViewer.tsx`, `apps/web/src/styles.css` |
 | Deterministic-contract, failure-path, characterization, and seam-invariance tests | `tests/` (see `docs/specs/SPEC-M1-reliability-foundation-v1.md`) |
 | The only fake used to drive the probabilistic path in tests | `tests/fakes/fake_provider.py` (`FakeModelProvider`) |
@@ -72,21 +75,24 @@ This is a cold-start guide for a new vendor or frontier coding agent. Read this 
 - Preserve synthetic-only public data. Never copy private assignment files, evidence crops, screenshots, runtime traces, or absolute machine paths into Git.
 - Prefer a failing test or a new fixture-backed acceptance case before changing a planner/tool contract.
 - Keep valid-but-unsupported, ambiguous, provider error, timeout, and cancellation dispositions distinct. This was a known gap through M1 (documented in SPEC-M1 §4.3) and was fixed in M1.5: `AgentService._unsupported_subresult` now maps the actual underlying cause to the correct disposition (`error` / `clarification_required` / `unsupported`) instead of hardcoding `refused` -- see `docs/decisions/README.md` D-010 for the full mechanism and `tests/test_disposition_contract.py` for the coverage. Do not reintroduce a collapsed disposition when adding a new failure path; map it explicitly.
-- Do not add a generic BIM query language, cross-source joins, compliance reasoning, or long-term memory without an explicit scope decision.
+- Do not add a generic BIM query language, general cross-source joins, compliance reasoning, or long-term memory without an explicit, recorded owner decision (`OD-n`). One narrow, explicit exception exists today: SPEC-M2's door/window reconciliation pilot (OD-15) -- its existence does not authorize broadening cross-source capability further.
 - Treat Dockerfiles and OpenAI hooks as unvalidated extension points unless a fresh end-to-end run proves otherwise.
 - Do not silently broaden CORS, secrets, persistence, or external network access.
 
 ## Current repository state
 
-The public `main` line is well past the initial release: ten milestones (`docs/specs/SPEC-M1-*`
-through `SPEC-M10-*`) and thirty-one decision-log entries (`docs/decisions/README.md`, D-001
-through D-031) are merged, including a real, currently-deployed Azure profile (Container Apps,
-Azure OpenAI, Azure AI Search, PostgreSQL, ADLS Gen2 multi-project isolation, Blob Storage,
-Application Insights) alongside the original local Ollama profile. `PROJECT_STATE.md`'s
-"Milestone history" section is the authoritative, dated record -- read it, not just this file's
-own code map, before assuming a capability is future work. This handoff is documentation-only
-and should be developed on a dedicated branch; it does not authorize a merge or production
-change. Runtime output under `runtime/` is local and ignored.
+The public `main` line is well past the initial release: seventeen milestones (`docs/specs/SPEC-M1-*`
+through `SPEC-M17-*`) and seventy-three-plus decision-log entries (`docs/decisions/README.md`,
+D-001 through D-073 and counting) are merged, including a real, currently-deployed Azure profile
+(Container Apps, Azure OpenAI, Azure AI Search, PostgreSQL, ADLS Gen2 multi-project isolation
+across four projects -- two synthetic, two real openly-licensed buildings, see README.md's "Real
+Dataset Pack" -- Blob Storage, Application Insights) alongside the original local Ollama profile,
+plus a V2 tool-calling agent and a persisted, human-reviewable Engineering Finding workflow it can
+investigate (SPEC-M11/M16/M17). `PROJECT_STATE.md`'s "Milestone history" section is the
+authoritative, dated record -- read it, not just this file's own code map, before assuming a
+capability is future work. This handoff is documentation-only and should be developed on a
+dedicated branch; it does not authorize a merge or production change. Runtime output under
+`runtime/` is local and ignored.
 
 ## Takeover questions
 
