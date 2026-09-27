@@ -3597,3 +3597,86 @@ number sitting right next to the same real GlobalId is still caught (the fix str
 GlobalId's own digits, not every number near one).
 
 484 tests pass; `ruff` clean; `npm run build` clean.
+
+## D-074 — narrative-consistency check redesigned after its eighth real gap: structural answer-fact claims replace the free-text scan
+
+**Found live, 2026-09-25, minutes after redeploying D-073:** "How many doors and windows are in
+this building?" -> "There are 14 doors and 24 windows in the building." (both real, correct counts
+-- confirmed independently against the real IFC file via `grep -c "^#[0-9]*=IFCDOOR("`/`IFCWINDOW`).
+Flagged `unverified` again: "24" (windows' own real count) sat within the entity-bound check's
+15-character scan window around "doors", whose own expected set was only `{14}` -- the model
+reporting two different entities' counts in one ordinary sentence.
+
+**This is the eighth real gap in this exact check family** (D-065, D-066 x2, D-068 x2, D-069, D-073,
+and now this) -- exactly the threshold D-073's own entry flagged ("[[project_d073_narrative_check_globalid_digits]]:
+revisit the redesign question again if an eighth real gap surfaces"). Unlike the prior seven (each a
+relatively edge-case-y shape -- a restated tag, a plural restatement, a GUID's own embedded digits),
+this one is triggered by the single most natural way to phrase a two-entity-count answer: reporting
+two counts in one sentence is not an edge case, it is the ordinary shape of a two-part answer.
+Raised to the owner; **decision: redesign the check's core mechanism**, not a ninth narrow patch
+(see [[feedback_stress_testing_finds_bugs_a_single_repro_test_misses]] -- "prefer a root-cause fix
+over a growing word list").
+
+**Spec:** `docs/specs/SPEC-M18-structured-answer-verification-v1.md`, committed alone first per this
+repo's spec-first convention. **OD-55**: redesign chosen over a ninth patch, at this exact
+"eighth real gap" threshold. **OD-56**: retire `_narrative_consistent_with_tool_facts` entirely
+rather than keep it as a fallback for a turn without a structured submission -- a turn with a
+numeric answer and no structured claims is now honestly `unverified` for that specific reason, not
+silently re-checked by the very mechanism being replaced.
+
+**Root cause, restated precisely:** character proximity in free text cannot reliably tell which
+entity a number describes, because natural language routinely places two different entities' own
+numbers next to each other (this case), and routinely places non-numeric identifiers that merely
+*contain* digit sequences next to entity nouns too (D-073). Both are structural properties of
+English (and Chinese) prose, not shapes a longer word list or a wider/narrower window can ever fully
+enumerate.
+
+**Fix — replaces free-text scanning with a structural claim, mirroring `submit_finding_verdict`'s
+own precedent (SPEC-M17, D-064 item 2):**
+
+- New tool, `submit_answer_facts` (`apps/api/app/agent/tools.py`), offered on every V2 turn (unlike
+  `submit_finding_verdict`, investigation-only): the model states each of its answer's own numbers
+  as `{entity, measure, value}`, e.g. `{entity: "IfcDoor", measure: "count", value: 14}`.
+- `real_facts: dict[(bucket_kind, key), set[float]]` (`invoke_v2`) replaces the old flat
+  `list[(entity_terms, numbers)]` -- built by `_fact_bucket_key`, bucketing by canonical IFC entity
+  type (`_canonical_entity_key`, reusing `ELEMENT_ALIASES` so `'door'`/`'IfcDoor'`/`'门'` all resolve
+  to the same key -- **closes the check's own prior English-only limitation as a side effect of the
+  redesign, not a separate fix**), by PDF field name when no `entity_type` exists (a disclosed,
+  narrower guarantee than IFC's -- two different PDF records queried for the *same* field name in
+  one turn still share a bucket), or a shared "global" bucket otherwise
+  (`reconcile_doors_windows`-style summary counts, which describe no single typed entity).
+- `_answer_facts_verified` (`AgentService`) replaces `_narrative_consistent_with_tool_facts`: looks
+  up each claim's own declared entity/measure against `real_facts` directly. No regex, no character
+  window -- **this makes D-073's GlobalId-digit problem structurally impossible, not one more patched
+  case**: the function takes no answer text at all. `known_reference_numbers` (D-065/D-066/D-068's
+  citation-tag exemption) is kept as a safety net for a claim that restates an identifier despite the
+  tool's own instruction not to.
+- The pre-existing "legitimate arithmetic synthesis" allowance (owner decision, 2026-09-17: a model
+  deriving a real total from this turn's own scalar counts, e.g. "8" from 4 doors + 4 windows, is a
+  real derivation, not fabrication) is preserved via a computed global-bucket total -- **a real gap
+  in this spec's own first draft**, caught by a failing regression test
+  (`test_v2_accepts_a_real_sum_of_this_turns_own_per_type_counts`) during implementation, not
+  designed in from the start; see the spec's own §11 OD list for why this wasn't foreseen (PDF-vs-IFC
+  asymmetry and a fallback-vs-retire question were the two explicitly tracked open questions, not
+  this one).
+- Verification outcome is now three-way when citations exist: the answer states no number ->
+  `verified` outright; it states a number and the model never called `submit_answer_facts` ->
+  `unverified` with a specific "never submitted for structural confirmation" reason (more actionable
+  than the old generic mismatch message); it states a number and did call the tool -> checked
+  structurally, `verified` or `unverified` with the specific unmatched claim named in the reason.
+
+**Verification:** every prior regression test for D-065, D-066 (both gaps), D-068 (both gaps),
+D-069, and D-073 rewritten (not deleted) against the new mechanism -- several consolidated where the
+old bug was purely about text position/character-window mechanics that no longer exist under
+structural claims (`tests/test_v2_representative_eval.py::test_answer_facts_verified_exempts_a_restated_reference_number`
+now covers what were three separate D-065/D-066 tests). New:
+`test_answer_facts_verified_binds_claims_to_their_own_declared_entity` (unit) and
+`test_v2_correctly_verifies_two_different_entity_counts_in_one_answer` (end-to-end, monkeypatched to
+the exact live 14/24 values, since the demo fixture's own real counts are equal and would not have
+exercised the collision) reproduce this entry's own trigger. The end-to-end test is confirmed to
+fail against commit `ce77f21` (the pre-redesign verification code, with `submit_answer_facts`
+already wired up but not yet consumed) exactly as the live bug did, and to pass against the current
+code.
+
+485 tests pass; `ruff check --select F,E9,I,F401 apps/api tests` clean; `npm run build` clean.
+Live-deployment verification: pending (see `PROJECT_STATE.md`'s M18 entry once deployed).
