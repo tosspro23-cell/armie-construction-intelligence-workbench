@@ -680,12 +680,13 @@ def test_answer_facts_verified_recognizes_a_lists_own_length_as_a_real_fact() ->
     unchanged) -- what this test now verifies is that the *consumer* of
     that fact (`_answer_facts_verified`, replacing the retired character-
     proximity scan) correctly checks a claimed count against it, bucketed
-    by entity via `_fact_bucket_key`, exactly as the real fact-collection
-    loop in `invoke_v2` does.
+    by entity via `_fact_bucket_key` and by measure via
+    `_labeled_facts_from_tool_result` (P1 follow-up, Codex review, PR #53),
+    exactly as the real fact-collection loop in `invoke_v2` does.
     """
     items = [{"element": {"express_id": 1000 + i, "entity_type": "IfcDoor", "tag": str(2000 + i)}, "storey": "Level 01", "properties": {"Height": 2.045}} for i in range(50)]
-    facts = AgentService._numeric_tokens_from_result_value(items)
-    real_facts = {AgentService._fact_bucket_key({"entity_type": "IfcDoor"}): facts}
+    labeled = AgentService._labeled_facts_from_tool_result("get_element_properties", {"entity_type": "IfcDoor"}, items)
+    real_facts = {AgentService._fact_bucket_key({"entity_type": "IfcDoor"}): labeled}
 
     verified, _ = AgentService._answer_facts_verified([{"entity": "IfcDoor", "measure": "count", "value": 50}], real_facts)
     assert verified
@@ -712,7 +713,7 @@ def test_answer_facts_verified_is_structurally_unaffected_by_a_globalid_in_the_a
     real width/height claims a correct answer would submit, independent
     of whatever the answer's own prose says about GlobalIds.
     """
-    real_facts = {AgentService._fact_bucket_key({"entity_type": "IfcWindow"}): {6.0, 1.5}}
+    real_facts = {AgentService._fact_bucket_key({"entity_type": "IfcWindow"}): {"width": {6.0}, "height": {1.5}}}
 
     verified, _ = AgentService._answer_facts_verified(
         [{"entity": "IfcWindow", "measure": "width_m", "value": 6.0}, {"entity": "IfcWindow", "measure": "height_m", "value": 1.5}],
@@ -742,8 +743,8 @@ def test_answer_facts_verified_binds_claims_to_their_own_declared_entity() -> No
     "window" of text for two entities' numbers to collide in.
     """
     real_facts = {
-        AgentService._fact_bucket_key({"entity_type": "IfcDoor"}): {14.0},
-        AgentService._fact_bucket_key({"entity_type": "IfcWindow"}): {24.0},
+        AgentService._fact_bucket_key({"entity_type": "IfcDoor"}): {"count": {14.0}},
+        AgentService._fact_bucket_key({"entity_type": "IfcWindow"}): {"count": {24.0}},
     }
 
     verified, _ = AgentService._answer_facts_verified(
@@ -932,13 +933,13 @@ def test_answer_facts_verified_tolerates_natural_rounding_of_a_measurement() -> 
     `_answer_facts_verified` reuses the same `_matches` rule the retired
     check used, applied to a declared claim instead of a text-scanned one.
     """
-    real_facts = {AgentService._fact_bucket_key({"entity_type": "IfcSpace"}): AgentService._numeric_tokens_from_result_value({"value_m": 5.234, "from_space": "B204", "to_space": "B202"})}
+    real_facts = {AgentService._fact_bucket_key({"entity_type": "IfcSpace"}): AgentService._labeled_facts_from_tool_result("space_distance", {}, {"value_m": 5.234, "from_space": "B204", "to_space": "B202"})}
     assert AgentService._answer_facts_verified([{"entity": "IfcSpace", "measure": "distance_m", "value": 5.23}], real_facts)[0]
     assert AgentService._answer_facts_verified([{"entity": "IfcSpace", "measure": "distance_m", "value": 5.2}], real_facts)[0]
     assert AgentService._answer_facts_verified([{"entity": "IfcSpace", "measure": "distance_m", "value": 5.234}], real_facts)[0]
     assert not AgentService._answer_facts_verified([{"entity": "IfcSpace", "measure": "distance_m", "value": 12}], real_facts)[0]
 
-    door_facts = {AgentService._fact_bucket_key({"entity_type": "IfcDoor"}): AgentService._numeric_tokens_from_result_value(4)}
+    door_facts = {AgentService._fact_bucket_key({"entity_type": "IfcDoor"}): AgentService._labeled_facts_from_tool_result("count_elements", {}, 4)}
     assert AgentService._answer_facts_verified([{"entity": "IfcDoor", "measure": "count", "value": 4}], door_facts)[0]
     assert not AgentService._answer_facts_verified([{"entity": "IfcDoor", "measure": "count", "value": 5}], door_facts)[0]
 
@@ -961,7 +962,7 @@ def test_answer_facts_verified_exempts_a_restated_reference_number() -> None:
     it's declared under, since it wouldn't otherwise match that entity's
     own real measurement facts.
     """
-    real_facts = {AgentService._fact_bucket_key({"entity_type": "IfcDoor"}): {1.25, 2.01}}
+    real_facts = {AgentService._fact_bucket_key({"entity_type": "IfcDoor"}): {"width": {1.25}, "height": {2.01}}}
     known_reference_numbers = {146596.0, 146678.0, 146600.0}
 
     # Neither restated tag is a real IfcDoor width/height -- without the
@@ -996,13 +997,97 @@ def test_answer_facts_verified_falls_back_to_a_shared_pool_for_untyped_facts() -
     here only as a fallback for a claim whose own entity/measure don't
     resolve to anything more specific.
     """
-    real_facts = {("global", ""): {6.0, 1.0}}
+    real_facts = {("global", ""): {"count": {6.0, 1.0}}}
     verified, _ = AgentService._answer_facts_verified([{"entity": "reconciliation", "measure": "matched_count", "value": 6}], real_facts)
     assert verified
 
     verified, reason = AgentService._answer_facts_verified([{"entity": "reconciliation", "measure": "matched_count", "value": 99999}], real_facts)
     assert not verified
     assert "reconciliation" in reason
+
+
+def test_answer_facts_verified_does_not_let_one_measure_validate_a_different_one() -> None:
+    """Codex review, PR #53, P1: this PR's own first draft bucketed
+    `real_facts` by entity only, with no measure dimension at all -- a
+    claim for one measure of an entity (its height) could be validated by
+    a completely different measure's real value (that same entity's own
+    count) merely because both numbers shared the entity's bucket.
+    Concretely: `count_elements(IfcDoor)` returns 4; a claim of {entity:
+    'IfcDoor', measure: 'height_m', value: 4} would incorrectly verify,
+    since 4 is a real IfcDoor fact -- just not a height.
+
+    Fixed by tagging each real fact with the specific measure it came from
+    (`_labeled_facts_from_tool_result`) and requiring a claim's own
+    declared measure to match that tag (`_normalize_measure_key`), not
+    just its entity.
+    """
+    real_facts = {AgentService._fact_bucket_key({"entity_type": "IfcDoor"}): AgentService._labeled_facts_from_tool_result("count_elements", {}, 4)}
+
+    # The door's own real count (4) is not a real height -- must be caught.
+    verified, reason = AgentService._answer_facts_verified([{"entity": "IfcDoor", "measure": "height_m", "value": 4}], real_facts)
+    assert not verified
+    assert "IfcDoor" in reason
+
+    # The same value, correctly declared as the entity's own count, still verifies.
+    assert AgentService._answer_facts_verified([{"entity": "IfcDoor", "measure": "count", "value": 4}], real_facts)[0]
+
+
+def test_v2_flags_a_number_stated_in_the_answer_but_never_submitted_as_a_claim(tmp_path: Path) -> None:
+    """Codex review, PR #53, P1: `_answer_facts_verified` alone only checks
+    that every *submitted* claim is real -- it never notices a number the
+    answer's own prose states but the model never submitted a claim for at
+    all. Reproduced live-shape: "There are 4 doors and 999 windows." with
+    only the (correct) door claim submitted -- the fabricated window count
+    was never checked against anything, since nothing claimed it.
+
+    Fixed by `_unclaimed_numbers_in_answer`, a coarse safety net layered on
+    top of the structural check: every number in the answer's own prose
+    must correspond to *something* real or claimed, even though it wasn't
+    itself submitted as a claim. Deliberately reintroduces only the
+    retired check's baseline half (does this number correspond to
+    something real anywhere this turn), never its entity-bound half (the
+    proximity scanning that caused all eight prior false positives).
+    """
+    fake = FakeModelProvider()
+    fake.script("v2_tool_turn", ScriptedToolCalls([
+        ("count_elements", {"entity_type": "IfcDoor"}),
+        ("count_elements", {"entity_type": "IfcWindow"}),
+    ]))
+    # Only the door claim submitted -- the fabricated "999" for windows is
+    # never declared as a claim at all, not even a wrong one.
+    fake.script("v2_tool_turn", ScriptedToolCalls([("submit_answer_facts", {"claims": [{"entity": "IfcDoor", "measure": "count", "value": 4}]})]))
+    fake.script("v2_tool_turn", ScriptedAnswer(["There are 4 doors and 999 windows."]))
+    _, service, resources = _service(tmp_path, fake)
+
+    response = asyncio.run(_run(service, resources, "How many doors and windows are there?", "eval-unclaimed-number"))
+
+    assert response.verification.status == "unverified"
+    assert "999" in response.verification.reason
+
+
+def test_v2_submit_answer_facts_alone_does_not_count_as_an_answered_subtask(tmp_path: Path) -> None:
+    """Codex review, PR #53, P2: `submit_answer_facts` is a local
+    bookkeeping no-op, appended to `subtask_dispositions` like any other
+    tool call before this fix -- a compliant model calling it with an
+    empty claims list (per its own tool description, for a no-number
+    answer) before an unsupported/clarification response would make that
+    bookkeeping call alone count as a successful "answered" subtask,
+    masking the turn's real disposition.
+
+    Reproduced here with a scripted turn that calls only submit_answer_facts
+    (empty claims) and no real tool at all -- the turn's own `subtask_
+    dispositions` list must end up empty (not `["answered"]`), so the
+    existing "no tool call was dispatched" fallback (clarification_required,
+    since no citations exist either) applies, not a false "answered."
+    """
+    fake = FakeModelProvider()
+    fake.script("v2_tool_turn", ScriptedToolCalls([("submit_answer_facts", {"claims": []})]))
+    fake.script("v2_tool_turn", ScriptedAnswer(["Could you clarify which building you mean?"]))
+    _, service, resources = _service(tmp_path, fake)
+
+    response = asyncio.run(_run(service, resources, "How many doors are there?", "eval-bookkeeping-only-disposition"))
+
+    assert response.disposition.value == "clarification_required"
 
 
 def test_v2_respects_an_expired_deadline(tmp_path: Path) -> None:

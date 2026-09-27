@@ -2595,7 +2595,9 @@ Return only a corrected MultiQueryPlan JSON object."""
         subtask_dispositions: list[str] = []
         # `real_facts`: this turn's own ground truth, independent of
         # anything the model goes on to say -- keyed by a bucket describing
-        # *what* the numbers in the set are about (see `_fact_bucket_key`),
+        # *what entity/field* the numbers are about (see `_fact_bucket_key`),
+        # and, within that bucket, by *which measure* of it each number is
+        # (see `_labeled_facts_from_tool_result`/`_normalize_measure_key`) --
         # not by position in any text. SPEC-M18 (D-074) replaced the prior
         # design here (a flat `list[(entity_terms, numbers)]` pair per tool
         # call, checked against the model's free-text answer via a
@@ -2609,7 +2611,7 @@ Return only a corrected MultiQueryPlan JSON object."""
         # was declared to be about, not by where it sits in a sentence --
         # see `_answer_facts_verified`'s own docstring for the full design
         # and its disclosed limitations.
-        real_facts: dict[tuple[str, str], set[float]] = {}
+        real_facts: dict[tuple[str, str], dict[str, set[float]]] = {}
         answer_parts: list[str] = []
         max_iterations = self.settings.tool_calling_max_iterations
         for iteration in range(1, max_iterations + 1):
@@ -2872,12 +2874,17 @@ Return only a corrected MultiQueryPlan JSON object."""
                 # multi-value shape (aggregate_quantity's own {value_m,
                 # eligible_count, ...}) has no single unambiguous "the"
                 # number to add, so it's excluded, the same rule the retired
-                # check used. Added to the shared "global" bucket only (never
-                # to an individual entity's own bucket), so this cannot let a
-                # fabricated per-entity claim piggyback on the real total.
-                scalar_values = [next(iter(values)) for key, values in real_facts.items() if key[0] == "entity" and len(values) == 1 and next(iter(values)).is_integer()]
+                # check used. Added to the shared "global" bucket's own
+                # "count" measure only (never to an individual entity's own
+                # bucket), so this cannot let a fabricated per-entity claim
+                # piggyback on the real total.
+                scalar_values = [
+                    next(iter(measures["count"]))
+                    for key, measures in real_facts.items()
+                    if key[0] == "entity" and len(measures.get("count", set())) == 1 and next(iter(measures["count"])).is_integer()
+                ]
                 if len(scalar_values) > 1:
-                    real_facts.setdefault(("global", ""), set()).add(float(sum(scalar_values)))
+                    real_facts.setdefault(("global", ""), {}).setdefault("count", set()).add(float(sum(scalar_values)))
                 answer_facts = state.get("answer_facts")
                 answer_has_numbers = bool(re.search(r"\d", narrative))
                 if not all_citations:
@@ -2892,14 +2899,34 @@ Return only a corrected MultiQueryPlan JSON object."""
                     self._audit(state, "v2_narrative_consistency", "verification_completed", "V2's final answer states a number but never called submit_answer_facts; shown to the user with a caveat, not withheld.", {}, planning_mode="tool_calling")
                 else:
                     facts_verified, mismatch_reason = self._answer_facts_verified(answer_facts, real_facts, known_reference_numbers)
-                    if facts_verified:
+                    # Codex review, PR #53, P1: `_answer_facts_verified` alone
+                    # only checks that every *submitted* claim is real -- it
+                    # never notices a number the answer's own prose states
+                    # but no claim was ever submitted for (e.g. "4 doors and
+                    # 999 windows" with only the door claim submitted, or an
+                    # empty claims list next to a fully numeric answer). This
+                    # coarse safety net closes that, without reintroducing
+                    # the entity-proximity scanning that caused the eight
+                    # prior false positives -- see its own docstring.
+                    unclaimed = self._unclaimed_numbers_in_answer(narrative, answer_facts, real_facts, known_reference_numbers) if facts_verified else []
+                    if facts_verified and not unclaimed:
                         verification = VerificationStatus(status="verified", reason="Every stated fact came from a verified tool call this turn.")
+                    elif facts_verified and unclaimed:
+                        verification = VerificationStatus(
+                            status="unverified",
+                            reason=f"The answer states {unclaimed[0]:g}, which was never submitted as a claim and does not match any value this turn's tool calls returned.",
+                        )
+                        self._audit(
+                            state, "v2_narrative_consistency", "verification_completed",
+                            "V2's final answer states a number that was never submitted as a claim and matches no real tool result; shown to the user with a caveat, not withheld.",
+                            {"unclaimed_numbers": unclaimed}, planning_mode="tool_calling",
+                        )
                     else:
                         verification = VerificationStatus(status="unverified", reason=mismatch_reason)
                         self._audit(
                             state, "v2_narrative_consistency", "verification_completed",
                             "V2's final answer's own submitted facts did not match this turn's own tool results; shown to the user with a caveat, not withheld.",
-                            {"answer_facts": answer_facts, "real_facts": {f"{key[0]}:{key[1]}": sorted(values) for key, values in real_facts.items()}},
+                            {"answer_facts": answer_facts, "real_facts": {f"{key[0]}:{key[1]}": {measure: sorted(values) for measure, values in measures.items()} for key, measures in real_facts.items()}},
                             planning_mode="tool_calling",
                         )
                 response = AgentResponse(
@@ -3027,7 +3054,20 @@ Return only a corrected MultiQueryPlan JSON object."""
                 # below, matching V1's own subtask_summary discipline
                 # (_finalize's execution_metadata) instead of a single
                 # citations-only proxy.
-                subtask_dispositions.append(tool_result.get("disposition", "error"))
+                #
+                # Codex review, PR #53, P2: `submit_answer_facts` is a local
+                # bookkeeping no-op (records the model's own claims; queries
+                # nothing), not a real subtask -- excluded here so a
+                # clarification/unsupported turn that dutifully calls it
+                # with an empty claims list (per its own tool description)
+                # doesn't get counted as a successful "answered" subtask,
+                # masking the turn's real, non-answered disposition. Unlike
+                # every other dispatched tool, it is offered and expected to
+                # be called on *every* V2 turn, so this bookkeeping-vs-
+                # subtask distinction matters here in a way it did not for
+                # investigation-only `submit_finding_verdict`.
+                if tool_call.tool_name != "submit_answer_facts":
+                    subtask_dispositions.append(tool_result.get("disposition", "error"))
                 all_citations.extend(tool_result.get("citations", []))
                 all_evidence.extend(result.get("evidence", []))
                 all_plans.extend(result.get("plan", []))
@@ -3040,14 +3080,26 @@ Return only a corrected MultiQueryPlan JSON object."""
                 # underlying comparison ran and the answer text described it.
                 tool_result_value = tool_result.get("result_value")
                 if tool_result.get("disposition") == "answered":
-                    facts = self._numeric_tokens_from_result_value(tool_result_value)
-                    if facts:
+                    # `(result.get("plan") or [{}])[0]`, not `result.get(
+                    # "plan", [{}])[0]` -- the default only applies when the
+                    # key is *missing*, not when it's present-but-empty, and
+                    # both submit_finding_verdict and submit_answer_facts's
+                    # own no-op dispatch results carry "plan": [] (an empty
+                    # list) with disposition="answered", which would
+                    # otherwise IndexError here.
+                    plan0 = (result.get("plan") or [{}])[0]
+                    labeled_facts = self._labeled_facts_from_tool_result(tool_call.tool_name, plan0, tool_result_value)
+                    if labeled_facts:
                         # SPEC-M18 (D-074): recorded under this call's own
-                        # bucket key (see `_fact_bucket_key`) so a later
-                        # `submit_answer_facts` claim naming this same
-                        # entity/field can be checked against exactly these
-                        # numbers, not some other entity's.
-                        real_facts.setdefault(self._fact_bucket_key(result.get("plan", [{}])[0]), set()).update(facts)
+                        # bucket key (see `_fact_bucket_key`), sub-keyed by
+                        # measure (P1 follow-up, see `_labeled_facts_from_
+                        # tool_result`), so a later `submit_answer_facts`
+                        # claim naming this same entity/field *and measure*
+                        # can be checked against exactly these numbers, not
+                        # some other entity's or some other measure's.
+                        bucket = real_facts.setdefault(self._fact_bucket_key(plan0), {})
+                        for measure_key, numbers in labeled_facts.items():
+                            bucket.setdefault(measure_key, set()).update(numbers)
                 if tool_call.tool_name == "reconcile_doors_windows" and tool_result_value:
                     all_reconciliation_items.extend(tool_result_value)
                     # Owner-reported, 2026-09-16: this deployment's own real
@@ -3101,18 +3153,26 @@ Return only a corrected MultiQueryPlan JSON object."""
                     # D-068: a fully correct answer restating "39 doors" --
                     # distinct_value_summary's own real per-value count
                     # (Qto_DoorBaseQuantities.Width = 1.09 for 39 of the 50
-                    # real doors) -- was flagged unverified. `facts` above is
-                    # computed from the raw, pre-summary list, before this
-                    # summary exists, so it never saw these counts; recorded
-                    # here as this same call's own additional facts, using
-                    # the same rule already established for a plain
-                    # per-bucket-count dict shape (`_numeric_tokens_from_
-                    # result_value`'s "group_elements_by_storey-like" branch
-                    # naturally applies to `distinct_value_summary`'s own
-                    # {value: count} inner dicts with zero new special-casing).
+                    # real doors) -- was flagged unverified. `labeled_facts`
+                    # above is computed from the raw, pre-summary list,
+                    # before this summary exists, so it never saw these
+                    # counts; recorded here as this same call's own
+                    # additional facts, labeled "count" (every leaf here is
+                    # "how many items share this value", SPEC-M18's own
+                    # measure-labeling convention for a breakdown, matching
+                    # `_labeled_facts_from_tool_result`'s own
+                    # group_elements_by_storey handling).
                     distinct_value_summary_facts = self._numeric_tokens_from_result_value(distinct_value_summary)
                     if distinct_value_summary_facts:
-                        real_facts.setdefault(self._fact_bucket_key(result.get("plan", [{}])[0]), set()).update(distinct_value_summary_facts)
+                        # Independent lookup, not a reuse of `plan0` above --
+                        # that name is scoped to the sibling `disposition ==
+                        # "answered"` branch and this `elif` can in principle
+                        # run without it, which would otherwise silently
+                        # reuse a stale plan from a *previous* tool call in
+                        # this same loop (Python `if`/`elif` blocks share
+                        # their enclosing scope).
+                        bucket = real_facts.setdefault(self._fact_bucket_key((result.get("plan") or [{}])[0]), {})
+                        bucket.setdefault("count", set()).update(distinct_value_summary_facts)
                     # D-067: each *item* also gets its own `properties` dict
                     # bounded (see `_cap_item_properties`'s own docstring) --
                     # a real, richly-annotated element (a real Revit export's
@@ -3403,6 +3463,104 @@ Return only a corrected MultiQueryPlan JSON object."""
         return (canonical or normalized).lower()
 
     @staticmethod
+    def _normalize_measure_key(measure: Any) -> str:
+        """SPEC-M18 follow-up (Codex review, PR #53, P1): normalizes a
+        claim's or a tool result's own measure/property-key name into a
+        comparable form, so 'height_m' (a claim) and 'Height' (a
+        `get_element_properties` property key) are recognized as the same
+        measure, while 'height' and 'count' are correctly kept distinct --
+        closing the gap where a claim for one measure of an entity (its
+        height) could be validated by a completely different measure's
+        real value (that same entity's own count), merely because both
+        numbers shared the entity's bucket with no measure discrimination
+        at all.
+        """
+        if not measure:
+            return ""
+        normalized = str(measure).strip().lower()
+        for suffix in ("_m", " m", "_mm", " mm"):
+            if normalized.endswith(suffix):
+                normalized = normalized[: -len(suffix)]
+                break
+        return re.sub(r"[^a-z0-9]", "", normalized)
+
+    @staticmethod
+    def _labeled_facts_from_tool_result(tool_name: str, plan: dict[str, Any], result_value: Any) -> dict[str, set[float]]:
+        """SPEC-M18 follow-up (Codex review, PR #53, P1): tags each of one
+        tool call's own real numbers with the specific measure it actually
+        came from, keyed by `_normalize_measure_key` -- an empty string
+        `""` means "no specific measure could be determined," a weak
+        fallback bucket a claim only reaches if its own declared measure
+        doesn't match anything more specific for that entity (see
+        `_answer_facts_verified`'s own lookup).
+
+        Dispatches by tool shape rather than inferring structure generically
+        -- a fully generic "which dict is a {name: count} breakdown vs. a
+        flat property bag" rule cannot be told apart by shape alone (both
+        are literally `dict[str, number]`; `group_elements_by_storey`'s
+        `{"Level 01": 2}` and `get_element_properties`'s own `{"Width":
+        1.25}` have the identical shape). Guessing wrong in the *other*
+        direction -- labeling every property by its full, internal,
+        PSet/Qto-prefixed path (`Qto_DoorBaseQuantities.Height`) -- would
+        reintroduce the false-positive problem this whole redesign exists
+        to close, since a model naturally states a bare property name
+        ('height'), never its internal path; the last dotted segment of a
+        property key is used instead, matching `_flatten_for_distinct_
+        summary`'s own established dotted-path convention elsewhere in
+        this file.
+        """
+        labeled: dict[str, set[float]] = {}
+
+        def _add(measure: str, value: Any) -> None:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return
+            if value != value or value in (float("inf"), float("-inf")):  # noqa: PLR0124 (NaN check)
+                return
+            labeled.setdefault(AgentService._normalize_measure_key(measure), set()).add(float(value))
+
+        if tool_name == "count_elements":
+            _add("count", result_value)
+        elif tool_name == "group_elements_by_storey" and isinstance(result_value, dict):
+            numeric_values = [v for v in result_value.values() if isinstance(v, (int, float)) and not isinstance(v, bool)]
+            for sub_value in numeric_values:
+                _add("count", sub_value)
+            if len(numeric_values) > 1:
+                _add("count", sum(numeric_values))
+        elif tool_name == "aggregate_quantity" and isinstance(result_value, dict):
+            if "value_m" in result_value:
+                _add(plan.get("measure") or "value", result_value["value_m"])
+            for key in ("eligible_count", "total_entity_count"):
+                if key in result_value:
+                    _add(key, result_value[key])
+        elif tool_name == "space_distance" and isinstance(result_value, dict):
+            if "value_m" in result_value:
+                _add("distance", result_value["value_m"])
+        elif tool_name == "get_element_properties" and isinstance(result_value, list):
+            if result_value:
+                _add("count", len(result_value))
+            for item in result_value:
+                if not isinstance(item, dict):
+                    continue
+                properties = item.get("properties")
+                if isinstance(properties, dict):
+                    for key, value in properties.items():
+                        _add(str(key).rsplit(".", 1)[-1], value)
+                element = item.get("element")
+                if isinstance(element, dict):
+                    _add("expressid", element.get("express_id"))
+        else:
+            # Any other shape (extract_pdf_field's own scalar/dict result,
+            # inspect_current_view, ...) -- fall back to the retired check's
+            # own undiscriminating extraction, labeled "" (unlabeled), so a
+            # claim without a matching specific measure can still reach it
+            # as a last resort, matching this project's own long-established
+            # "fail toward disclosing a caveat, never toward inventing
+            # structure that isn't there" preference.
+            for value in AgentService._numeric_tokens_from_result_value(result_value):
+                _add("", value)
+        return labeled
+
+    @staticmethod
     def _fact_bucket_key(plan: dict[str, Any]) -> tuple[str, str]:
         """SPEC-M18 (D-074): which bucket of `real_facts` one tool call's
         own extracted numbers (`_numeric_tokens_from_result_value`) belong
@@ -3440,7 +3598,7 @@ Return only a corrected MultiQueryPlan JSON object."""
     @staticmethod
     def _answer_facts_verified(
         claims: list[dict[str, Any]],
-        real_facts: dict[tuple[str, str], set[float]],
+        real_facts: dict[tuple[str, str], dict[str, set[float]]],
         known_reference_numbers: set[float] = frozenset(),
     ) -> tuple[bool, str]:
         """SPEC-M18 (D-074): replaces `_narrative_consistent_with_tool_facts`'s
@@ -3450,26 +3608,37 @@ Return only a corrected MultiQueryPlan JSON object."""
         structured claim via `submit_answer_facts` -- this is a purely
         structural lookup against `real_facts`, this turn's own real tool
         results, keyed by what the model itself declared each claim to be
-        about (see `_fact_bucket_key`). No regex over the answer text, no
-        proximity window: a claim is checked by its own declared entity/
-        measure, not by where a number happens to sit in a sentence. This
-        is exactly what closes the "14 doors and 24 windows" class of
-        false positive at the root, not as one more special case -- and,
-        as a consequence, the entire D-073 GlobalId-digit problem too: this
-        function never reads the answer's own prose at all, so a GlobalId
-        (or any other non-numeric token) embedded in it is simply never
-        examined, structurally, not by pattern-matching its shape.
+        about (see `_fact_bucket_key`/`_labeled_facts_from_tool_result`). No
+        regex over the answer text, no proximity window: a claim is checked
+        by its own declared entity/measure, not by where a number happens
+        to sit in a sentence. This is exactly what closes the "14 doors and
+        24 windows" class of false positive at the root, not as one more
+        special case -- and, as a consequence, the entire D-073 GlobalId-
+        digit problem too: this function never reads the answer's own prose
+        at all, so a GlobalId (or any other non-numeric token) embedded in
+        it is simply never examined, structurally, not by pattern-matching
+        its shape.
 
-        A claim matches if its value is a real value from *either* the
-        bucket for its own declared `entity` or the bucket for its own
-        declared `measure` (an IFC claim matches by entity; a PDF claim,
-        which has no reliable entity to bind to, matches by its field name
-        instead -- see `_fact_bucket_key`'s own docstring for this
-        disclosed asymmetry). If neither resolves to a specific known
-        bucket (e.g. a reconcile_doors_windows-style summary count, which
-        has no single entity or field), the claim falls back to a shared,
-        undiscriminating pool -- the same weak guarantee the retired check
-        gave every claim, not the norm here.
+        A claim matches if its value is a real value from the bucket for
+        its own declared `entity` (IFC) or `measure` (PDF field name -- see
+        `_fact_bucket_key`'s own docstring for this disclosed asymmetry),
+        under that same bucket's own sub-entry for the claim's declared
+        `measure`, normalized via `_normalize_measure_key`. **This measure
+        match is what stops a claim for one measure of an entity (its
+        height) from being validated by a completely different measure's
+        real value (that same entity's own count) merely because both
+        share the entity's bucket** (Codex review, PR #53, P1). A claim
+        whose own measure has no specifically-labeled entry for that bucket
+        falls back to that bucket's own `""` (unlabeled) sub-entry -- the
+        same weak, undiscriminating guarantee the retired check gave every
+        claim, kept only for tool shapes `_labeled_facts_from_tool_result`
+        does not know how to label specifically, not the norm. If neither
+        the entity nor the measure bucket resolves at all (e.g. a
+        reconcile_doors_windows-style summary count, which has no single
+        entity or field), the claim falls back further, to the shared
+        "global" bucket -- matched against *every* measure in it, not just
+        the claim's own declared one, since that bucket already carries no
+        entity/field discrimination to protect in the first place.
 
         `known_reference_numbers` (this turn's own real citation tag/
         record/mark values) is checked first, unconditionally -- a
@@ -3491,7 +3660,11 @@ Return only a corrected MultiQueryPlan JSON object."""
         A malformed claim (missing/non-numeric `value`) is skipped, not
         treated as a mismatch -- this function's job is checking declared
         numbers against real ones, not validating the tool call's own
-        shape.
+        shape. This function only checks that every *submitted* claim is
+        real -- it does not check that every number in the answer's own
+        prose was submitted as a claim at all; see `_unclaimed_numbers_in_
+        answer` for that separate, coarser safety net (Codex review, PR
+        #53, P1).
         """
 
         def _matches(expected: float, actual: float) -> bool:
@@ -3499,7 +3672,10 @@ Return only a corrected MultiQueryPlan JSON object."""
                 return actual == expected
             return abs(actual - expected) < 0.05
 
-        global_bucket = real_facts.get(("global", ""), set())
+        def _bucket_candidates(bucket_key: tuple[str, str], measure_key: str) -> set[float]:
+            measures = real_facts.get(bucket_key, {})
+            return measures.get(measure_key, set()) | measures.get("", set())
+
         for claim in claims:
             raw_value = claim.get("value")
             if not isinstance(raw_value, (int, float)) or isinstance(raw_value, bool):
@@ -3507,10 +3683,21 @@ Return only a corrected MultiQueryPlan JSON object."""
             value = float(raw_value)
             if any(_matches(reference, value) for reference in known_reference_numbers):
                 continue
+            measure_key = AgentService._normalize_measure_key(claim.get("measure"))
             entity_key = ("entity", AgentService._canonical_entity_key(claim.get("entity")))
             field_key = ("field", str(claim.get("measure") or "").strip().lower())
-            specific = real_facts.get(entity_key, set()) | real_facts.get(field_key, set())
-            candidates = specific if specific else global_bucket
+            candidates = _bucket_candidates(entity_key, measure_key) | _bucket_candidates(field_key, measure_key)
+            if not candidates:
+                # The "global" bucket exists precisely for shapes with no
+                # clean entity/field to discriminate by in the first place
+                # (e.g. reconcile_doors_windows's own per-status counts) --
+                # gating it by measure too would defeat its purpose as the
+                # weakest-guarantee fallback, since there is no cross-entity
+                # confusion risk here to guard against (it isn't tied to any
+                # entity at all). Matches against the union of everything in
+                # it, regardless of measure.
+                global_measures = real_facts.get(("global", ""), {})
+                candidates = set().union(*global_measures.values()) if global_measures else set()
             if not any(_matches(expected, value) for expected in candidates):
                 entity_label = claim.get("entity") or "an entity"
                 measure_label = claim.get("measure") or "value"
@@ -3519,6 +3706,56 @@ Return only a corrected MultiQueryPlan JSON object."""
                     "value this turn's tool calls actually returned."
                 )
         return True, ""
+
+    @staticmethod
+    def _unclaimed_numbers_in_answer(
+        answer_markdown: str,
+        claims: list[dict[str, Any]],
+        real_facts: dict[tuple[str, str], dict[str, set[float]]],
+        known_reference_numbers: set[float] = frozenset(),
+    ) -> list[float]:
+        """SPEC-M18 follow-up (Codex review, PR #53, P1): a coarse safety
+        net, layered on top of -- not instead of -- `_answer_facts_verified`.
+        That function only checks that every *submitted* claim is real; it
+        never noticed a number the answer's own prose states but the model
+        never submitted a claim for at all (e.g. "4 doors and 999 windows"
+        with only the door claim submitted, or an empty claims list
+        alongside a numeric answer).
+
+        Deliberately reintroduces only the retired check's *baseline* half
+        (does this number correspond to *something* real anywhere this
+        turn, checked against the flat union of every real value and every
+        submitted claim) -- never its entity-bound half (does this number
+        sit near a matching entity noun), which is what produced all eight
+        prior false positives and is not brought back here. GlobalId-shaped
+        tokens are stripped first, matching D-073's own established fix, so
+        a real GlobalId's own embedded digits are not mistaken for an
+        unclaimed number.
+
+        Returns every number in the answer that matches neither a submitted
+        claim's own value nor any real fact this turn actually returned nor
+        a known reference number -- empty when the answer is fully
+        accounted for.
+        """
+
+        def _matches(expected: float, actual: float) -> bool:
+            if float(expected).is_integer():
+                return actual == expected
+            return abs(actual - expected) < 0.05
+
+        stripped = re.sub(r"\b[0-9A-Za-z_$]{22}\b", "", answer_markdown)
+        answer_numbers = {float(match) for match in re.findall(r"\d+(?:\.\d+)?", stripped)}
+
+        accounted_for: set[float] = set(known_reference_numbers)
+        for claim in claims:
+            raw_value = claim.get("value")
+            if isinstance(raw_value, (int, float)) and not isinstance(raw_value, bool):
+                accounted_for.add(float(raw_value))
+        for measures in real_facts.values():
+            for numbers in measures.values():
+                accounted_for.update(numbers)
+
+        return [actual for actual in answer_numbers if not any(_matches(expected, actual) for expected in accounted_for)]
 
     @staticmethod
     def _citations(evidence: list[Evidence], state: GraphState) -> list[dict]:
