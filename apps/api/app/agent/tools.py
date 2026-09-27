@@ -206,8 +206,10 @@ SUBMIT_ANSWER_FACTS_TOOL: dict[str, Any] = {
             "describes -- e.g. if your answer says '14 doors and 24 windows', submit two claims: "
             "{entity: 'IfcDoor', measure: 'count', value: 14} and {entity: 'IfcWindow', measure: 'count', "
             "value: 24}. Every claim is checked against this turn's own real tool results before your answer "
-            "is shown as verified. If your answer states no numbers at all, call this with an empty claims "
-            "list."
+            "is shown as verified. Do not submit an element's own tag/mark/GlobalId as a claim -- only actual "
+            "measurements, counts, or quantities. If your answer states a total you calculated by summing "
+            "several of this turn's own counts, submit it with a general entity like 'total', not a specific "
+            "IFC type. If your answer states no numbers at all, call this with an empty claims list."
         ),
         "parameters": {
             "type": "object",
