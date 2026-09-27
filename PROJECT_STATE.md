@@ -2,10 +2,13 @@
 
 ## Purpose and scope
 
-**This section was last substantively rewritten at M1 and had drifted well behind the actual
-milestone history below (M6 through M10) until 2026-09-14 -- corrected here rather than left
-stale; see the "Milestone history" section for the authoritative, dated account of everything
-this paragraph now summarizes.**
+**This section was substantively rewritten at M1, corrected once at 2026-09-14 (M6 through M10),
+and had drifted again -- most notably still describing M17's finding-resolution agent as "not yet
+merged" weeks after it merged, deployed, and was extensively stress-tested (D-065 through D-073)
+-- until this second correction, 2026-09-24. This top summary keeps drifting because it is
+maintained separately from the dated "Milestone history" log below, which has stayed current
+throughout; treat that section as authoritative whenever the two disagree, and update this summary
+in the same pass as any change substantial enough to add a new milestone entry.**
 
 ARMIE Construction Intelligence Workbench is a public reference implementation, runnable two
 ways from the identical codebase: fully local (Ollama, one synthetic project, zero cost) or as a
@@ -17,9 +20,12 @@ verification, and an inspectable, cloud-observable audit trail -- across a real 
 multi-document corpus on the Azure profile, not only the original single-fixture local demo.
 
 This repository is not a production SaaS, compliance engine, unrestricted BIM query language, or
-production data-governance boundary. It **is**, as of M9, a real multi-project system (two
-independently ACL-isolated projects), which the original wording above no longer accurately
-excluded. The public fixtures and all committed screenshots are synthetic.
+production data-governance boundary. It **is**, as of M13, a real multi-project system with four
+independently isolated projects -- two synthetic fixtures and two real, openly-licensed buildings
+(Duplex Apartment, RWTH DigitalHub; see the M13 milestone entry and each project's own
+`demo_data/projects/<name>/ATTRIBUTION.md`) -- which the original wording above no longer
+accurately excluded. Only the two synthetic fixtures' data is fictional; the two real buildings
+are genuine third-party files under an open license, not a claim of authorship.
 
 ## Current implementation
 
@@ -49,12 +55,14 @@ The main orchestration lives in `apps/api/app/agent/graph.py`. Shared contracts 
 - Short-term conversational context, explicit clarification, unsupported/refused dispositions, request cancellation/deadlines, citations, grouped audit stages, and independent verification.
 - Local Ollama provider path using `qwen3:8b` and `qwen3-vl:8b` (default, zero cost). **Azure OpenAI is validated end to end, not just a hook**: the deployed `armiem3-api` runs `llm_provider=azure` against a real Azure OpenAI resource (Managed Identity, no API keys), verified on every deploy by `azure-deploy.yml`'s own post-deploy smoke test (a real model-backed question, not only the deterministic path). See the M3 milestone entry below.
 - Optional bounded escalation for persistent semantic-plan validation failures: set `OLLAMA_ESCALATION_MODEL` in `.env` to a larger local model to enable it. It is disabled by default; no developer or CI environment is required to hold a large model. Provider access for planning, vision, and escalation goes through factories injected on `ServiceContainer` (`apps/api/app/services.py`), so the probabilistic path can be driven in tests by a fake provider with no live model (see `docs/decisions/README.md` D-007).
-- **Real multi-project workspaces (M9, D-023)**: two independently ADLS-isolated projects (`demo`, `westgate`) on the Azure profile, each with its own IFC/PDF corpus, directory-level POSIX ACL, and frozen `source_set_id` provenance surfaced on every citation/audit event. One thread is bound to exactly one project for its lifetime.
+- **Real multi-project workspaces (M9, D-023; grown to four projects at M13)**: four independently ADLS-isolated projects on the Azure profile -- two synthetic fixtures (`demo`, `westgate`) and two real, openly-licensed buildings (`duplex`, `digitalhub`, M13/SPEC-M13) -- each with its own IFC/PDF corpus, directory-level POSIX ACL, and frozen `source_set_id` provenance surfaced on every citation/audit event. One thread is bound to exactly one project for its lifetime.
+- **Real Dataset Pack (M13)**: Duplex Apartment (buildingSMART Community Sample Test Files, CC BY 4.0, 38 real doors/windows) and RWTH DigitalHub (RWTH Aachen E3D Institute, MIT, 111 real openings) -- unmodified real IFC files with full attribution records, added specifically because a real building's own scale and property-richness (dozens of vendor-specific IFC properties per element) exercises code paths a small synthetic fixture cannot. Neither ships a real door/window schedule in its own source repository; each project's PDF schedule is ARMIE-generated from that building's own real IFC values, with a small number of deliberately planted discrepancies.
+- **V2 tool-calling agent (M16, D-061/D-062)**: a second, selectable engine that replaces the fixed heuristic/semantic-planning pipeline with a bounded iteration loop -- the model chooses from a fixed toolbox of deterministic IFC/PDF tools across several steps, and a narrative-consistency check cross-references its final answer's own numbers against this turn's real tool results before it is shown as verified. Benchmarked directly against V1 on real questions (`docs/reports/2026-09-16-m16-v1-vs-v2-benchmark.md`), including ones V1's own keyword-table approach could never answer correctly regardless of how many special cases were added.
 - **Multi-document corpus and retrieval (M6/M7)**: 18 configured documents on the Azure profile (schedules, spec sheets, RFI logs, meeting minutes), a naive zero-model-call deterministic baseline first, and an opt-in Azure AI Search hybrid (BM25 + `text-embedding-3-small`) retrieval fallback that directs an honest miss to the most relevant document instead of a blanket "not found."
 - **Optional answer-wording polish (M10, D-025)**: a final model call may reword an already-verified deterministic answer for tone, gated by a code-level guard (`AgentService._polish_preserves_facts`) that rejects any rewrite whose set of numbers doesn't exactly match the original. Off by default.
 - **Cloud-native operational surface (M3/M4/M7/M8, D-012/014/018/020/028/031)**: Postgres-backed conversation/audit persistence, Azure Blob-backed evidence crop persistence, per-caller and global rate limiting, and a one-click Cloud Provenance link from any answer into that specific request's own Application Insights telemetry (OpenTelemetry-tagged with the app's own trace ID, not a generic dashboard).
 - **Engineering Finding Workflow (M11, D-032)**: reconciliation's non-matched items are auto-persisted as a reviewable `EngineeringFinding` with a real lifecycle (`open -> acknowledged -> action_required -> resolved`, plus `waived`/`false_positive`/`verified_closed`), surfaced in a new Findings tab. Closed-loop re-verify re-runs the actual IFC/PDF comparison before ever closing a finding -- a human's "resolved" claim is never taken on its own word. (Corrected here: this bullet previously said "not yet merged to `main`" -- confirmed merged and live while adding M17 below, stale claim fixed in the same commit.)
-- **Agent-assisted finding resolution (M17, on branch `feat/m17-agent-assisted-finding-resolution`, not yet merged to `main`)**: while a finding sits `action_required`, a human can ask V2's tool-calling agent to investigate any of the three SPEC-M11 finding types (`dimension_mismatch`, `missing_in_pdf`, `missing_in_ifc`) and propose a resolution with rationale/citations -- the investigation runs as a normal V2 chat turn (`ChatRequest.finding_id`) streaming into the same Conversation panel as any other question, not a separate endpoint/UI; an explicit human `approve_proposal`/`reject_proposal` decision is required before it counts toward `resolved` -- the agent never auto-approves its own proposal, and M11's own re-verify closed-loop check is completely untouched. See the M17 milestone entry below.
+- **Agent-assisted finding resolution (M17, merged and deployed since 2026-09-19; corrected here -- this bullet previously said "not yet merged," which stopped being true weeks ago and was never updated)**: while a finding sits `action_required`, a human can ask V2's tool-calling agent to investigate any of the three SPEC-M11 finding types (`dimension_mismatch`, `missing_in_pdf`, `missing_in_ifc`) and propose a resolution via a structured `submit_finding_verdict` tool call (verdict + basis + confirmed dimensions, never inferred from free text) -- the investigation runs as a normal V2 chat turn (`ChatRequest.finding_id`) streaming into the same Conversation panel as any other question; an explicit human `approve_proposal`/`reject_proposal` decision is required before it counts toward `resolved`, the agent never auto-approves its own proposal, and M11's own re-verify closed-loop check is completely untouched. Extensively stress-tested against both real Dataset Pack buildings (2026-09-19 through 2026-09-22), finding and fixing seven real defects along the way (D-065 through D-073) -- see that stretch of the Milestone history below and `docs/decisions/README.md` for the full account. All real findings across both real buildings currently resolve correctly, live-verified against the deployed app, not just the test suite.
 
 The committed public fixture contains two storeys, four synthetic doors, four synthetic windows, controlled quantities, and fictional schedule identifiers. Fixture facts are test/demo data, not claims about a real project.
 
@@ -77,7 +85,7 @@ The committed public fixture contains two storeys, four synthetic doors, four sy
 - The `/api/v1/evidence/{filename}` endpoint enforces basename containment (`Path(filename).name != filename` is rejected) before resolving into `evidence_dir`; this was previously an undocumented invariant rather than a gap.
 - LangSmith hooks and the direct-OpenAI provider path remain unvalidated extension points. The Docker images and the Azure profile are no longer in that category: M3 (`docs/reports/2026-09-08-m3-azure-deployment-baseline.md`) ran a real deployment against a real Azure subscription and answered a real question through it, evidenced above. This is still a single-environment, single-replica-per-app Phase 1 slice, not a claim of a hardened, multi-environment, or auto-scaling production deployment. No Compose file is present in this repository.
 - The graph module is large and carries historical compatibility paths. Refactoring it should preserve the typed plan and verification boundaries.
-- The automated public test surface is 295 tests (`tests/`; see the "Verification state" section below, and the M6 through M10 milestone entries for what each batch added), CI-verified on Python 3.9-3.12 via `.github/workflows/ci.yml`. This is a deterministic-contract and fake-provider-driven regression net for the router/planning/verification/retrieval/multi-project/persistence/polish boundaries, not a scored or graded evaluation harness; there is no claim of a large-scale graded evaluation run in this repository. Azure-specific behavior is additionally verified against the real subscription by `azure-deploy.yml`'s own post-deploy smoke tests on every deploy, and by hand (`docs/reports/`, dated deployment-baseline reports).
+- The automated public test surface is 494 tests (`tests/`; see the "Verification state" section below, and the M6 through M17 milestone entries for what each batch added), CI-verified on Python 3.9-3.12 via `.github/workflows/ci.yml`. This is a deterministic-contract and fake-provider-driven regression net for the router/planning/verification/retrieval/multi-project/persistence/polish/agent/finding-workflow boundaries, not a scored or graded evaluation harness; there is no claim of a large-scale graded evaluation run in this repository. Azure-specific behavior is additionally verified against the real subscription by `azure-deploy.yml`'s own post-deploy smoke tests on every deploy, and by hand (`docs/reports/`, dated deployment-baseline reports).
 - CORS is configured for the documented local development origins. A deployment must replace this with an explicit environment-specific policy.
 - **Resolved by M1.5 (D-010):** the `error`/`clarification_required`/`unsupported` dispositions previously all collapsed into `refused` on the semantic-planning failure path; `AgentService._unsupported_subresult` now maps the actual underlying cause to the correct disposition. See `docs/decisions/README.md` D-010 and `tests/test_disposition_contract.py`.
 
@@ -85,7 +93,7 @@ The committed public fixture contains two storeys, four synthetic doors, four sy
 
 **The paragraph below (167 tests, M1/M1.5/M2/M2P1 only) is the state as of those milestones and
 is kept for historical/methodology reference; it is not the current count.** The current count
-(295 tests, through M10) is in "Known limitations and production gaps" above and the "Milestone
+(494 tests, through M17) is in "Known limitations and production gaps" above and the "Milestone
 history" section below, which is the authoritative, dated record of what each later milestone
 added and how it was verified -- this section was not kept current turn-by-turn and should not
 be read as the latest state.
