@@ -30,7 +30,12 @@ from app.agent.router import (
     resolve_reference,
     selected_element_plan,
 )
-from app.agent.tools import SUBMIT_FINDING_VERDICT_TOOL, TOOL_DEFINITIONS, build_plan_from_tool_call
+from app.agent.tools import (
+    SUBMIT_ANSWER_FACTS_TOOL,
+    SUBMIT_FINDING_VERDICT_TOOL,
+    TOOL_DEFINITIONS,
+    build_plan_from_tool_call,
+)
 from app.config import Settings
 from app.providers.base import AnswerChunkEvent, ToolCallEvent, TurnCompleteEvent
 from app.schemas.models import (
@@ -2406,6 +2411,25 @@ Return only a corrected MultiQueryPlan JSON object."""
                 "evidence": [], "tool_call_delta": 0, "plan": [],
                 "finding_verdict": tool_call.arguments,
             }
+        if tool_call.tool_name == "submit_answer_facts":
+            # SPEC-M18 (D-074): same "local, no-op, records the model's own
+            # structured statement" shape as submit_finding_verdict above,
+            # but offered on every V2 turn (not just investigations) and
+            # feeding the turn's general narrative-consistency check instead
+            # of a finding's own proposed-dimension validation. Replaces the
+            # retired free-text character-proximity scan
+            # (`_narrative_consistent_with_tool_facts`) entirely.
+            return {
+                "tool_result": {
+                    "answer": "",
+                    "disposition": "answered",
+                    "citations": [],
+                    "verification": VerificationStatus(status="not_applicable", reason="A structured fact submission, not a data query.").model_dump(),
+                    "result_value": {"status": "answer facts recorded"},
+                },
+                "evidence": [], "tool_call_delta": 0, "plan": [],
+                "answer_facts": tool_call.arguments.get("claims", []),
+            }
         if tool_call.tool_name == "reconcile_doors_windows":
             reason = "V2 tool call: door/window width/height reconciliation against the PDF schedule."
             multi_plan = MultiQueryPlan(
@@ -2533,7 +2557,13 @@ Return only a corrected MultiQueryPlan JSON object."""
         except Exception:
             storey_names = []
         messages: list[dict[str, Any]] = [{"role": "system", "content": self._v2_system_prompt(storey_names, source_preference)}]
-        tool_definitions = [*TOOL_DEFINITIONS, SUBMIT_FINDING_VERDICT_TOOL] if include_verdict_tool else TOOL_DEFINITIONS
+        # SPEC-M18 (D-074): SUBMIT_ANSWER_FACTS_TOOL is offered on every V2
+        # turn (unlike SUBMIT_FINDING_VERDICT_TOOL, which stays
+        # investigation-only) -- it feeds the general narrative-consistency
+        # check that applies to any answer, not just a finding verdict.
+        tool_definitions = [*TOOL_DEFINITIONS, SUBMIT_ANSWER_FACTS_TOOL]
+        if include_verdict_tool:
+            tool_definitions = [*tool_definitions, SUBMIT_FINDING_VERDICT_TOOL]
         for turn in recent_turns or []:
             messages.append({"role": "user", "content": turn["question"]})
             messages.append({"role": "assistant", "content": turn["answer"]})
@@ -2977,6 +3007,12 @@ Return only a corrected MultiQueryPlan JSON object."""
                 # last action" in the tool's own description.
                 if "finding_verdict" in result:
                     state["finding_verdict"] = result["finding_verdict"]
+                # SPEC-M18 (D-074): same "last call wins" carry-through for
+                # submit_answer_facts's own claims, consumed by the
+                # narrative-consistency check at final-response time instead
+                # of the retired free-text scan.
+                if "answer_facts" in result:
+                    state["answer_facts"] = result["answer_facts"]
                 # Independent-review finding, 2026-09-17: the turn's overall
                 # disposition used to be decided purely from "did *any*
                 # tool call this turn leave a citation," ignoring every
