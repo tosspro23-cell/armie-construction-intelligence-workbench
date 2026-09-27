@@ -760,12 +760,22 @@ def test_answer_facts_verified_binds_claims_to_their_own_declared_entity() -> No
     assert "IfcDoor" in reason
 
 
-def test_v2_correctly_verifies_two_different_entity_counts_in_one_answer(tmp_path: Path) -> None:
-    """End-to-end reproduction of the D-074 trigger above (see
+def test_v2_correctly_verifies_two_different_entity_counts_in_one_answer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """End-to-end reproduction of the exact D-074 trigger, live 2026-09-25:
+    "There are 14 doors and 24 windows in the building." (both real,
+    correct counts) was flagged unverified because "24" (windows' own real
+    count) fell within the retired check's 15-character scan window around
+    "doors", whose own expected set was only {14}. Distinct counts (not
+    the demo fixture's own real 4/4) are needed to actually exercise this
+    -- monkeypatched here to mirror the real live values precisely (see
     `test_answer_facts_verified_binds_claims_to_their_own_declared_entity`
-    for the unit-level version) through the full `invoke_v2` loop -- proves
-    the real fact-collection code (not a hand-built `real_facts` dict)
-    correctly buckets two `count_elements` calls by their own entity type.
+    for the pure unit-level version of the same claim).
+
+    This test is proven to fail against the pre-SPEC-M18 verification code
+    (commit ce77f21, which had `submit_answer_facts` wired up but still
+    used the retired character-proximity scan) and to pass against the
+    current code -- see docs/decisions/README.md D-074 for that fail-
+    before/pass-after record.
     """
     fake = FakeModelProvider()
     fake.script("v2_tool_turn", ScriptedToolCalls([
@@ -773,11 +783,26 @@ def test_v2_correctly_verifies_two_different_entity_counts_in_one_answer(tmp_pat
         ("count_elements", {"entity_type": "IfcWindow"}),
     ]))
     fake.script("v2_tool_turn", ScriptedToolCalls([("submit_answer_facts", {"claims": [
-        {"entity": "IfcDoor", "measure": "count", "value": 4},
-        {"entity": "IfcWindow", "measure": "count", "value": 4},
+        {"entity": "IfcDoor", "measure": "count", "value": 14},
+        {"entity": "IfcWindow", "measure": "count", "value": 24},
     ]})]))
-    fake.script("v2_tool_turn", ScriptedAnswer(["There are 4 doors and 4 windows in the building."]))
+    fake.script("v2_tool_turn", ScriptedAnswer(["There are 14 doors and 24 windows in the building."]))
     _, service, resources = _service(tmp_path, fake)
+
+    real_dispatch = AgentService._v2_dispatch_tool
+    test_citation = {"evidence_id": "test-citation", "source_type": "ifc", "label": "test", "locator": {}, "project_id": "demo", "source_set_id": "demo-v1", "source_file": "test.ifc"}
+
+    def dispatch_with_real_live_counts(self, tool_call, state):
+        if tool_call.tool_name == "count_elements":
+            entity_type = tool_call.arguments["entity_type"]
+            count = 14 if entity_type == "IfcDoor" else 24
+            return {
+                "tool_result": {"answer": f"{count} {entity_type} elements.", "disposition": "answered", "citations": [test_citation], "verification": VerificationStatus(status="verified", reason="test").model_dump(), "result_value": count},
+                "evidence": [], "tool_call_delta": 1, "plan": [{"entity_type": entity_type, "source": "ifc"}],
+            }
+        return real_dispatch(self, tool_call, state)
+
+    monkeypatch.setattr(AgentService, "_v2_dispatch_tool", dispatch_with_real_live_counts)
 
     response = asyncio.run(_run(service, resources, "How many doors and windows are there?", "eval-two-entity-counts"))
 
