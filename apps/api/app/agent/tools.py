@@ -184,6 +184,62 @@ SUBMIT_FINDING_VERDICT_TOOL: dict[str, Any] = {
     },
 }
 
+# SPEC-M18 (D-074): replaces the free-text, character-proximity heuristic
+# `_narrative_consistent_with_tool_facts` used to rely on to decide whether a
+# V2 answer's own stated numbers can be shown as verified. That heuristic
+# produced eight confirmed false positives across two live stress-testing
+# sessions (most recently: "There are 14 doors and 24 windows" flagged
+# unverified because 24 sits within the scan window around "doors") --
+# character proximity in free text cannot reliably tell which entity a
+# number describes. This tool asks the model to state that binding
+# explicitly instead, mirroring SUBMIT_FINDING_VERDICT_TOOL's own "structured
+# claim, not inferred from free text" pattern. Offered on every V2 turn
+# (unlike SUBMIT_FINDING_VERDICT_TOOL, which is investigation-only) -- see
+# `AgentService.invoke_v2`'s `tool_definitions` construction.
+SUBMIT_ANSWER_FACTS_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "submit_answer_facts",
+        "description": (
+            "Call this exactly once, immediately before your final answer, whenever that answer states any "
+            "number. List every number your answer states, each tied to the specific entity and measure it "
+            "describes -- e.g. if your answer says '14 doors and 24 windows', submit two claims: "
+            "{entity: 'IfcDoor', measure: 'count', value: 14} and {entity: 'IfcWindow', measure: 'count', "
+            "value: 24}. Every claim is checked against this turn's own real tool results before your answer "
+            "is shown as verified. If your answer states no numbers at all, call this with an empty claims "
+            "list."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "claims": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "entity": {
+                                "type": "string",
+                                "description": (
+                                    "What this number is about -- the IFC entity type (e.g. 'IfcDoor'), a "
+                                    "specific tag/mark, or a PDF record identifier (e.g. 'Panel-B'), exactly "
+                                    "as your tool call(s) this turn used it."
+                                ),
+                            },
+                            "measure": {
+                                "type": "string",
+                                "description": "What aspect of the entity this number measures -- e.g. 'count', 'width_m', 'height_m', 'connected_load', 'max_height_m'.",
+                            },
+                            "value": {"type": "number"},
+                        },
+                        "required": ["entity", "measure", "value"],
+                    },
+                },
+            },
+            "required": ["claims"],
+        },
+    },
+}
+
 
 def build_plan_from_tool_call(tool_name: str, arguments: dict[str, Any]) -> QueryPlan:
     """Convert one model-requested tool call into the canonical QueryPlan
