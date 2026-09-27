@@ -446,7 +446,27 @@ only if a real case shows this meaningfully hurting investigation quality in pra
 speculatively -- matches this project's own "one fixed rule, not configurable this milestone"
 precedent for not over-generalizing pattern-matching heuristics ahead of a demonstrated need.
 
-## UPDATED, not resolved: narrative-consistency verification can mark a numerically-correct answer "unverified" -- six distinct real causes found and fixed, owner explicitly declined to redesign at the seventh
+## RESOLVED by SPEC-M18 (D-074): narrative-consistency verification redesigned into a structural check after its eighth real gap
+
+An eighth real false positive surfaced live 2026-09-25 (see this entry's own prior "UPDATED, not
+resolved" text below, kept for the record): "There are 14 doors and 24 windows in the building."
+(both real, correct counts) flagged unverified because "24" fell within the free-text check's scan
+window around "doors". This crossed the exact threshold this entry's prior text named ("revisit the
+redesign question again if an eighth real gap surfaces"). Owner's decision this time: redesign, not
+a ninth patch.
+
+`_narrative_consistent_with_tool_facts` (the free-text, character-proximity scan behind all eight
+gaps) is retired. Replaced with a structural check: the model states each of its answer's own
+numbers as a typed claim (`submit_answer_facts`, mirroring `submit_finding_verdict`'s own precedent),
+checked directly against this turn's real tool results by declared entity/measure -- no regex, no
+scan window. This makes the GlobalId-digit problem (D-073) and the cross-entity collision (this
+entry's own trigger) both structurally impossible, not two more patched shapes, and closes the
+check's prior English-only limitation as a side effect (entity matching now reuses `ELEMENT_ALIASES`,
+which already covers Chinese). Full account: `docs/decisions/README.md` D-074;
+`docs/specs/SPEC-M18-structured-answer-verification-v1.md`.
+
+<details>
+<summary>Prior text, 2026-09-22 ("UPDATED, not resolved," superseded by the redesign above -- kept for the record)</summary>
 
 First found live, 2026-09-19 (see this entry's own original text below, kept for the record): a
 V2 answer whose every stated number genuinely traced to this turn's own tool results was still
@@ -493,6 +513,8 @@ block the human-approval gate this milestone's whole design relies on, and confi
 trigger would need a dedicated repro this session's own priority (verifying the architecture
 redesign, then widening finding-type scope) didn't leave room for. Revisit if this proves common
 enough in practice to meaningfully erode trust in the `verified` badge's own signal.
+
+</details>
 
 </details>
 

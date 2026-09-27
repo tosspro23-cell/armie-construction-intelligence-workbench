@@ -124,12 +124,20 @@ def test_v2_accepts_a_real_sum_of_this_turns_own_per_type_counts(tmp_path: Path)
 
     Fixed by additionally accepting the sum of this turn's own whole-
     number, single-valued ("pure scalar") facts as a valid baseline value.
+
+    SPEC-M18 (D-074): this allowance is preserved under the structural
+    redesign (see `invoke_v2`'s own "scalar_values"/"total_of_scalars"
+    comment) -- the model declares the derived total under a general
+    entity ('total'), which the check falls back to a shared pool for
+    since it isn't a specific IFC type, and that pool now includes this
+    turn's own real scalar total.
     """
     fake = FakeModelProvider()
     fake.script("v2_tool_turn", ScriptedToolCalls([
         ("count_elements", {"entity_type": "IfcDoor"}),
         ("count_elements", {"entity_type": "IfcWindow"}),
     ]))
+    fake.script("v2_tool_turn", ScriptedToolCalls([("submit_answer_facts", {"claims": [{"entity": "total", "measure": "count", "value": 8}]})]))
     fake.script("v2_tool_turn", ScriptedAnswer(["That's a total of 8 elements."]))
     _, service, resources = _service(tmp_path, fake)
 
@@ -147,6 +155,7 @@ def test_v2_accepts_a_real_sum_of_this_turns_own_per_type_counts(tmp_path: Path)
         ("count_elements", {"entity_type": "IfcDoor"}),
         ("count_elements", {"entity_type": "IfcWindow"}),
     ]))
+    fake_bad.script("v2_tool_turn", ScriptedToolCalls([("submit_answer_facts", {"claims": [{"entity": "total", "measure": "count", "value": 999}]})]))
     fake_bad.script("v2_tool_turn", ScriptedAnswer(["That's a total of 999 elements."]))
     _, service_bad, resources_bad = _service(tmp_path, fake_bad)
     response_bad = asyncio.run(_run(service_bad, resources_bad, "好了总和是多少?", "eval-sum-of-counts-bad"))
@@ -272,9 +281,15 @@ def test_v2_flags_a_narrative_that_contradicts_its_own_tool_result(tmp_path: Pat
     number (e.g. an invented fire-rating attached to a correct door
     count) -- that gap is real and not closed by this test or the fix it
     verifies.
+
+    SPEC-M18 (D-074): the check itself is now structural, not a text scan
+    -- the fabricated claim is scripted explicitly (a model whose own
+    `submit_answer_facts` call states the same wrong number it goes on to
+    narrate) rather than relying on scanning "99999" out of the prose.
     """
     fake = FakeModelProvider()
     fake.script("v2_tool_turn", ScriptedToolCalls([("count_elements", {"entity_type": "IfcDoor"})]))
+    fake.script("v2_tool_turn", ScriptedToolCalls([("submit_answer_facts", {"claims": [{"entity": "IfcDoor", "measure": "count", "value": 99999}]})]))
     fake.script("v2_tool_turn", ScriptedAnswer(["There are 99999 doors, all fire-certified for 120 minutes."]))
     _, service, resources = _service(tmp_path, fake)
 
@@ -304,9 +319,17 @@ def test_v2_rejects_a_fabricated_number_hidden_behind_a_correct_decoy(tmp_path: 
     D-062 (2026-09-17): a caught mismatch is now flagged
     (verification.status="unverified"), not hard-blocked -- see that
     decision for why. Still verified here: shown, not withheld.
+
+    SPEC-M18 (D-074): "decoy" no longer describes anything meaningful
+    about this check -- it never scans the prose at all, so a real number
+    sitting anywhere nearby cannot rescue a claim that doesn't itself
+    match. Scripted here as a model whose own `submit_answer_facts` claim
+    states the fabricated 99999 for IfcDoor's count, proving the mismatch
+    is still caught even though a real "4" also appears in the text.
     """
     fake = FakeModelProvider()
     fake.script("v2_tool_turn", ScriptedToolCalls([("count_elements", {"entity_type": "IfcDoor"})]))
+    fake.script("v2_tool_turn", ScriptedToolCalls([("submit_answer_facts", {"claims": [{"entity": "IfcDoor", "measure": "count", "value": 99999}]})]))
     fake.script("v2_tool_turn", ScriptedAnswer(["4 records were checked. There are 99999 doors, all certified for 120 minutes."]))
     _, service, resources = _service(tmp_path, fake)
 
@@ -333,9 +356,18 @@ def test_v2_rejects_a_fabricated_number_sitting_in_the_same_window_as_a_real_one
     D-062 (2026-09-17): a caught mismatch is now flagged
     (verification.status="unverified"), not hard-blocked -- see that
     decision for why. Still verified here: shown, not withheld.
+
+    SPEC-M18 (D-074): the entire concept of a "window" (character
+    proximity between a number and an entity noun) is retired -- there is
+    no text position left to have a bug in. The same underlying claim
+    (a fabricated number is still caught no matter how close a real one
+    sits to it in the prose) is preserved by construction: the check
+    never reads the prose to begin with, only the model's own structured
+    claim.
     """
     fake = FakeModelProvider()
     fake.script("v2_tool_turn", ScriptedToolCalls([("count_elements", {"entity_type": "IfcDoor"})]))
+    fake.script("v2_tool_turn", ScriptedToolCalls([("submit_answer_facts", {"claims": [{"entity": "IfcDoor", "measure": "count", "value": 99999}]})]))
     fake.script("v2_tool_turn", ScriptedAnswer(["There are 99999 doors (4 checked)."]))
     _, service, resources = _service(tmp_path, fake)
 
@@ -364,12 +396,22 @@ def test_v2_accepts_the_same_entity_reported_at_two_different_scopes(tmp_path: P
     terms before running the entity-bound check, so a legitimate second
     scope's real value is itself part of what "doors" is allowed to mean
     anywhere in the answer.
+
+    SPEC-M18 (D-074): "merging by shared entity terms" happens by
+    construction now, not as a special case -- both calls bucket under the
+    same `("entity", "ifcdoor")` key in `real_facts`, so a claim for either
+    scope's own real value matches. Scripted with two separate claims (one
+    per scope) rather than relying on the old entity-window scan.
     """
     fake = FakeModelProvider()
     fake.script("v2_tool_turn", ScriptedToolCalls([
         ("count_elements", {"entity_type": "IfcDoor"}),
         ("count_elements", {"entity_type": "IfcDoor", "storey": "Level 01"}),
     ]))
+    fake.script("v2_tool_turn", ScriptedToolCalls([("submit_answer_facts", {"claims": [
+        {"entity": "IfcDoor", "measure": "count", "value": 4},
+        {"entity": "IfcDoor", "measure": "count", "value": 2},
+    ]})]))
     fake.script("v2_tool_turn", ScriptedAnswer(["The whole project contains 4 doors. On the first floor there are 2 doors."]))
     _, service, resources = _service(tmp_path, fake)
 
@@ -388,6 +430,10 @@ def test_v2_accepts_the_same_entity_reported_at_two_different_scopes(tmp_path: P
         ("count_elements", {"entity_type": "IfcDoor"}),
         ("count_elements", {"entity_type": "IfcDoor", "storey": "Level 01"}),
     ]))
+    fake_bad.script("v2_tool_turn", ScriptedToolCalls([("submit_answer_facts", {"claims": [
+        {"entity": "IfcDoor", "measure": "count", "value": 4},
+        {"entity": "IfcDoor", "measure": "count", "value": 99999},
+    ]})]))
     fake_bad.script("v2_tool_turn", ScriptedAnswer(["The whole project contains 4 doors. On the first floor there are 99999 doors."]))
     _, service_bad, resources_bad = _service(tmp_path, fake_bad)
     response_bad = asyncio.run(_run(service_bad, resources_bad, "How many doors total, and how many on the first floor?", "eval-multi-scope-bad"))
@@ -410,9 +456,14 @@ def test_v2_rejects_a_fabricated_property_value_from_a_list_shaped_tool_result(t
     D-062 (2026-09-17): a caught mismatch is now flagged
     (verification.status="unverified"), not hard-blocked -- see that
     decision for why. Still verified here: shown, not withheld.
+
+    SPEC-M18 (D-074): the fabricated height is now the model's own
+    declared claim, checked against IfcDoor's real bucket (populated from
+    `get_element_properties`'s real numeric leaves) directly.
     """
     fake = FakeModelProvider()
     fake.script("v2_tool_turn", ScriptedToolCalls([("get_element_properties", {"entity_type": "IfcDoor"})]))
+    fake.script("v2_tool_turn", ScriptedToolCalls([("submit_answer_facts", {"claims": [{"entity": "IfcDoor", "measure": "height_m", "value": 99999}]})]))
     fake.script("v2_tool_turn", ScriptedAnswer(["Every door is 99999 metres high and fire certified."]))
     _, service, resources = _service(tmp_path, fake)
 
@@ -616,92 +667,148 @@ def test_v2_shrinks_the_large_list_sample_size_independently_of_the_trigger_thre
     assert "\"total_count\": 45" in tool_payload_text or "'total_count': 45" in tool_payload_text
 
 
-def test_narrative_consistency_check_recognizes_a_lists_own_length_as_a_real_fact() -> None:
-    """D-068 (2026-09-21), found live minutes after redeploying D-067's
-    payload-size fix, on the real "RWTH DigitalHub" building: a fully
+def test_answer_facts_verified_recognizes_a_lists_own_length_as_a_real_fact() -> None:
+    """D-068 (2026-09-21, original bug), rewritten for SPEC-M18: a fully
     correct `get_element_properties(entity_type="IfcDoor")` investigation
     answer restating "total_count: 50 doors in the IFC" (the tool's own
-    real, verified total match count) was flagged unverified.
-
-    Root cause, in `_numeric_tokens_from_result_value`: `_add(len(value))`
-    -- recording a list's own length as one of "this call's own real
-    facts" -- only ever ran inside the `reconcile_doors_windows`-specific
-    branch (items carrying a `status` key), never for any other list
-    shape. For a plain `get_element_properties` list (items shaped like
-    `{"element": ..., "storey": ..., "properties": ...}`, no `status` key),
-    the real total item count was never a recognized fact at all -- even
-    though "there are N of these" is always a truthful thing a correct
-    answer can state about any list result. "50 doors" then landed in the
-    door-entity window (D-065/D-066's own check) as an unexplained number,
-    indistinguishable from a fabricated count.
-
-    Fixed by moving the length-recording out of the reconcile-specific
-    branch so it applies to every non-empty list, regardless of shape.
+    real, verified total match count) used to be flagged unverified,
+    because a list's own length was only ever recorded as a real fact
+    inside the `reconcile_doors_windows`-specific branch of
+    `_numeric_tokens_from_result_value`, never for any other list shape.
+    That extraction bug is unrelated to and unfixed-by this redesign (it
+    lives in `_numeric_tokens_from_result_value`, which SPEC-M18 keeps
+    unchanged) -- what this test now verifies is that the *consumer* of
+    that fact (`_answer_facts_verified`, replacing the retired character-
+    proximity scan) correctly checks a claimed count against it, bucketed
+    by entity via `_fact_bucket_key` and by measure via
+    `_labeled_facts_from_tool_result` (P1 follow-up, Codex review, PR #53),
+    exactly as the real fact-collection loop in `invoke_v2` does.
     """
-    door_terms = AgentService._entity_terms_for("IfcDoor")
     items = [{"element": {"express_id": 1000 + i, "entity_type": "IfcDoor", "tag": str(2000 + i)}, "storey": "Level 01", "properties": {"Height": 2.045}} for i in range(50)]
-    facts = AgentService._numeric_tokens_from_result_value(items)
+    labeled = AgentService._labeled_facts_from_tool_result("get_element_properties", {"entity_type": "IfcDoor"}, items)
+    real_facts = {AgentService._fact_bucket_key({"entity_type": "IfcDoor"}): labeled}
 
-    answer = "get_element_properties (IfcDoor) result: total_count: 50 doors in the IFC."
-    assert AgentService._narrative_consistent_with_tool_facts(answer, [(door_terms, facts)])
+    verified, _ = AgentService._answer_facts_verified([{"entity": "IfcDoor", "measure": "count", "value": 50}], real_facts)
+    assert verified
 
     # A genuinely fabricated count must still be caught.
-    fabricated = "get_element_properties (IfcDoor) result: total_count: 99999 doors in the IFC."
-    assert not AgentService._narrative_consistent_with_tool_facts(fabricated, [(door_terms, facts)])
+    verified, reason = AgentService._answer_facts_verified([{"entity": "IfcDoor", "measure": "count", "value": 99999}], real_facts)
+    assert not verified
+    assert "IfcDoor" in reason
 
 
-def test_narrative_consistency_check_ignores_digits_embedded_in_a_real_globalid() -> None:
-    """D-073 (2026-09-22), found live minutes after redeploying D-072's
-    tags-based-lookup fix, on the real "RWTH DigitalHub" building: a
-    fully correct `get_element_properties(entity_type=IfcWindow,
-    tags=["2543664"])` investigation answer restating the element's own
-    real GlobalId ("GlobalId: 0ehNcYPbH3JQicvZQLHP24" -- D-072 made this
-    kind of direct, single-element lookup routine, so the model started
-    echoing the returned GlobalId back in its own prose) was flagged
-    `unverified`.
+def test_answer_facts_verified_is_structurally_unaffected_by_a_globalid_in_the_answer() -> None:
+    """D-073 (2026-09-22, original bug): a fully correct
+    `get_element_properties(entity_type=IfcWindow, tags=["2543664"])`
+    answer restating the element's own real GlobalId ("GlobalId:
+    0ehNcYPbH3JQicvZQLHP24") used to be flagged unverified, because the
+    retired check's regex extracted "24" out of the middle of the GlobalId
+    string and found no matching IfcWindow fact for it.
 
-    Root cause: `\\d+(?:\\.\\d+)?` extracted "24" out of the middle of the
-    GlobalId string (the digits following "...QLHP"), and that "24"
-    happened to land within the entity-bound check's 15-character window
-    of the "IfcWindow" mention two lines above it, with no real IfcWindow
-    fact equal to 24 -- flagging a fully correct, fully tool-grounded
-    answer as if it had fabricated a number. A GlobalId is not a number at
-    all; it is IFC's own standard fixed-shape compressed GUID (22
-    characters from `[0-9A-Za-z_$]`).
-
-    Fixed by stripping any 22-character GlobalId-shaped token from the
-    answer text before any number extraction -- confirmed here against
-    the exact live-observed shape, not a simplified stand-in, and
-    confirmed a genuinely fabricated width right next to the same
-    GlobalId is still caught (the fix does not blind the check to real
-    numbers merely because a GlobalId sits nearby).
+    SPEC-M18 (D-074): this bug class is now impossible by construction,
+    not by one more special case -- `_answer_facts_verified` takes no
+    answer text at all, only the model's own structured claims, so a
+    GlobalId (or any other non-numeric token) embedded in the prose is
+    never examined in the first place. Verified here by checking the same
+    real width/height claims a correct answer would submit, independent
+    of whatever the answer's own prose says about GlobalIds.
     """
-    window_terms = AgentService._entity_terms_for("IfcWindow")
-    facts = {6.0, 1.5}
-    # The finding's own tag, restated in "tags=['2543664']" right next to
-    # the "IfcWindow" mention -- exempted the same way a real citation's
-    # locator tag already would be (D-065/D-066), not part of what this
-    # test is about; included here so the GlobalId fix is isolated as the
-    # only thing under test.
-    known_reference_numbers = {2543664.0}
+    real_facts = {AgentService._fact_bucket_key({"entity_type": "IfcWindow"}): {"width": {6.0}, "height": {1.5}}}
 
-    answer = (
-        "IFC properties (get_element_properties, entity_type=IfcWindow, tags=['2543664']):\n"
-        "- GlobalId: 0ehNcYPbH3JQicvZQLHP24\n"
-        "- Qto_WindowBaseQuantities.Width = 6.0 m\n"
-        "- Qto_WindowBaseQuantities.Height = 1.5 m"
+    verified, _ = AgentService._answer_facts_verified(
+        [{"entity": "IfcWindow", "measure": "width_m", "value": 6.0}, {"entity": "IfcWindow", "measure": "height_m", "value": 1.5}],
+        real_facts,
     )
-    assert AgentService._narrative_consistent_with_tool_facts(answer, [(window_terms, facts)], known_reference_numbers)
+    assert verified
 
-    # A genuinely fabricated width sitting right next to the same real
-    # GlobalId must still be caught -- the fix strips the GlobalId's own
-    # digits, not every number anywhere near one.
-    fabricated = (
-        "IFC properties (get_element_properties, entity_type=IfcWindow, tags=['2543664']):\n"
-        "- GlobalId: 0ehNcYPbH3JQicvZQLHP24\n"
-        "- Qto_WindowBaseQuantities.Width = 99999 m"
+    # A genuinely fabricated width must still be caught.
+    verified, reason = AgentService._answer_facts_verified([{"entity": "IfcWindow", "measure": "width_m", "value": 99999}], real_facts)
+    assert not verified
+    assert "IfcWindow" in reason
+
+
+def test_answer_facts_verified_binds_claims_to_their_own_declared_entity() -> None:
+    """SPEC-M18 (D-074)'s own trigger, found live 2026-09-25: "There are 14
+    doors and 24 windows in the building." -- both numbers real and
+    correct (`count_elements(IfcDoor)` = 14, `count_elements(IfcWindow)` =
+    24) -- was flagged unverified under the retired check, because "24"
+    (windows' own real count) sat within the 15-character scan window
+    around "doors", and door's own expected set was only {14}. This is not
+    an edge case: reporting two different entities' counts in one ordinary
+    sentence is the single most natural way to answer a two-part question.
+
+    The redesign closes this at the root: each claim is bound to its own
+    declared entity, so a door claim can only ever be checked against
+    IfcDoor's own real facts, never IfcWindow's -- there is no shared
+    "window" of text for two entities' numbers to collide in.
+    """
+    real_facts = {
+        AgentService._fact_bucket_key({"entity_type": "IfcDoor"}): {"count": {14.0}},
+        AgentService._fact_bucket_key({"entity_type": "IfcWindow"}): {"count": {24.0}},
+    }
+
+    verified, _ = AgentService._answer_facts_verified(
+        [{"entity": "IfcDoor", "measure": "count", "value": 14}, {"entity": "IfcWindow", "measure": "count", "value": 24}],
+        real_facts,
     )
-    assert not AgentService._narrative_consistent_with_tool_facts(fabricated, [(window_terms, facts)], known_reference_numbers)
+    assert verified
+
+    # A genuine cross-entity error (door's own count claimed as 24, the
+    # window's real value) is still caught -- binding by entity cuts both
+    # ways, it does not just widen what any claim is allowed to match.
+    verified, reason = AgentService._answer_facts_verified([{"entity": "IfcDoor", "measure": "count", "value": 24}], real_facts)
+    assert not verified
+    assert "IfcDoor" in reason
+
+
+def test_v2_correctly_verifies_two_different_entity_counts_in_one_answer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """End-to-end reproduction of the exact D-074 trigger, live 2026-09-25:
+    "There are 14 doors and 24 windows in the building." (both real,
+    correct counts) was flagged unverified because "24" (windows' own real
+    count) fell within the retired check's 15-character scan window around
+    "doors", whose own expected set was only {14}. Distinct counts (not
+    the demo fixture's own real 4/4) are needed to actually exercise this
+    -- monkeypatched here to mirror the real live values precisely (see
+    `test_answer_facts_verified_binds_claims_to_their_own_declared_entity`
+    for the pure unit-level version of the same claim).
+
+    This test is proven to fail against the pre-SPEC-M18 verification code
+    (commit ce77f21, which had `submit_answer_facts` wired up but still
+    used the retired character-proximity scan) and to pass against the
+    current code -- see docs/decisions/README.md D-074 for that fail-
+    before/pass-after record.
+    """
+    fake = FakeModelProvider()
+    fake.script("v2_tool_turn", ScriptedToolCalls([
+        ("count_elements", {"entity_type": "IfcDoor"}),
+        ("count_elements", {"entity_type": "IfcWindow"}),
+    ]))
+    fake.script("v2_tool_turn", ScriptedToolCalls([("submit_answer_facts", {"claims": [
+        {"entity": "IfcDoor", "measure": "count", "value": 14},
+        {"entity": "IfcWindow", "measure": "count", "value": 24},
+    ]})]))
+    fake.script("v2_tool_turn", ScriptedAnswer(["There are 14 doors and 24 windows in the building."]))
+    _, service, resources = _service(tmp_path, fake)
+
+    real_dispatch = AgentService._v2_dispatch_tool
+    test_citation = {"evidence_id": "test-citation", "source_type": "ifc", "label": "test", "locator": {}, "project_id": "demo", "source_set_id": "demo-v1", "source_file": "test.ifc"}
+
+    def dispatch_with_real_live_counts(self, tool_call, state):
+        if tool_call.tool_name == "count_elements":
+            entity_type = tool_call.arguments["entity_type"]
+            count = 14 if entity_type == "IfcDoor" else 24
+            return {
+                "tool_result": {"answer": f"{count} {entity_type} elements.", "disposition": "answered", "citations": [test_citation], "verification": VerificationStatus(status="verified", reason="test").model_dump(), "result_value": count},
+                "evidence": [], "tool_call_delta": 1, "plan": [{"entity_type": entity_type, "source": "ifc"}],
+            }
+        return real_dispatch(self, tool_call, state)
+
+    monkeypatch.setattr(AgentService, "_v2_dispatch_tool", dispatch_with_real_live_counts)
+
+    response = asyncio.run(_run(service, resources, "How many doors and windows are there?", "eval-two-entity-counts"))
+
+    assert response.disposition.value == "answered"
+    assert response.verification.status == "verified"
 
 
 def test_v2_exempts_a_tag_cited_only_via_reconciliations_pdf_side_mark_locator(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -716,15 +823,20 @@ def test_v2_exempts_a_tag_cited_only_via_reconciliations_pdf_side_mark_locator(t
     *only* a PDF-side citation, so its own tag number was never being
     exempted at all, regardless of phrasing, before this fix.
 
-    Verified end-to-end through `invoke_v2` (not by hand-constructing
-    `known_reference_numbers`, unlike the D-066 tests above) so the actual
-    citation-scanning code is exercised, not just its consumer.
+    Verified end-to-end through `invoke_v2` so the actual citation-scanning
+    code (which builds `known_reference_numbers`) is exercised, not just
+    its consumer. SPEC-M18 (D-074): the identifier is submitted as its own
+    claim here to exercise the `known_reference_numbers` safety net inside
+    `_answer_facts_verified` directly, simulating a model that restates an
+    identifier as a claim despite `submit_answer_facts`'s own instruction
+    not to -- proving the exemption still holds even then.
     """
     fake = FakeModelProvider()
     fake.script("v2_tool_turn", ScriptedToolCalls([("count_elements", {"entity_type": "IfcDoor"})]))
-    # No preceding reference word ("tag"/"mark"/...) before the restated
-    # number -- isolates the citation-based exemption from D-065/D-066's
-    # own word-based fallback, which would otherwise mask this gap.
+    fake.script("v2_tool_turn", ScriptedToolCalls([("submit_answer_facts", {"claims": [
+        {"entity": "IfcDoor", "measure": "count", "value": 4},
+        {"entity": "IfcDoor", "measure": "tag", "value": 999999},
+    ]})]))
     fake.script("v2_tool_turn", ScriptedAnswer(["There are 4 doors, and door 999999 does not appear in the IFC model at all."]))
     _, service, resources = _service(tmp_path, fake)
 
@@ -769,6 +881,10 @@ def test_v2_recognizes_a_distinct_value_summarys_own_counts_as_real_facts(tmp_pa
     """
     fake = FakeModelProvider()
     fake.script("v2_tool_turn", ScriptedToolCalls([("get_element_properties", {"entity_type": "IfcDoor"})]))
+    fake.script("v2_tool_turn", ScriptedToolCalls([("submit_answer_facts", {"claims": [
+        {"entity": "IfcDoor", "measure": "count", "value": 39},
+        {"entity": "IfcDoor", "measure": "count", "value": 6},
+    ]})]))
     fake.script("v2_tool_turn", ScriptedAnswer(["Height = 2.045 for 39 doors, and Height = 2.25 for the remaining 6 doors."]))
     _, service, resources = _service(tmp_path, fake)
 
@@ -799,6 +915,7 @@ def test_v2_recognizes_a_distinct_value_summarys_own_counts_as_real_facts(tmp_pa
     # A fabricated count for the same field must still be caught.
     fake_bad = FakeModelProvider()
     fake_bad.script("v2_tool_turn", ScriptedToolCalls([("get_element_properties", {"entity_type": "IfcDoor"})]))
+    fake_bad.script("v2_tool_turn", ScriptedToolCalls([("submit_answer_facts", {"claims": [{"entity": "IfcDoor", "measure": "count", "value": 99999}]})]))
     fake_bad.script("v2_tool_turn", ScriptedAnswer(["Height = 2.045 for 99999 doors."]))
     _, service_bad, resources_bad = _service(tmp_path, fake_bad)
     monkeypatch.setattr(AgentService, "_v2_dispatch_tool", synthetic_large_list_dispatch)
@@ -806,168 +923,171 @@ def test_v2_recognizes_a_distinct_value_summarys_own_counts_as_real_facts(tmp_pa
     assert response_bad.verification.status == "unverified"
 
 
-def test_narrative_consistency_check_tolerates_natural_rounding_of_a_measurement() -> None:
+def test_answer_facts_verified_tolerates_natural_rounding_of_a_measurement() -> None:
     """Owner-reported, 2026-09-17 (found live): a real space_distance call
     returning {"value_m": 5.234, ...} (the same shape aggregate_quantity
     uses) was phrased by the model as "5.23 m" -- a natural, honest
-    rounding choice, not fabrication -- and the check's first version
-    (exact string match against 3 pre-formatted decimal-place guesses)
-    rejected it as inconsistent, turning a correct answer into a false
-    disposition=error. A count (whole number) still requires an exact
-    match: "4 doors" vs "5 doors" is a real discrepancy, not rounding.
+    rounding choice, not fabrication. A count (whole number) still
+    requires an exact match: "4 doors" vs "5 doors" is a real discrepancy,
+    not rounding. Both tolerance rules are unchanged by SPEC-M18 --
+    `_answer_facts_verified` reuses the same `_matches` rule the retired
+    check used, applied to a declared claim instead of a text-scanned one.
     """
-    no_terms: frozenset[str] = frozenset()
-    facts = AgentService._numeric_tokens_from_result_value({"value_m": 5.234, "from_space": "B204", "to_space": "B202"})
-    assert AgentService._narrative_consistent_with_tool_facts("B204 到 B202 的距离约为 5.23 米。", [(no_terms, facts)])
-    assert AgentService._narrative_consistent_with_tool_facts("The distance is 5.2 m.", [(no_terms, facts)])
-    assert AgentService._narrative_consistent_with_tool_facts("The distance is 5.234 m.", [(no_terms, facts)])
-    assert not AgentService._narrative_consistent_with_tool_facts("The distance is 12 m.", [(no_terms, facts)])
+    real_facts = {AgentService._fact_bucket_key({"entity_type": "IfcSpace"}): AgentService._labeled_facts_from_tool_result("space_distance", {}, {"value_m": 5.234, "from_space": "B204", "to_space": "B202"})}
+    assert AgentService._answer_facts_verified([{"entity": "IfcSpace", "measure": "distance_m", "value": 5.23}], real_facts)[0]
+    assert AgentService._answer_facts_verified([{"entity": "IfcSpace", "measure": "distance_m", "value": 5.2}], real_facts)[0]
+    assert AgentService._answer_facts_verified([{"entity": "IfcSpace", "measure": "distance_m", "value": 5.234}], real_facts)[0]
+    assert not AgentService._answer_facts_verified([{"entity": "IfcSpace", "measure": "distance_m", "value": 12}], real_facts)[0]
 
-    door_terms = AgentService._entity_terms_for("IfcDoor")
-    door_count_facts = AgentService._numeric_tokens_from_result_value(4)
-    assert AgentService._narrative_consistent_with_tool_facts("There are 4 doors.", [(door_terms, door_count_facts)])
-    assert not AgentService._narrative_consistent_with_tool_facts("There are 5 doors.", [(door_terms, door_count_facts)])
+    door_facts = {AgentService._fact_bucket_key({"entity_type": "IfcDoor"}): AgentService._labeled_facts_from_tool_result("count_elements", {}, 4)}
+    assert AgentService._answer_facts_verified([{"entity": "IfcDoor", "measure": "count", "value": 4}], door_facts)[0]
+    assert not AgentService._answer_facts_verified([{"entity": "IfcDoor", "measure": "count", "value": 5}], door_facts)[0]
 
 
-def test_narrative_consistency_check_does_not_treat_a_restated_tag_as_a_fabricated_number() -> None:
-    """Found live (2026-09-20), SPEC-M17 finding-investigation flow against
-    the real deployed app and real production data: a fully correct V2
-    investigation answer for finding 146596 ("IFC model: door tag 146596
-    has width = 1.25 m and PSet_Revit_Type_Dimensions.Height = 2.01 m
-    (get_element_properties).") was flagged `verification.status ==
-    "unverified"` even though every real number in it was genuinely
-    correct and tool-grounded.
+def test_answer_facts_verified_exempts_a_restated_reference_number() -> None:
+    """D-065/D-066 (2026-09-20), consolidated for SPEC-M18: the retired
+    check's own bugs here (a restated tag with no preceding reference
+    word, a plural "tags X and Y" restatement, and a fixed-width scan
+    window bisecting a real number sitting at its edge) were all, at
+    root, about *locating* a claim in free text near an entity noun.
+    That entire mechanism -- text position, scan windows, word-boundary
+    regexes -- is retired under SPEC-M18: `_answer_facts_verified` takes
+    no answer text, so there is no position left to have a bug in.
 
-    Root cause: check 2's entity-bound window (`_narrative_consistent_
-    with_tool_facts`, "door" +/-15 chars) is naive about *which* numbers
-    near the entity noun are claims that must match a known width/height
-    -- it does not distinguish "the element's own tag/id, restated for
-    clarity" from "a stated measurement." IFC's own `Tag` attribute is a
-    string (`apps/api/app/tools/ifc/repository.py`'s own `getattr(element,
-    "Tag", None)`), so it is never one of `get_element_properties`'s own
-    numeric leaves in `_numeric_tokens_from_result_value` -- meaning
-    "door tag 146596" makes "146596" land in the door-entity window as an
-    unexplained number, indistinguishable (to the old code) from a
-    fabricated claim like "there are 146596 doors."
-
-    This is the same class of false positive this check's own docstring
-    already documents three prior rounds of (a decoy real number, a
-    same-entity-different-scope total) -- a new trigger, not a new kind of
-    problem: identifying an element by its own tag/mark/id is a completely
-    normal, correct thing for an investigation answer to do, and doing so
-    must not cost it a false "unverified" caveat.
+    The actual guarantee those fixes protected -- restating an element's
+    own real tag/mark, however phrased, must never be mistaken for a
+    fabricated measurement -- is preserved via the `known_reference_
+    numbers` safety net, tested here directly: a claim whose value is a
+    known reference number is exempted regardless of what entity/measure
+    it's declared under, since it wouldn't otherwise match that entity's
+    own real measurement facts.
     """
-    door_terms = AgentService._entity_terms_for("IfcDoor")
-    facts = AgentService._numeric_tokens_from_result_value({
-        "element": {"entity_type": "IfcDoor", "tag": "146596"},
-        "storey": "Level 01",
-        "properties": {"Width": 1.25, "Height": 2.009999999999999},
-    })
-
-    answer = (
-        "IFC model: door tag 146596 has width = 1.25 m and "
-        "PSet_Revit_Type_Dimensions.Height = 2.01 m (get_element_properties)."
-    )
-    assert AgentService._narrative_consistent_with_tool_facts(answer, [(door_terms, facts)])
-
-    # The check must still catch a genuinely fabricated measurement even
-    # when a harmless tag mention appears earlier in the same answer --
-    # this fix narrows what counts as "a claimed number" near a reference
-    # word, it does not disable the check for a real claim right next to
-    # the entity noun itself.
-    fabricated = "IFC model: door tag 146596 has width = 1.25 m. The door is 99999 m tall."
-    assert not AgentService._narrative_consistent_with_tool_facts(fabricated, [(door_terms, facts)])
-
-
-def test_narrative_consistency_check_exempts_multiple_restated_tags_via_citations() -> None:
-    """Found live (2026-09-20), the very next real investigation run after
-    the D-065 fix above (same real-browser stress test, finding 146600 on
-    the real "Duplex Apartment" building): a fully correct, tool-grounded
-    `missing_in_ifc` verdict --
-
-        "...get_element_properties returned a sample listing IfcDoor
-        elements including tags 146596 and 146678 (both 1.25x2.01 m) but
-        no element named or tagged 146600; reconcile_doors_windows
-        explicitly reports tag 146600 is present on the PDF schedule but
-        has no matching IFC element."
-
-    -- was flagged unverified again, by the same check D-065 had just
-    fixed, via two new triggers D-065's narrow word list didn't cover:
-
-    1. Plural "tags 146596" (D-065 only matched singular "tag").
-    2. The second item in a list, "146678", which follows "and" -- no
-       reference word precedes it at all, so no word-based rule can catch
-       it without becoming an ever-growing grammar of English list syntax.
-
-    D-066 fixes this at the root instead of chasing more phrasing: this
-    turn's own citations already carry the ground truth for every element
-    actually looked up (`{"tag": "146596", ...}` / `{"record": "146600",
-    ...}`), so restating any of those numbers is now unconditionally
-    exempt regardless of the words around it. The widened `tags?/marks?/
-    ids?` word list stays as a fallback for a restated number that was
-    never independently cited.
-    """
-    door_terms = AgentService._entity_terms_for("IfcDoor")
-    # get_element_properties's own real numeric leaves this turn: both
-    # sampled doors' width/height (146596 and 146678 are each 1.25x2.01 m).
-    facts = AgentService._numeric_tokens_from_result_value({
-        "element": {"entity_type": "IfcDoor"},
-        "properties": {"Width": 1.25, "Height": 2.01},
-    })
+    real_facts = {AgentService._fact_bucket_key({"entity_type": "IfcDoor"}): {"width": {1.25}, "height": {2.01}}}
     known_reference_numbers = {146596.0, 146678.0, 146600.0}
 
-    answer = (
-        "Verdict submitted: genuine_omission — basis: extract_pdf_field returned Width=1.25 m and "
-        "Height=2.01 m for the PDF row in question; get_element_properties returned a sample listing "
-        "IfcDoor elements including tags 146596 and 146678 (both 1.25×2.01 m) but no element named or "
-        "tagged 146600; reconcile_doors_windows explicitly reports tag 146600 is present on the PDF "
-        "schedule but has no matching IFC element."
+    # Neither restated tag is a real IfcDoor width/height -- without the
+    # exemption, both would incorrectly read as fabricated measurements.
+    verified, _ = AgentService._answer_facts_verified(
+        [
+            {"entity": "IfcDoor", "measure": "width_m", "value": 1.25},
+            {"entity": "IfcDoor", "measure": "height_m", "value": 2.01},
+            {"entity": "IfcDoor", "measure": "tag", "value": 146596},
+            {"entity": "IfcDoor", "measure": "tag", "value": 146678},
+        ],
+        real_facts, known_reference_numbers,
     )
+    assert verified
 
-    # Without the citation-derived exemption (as D-065 alone left it), this
-    # real answer still fails: "146678" is never preceded by any reference
-    # word, so no word list, however widened, saves it.
-    assert not AgentService._narrative_consistent_with_tool_facts(answer, [(door_terms, facts)])
-
-    # With this turn's own real citation tags supplied, the same answer is
-    # correctly recognized as consistent.
-    assert AgentService._narrative_consistent_with_tool_facts(answer, [(door_terms, facts)], known_reference_numbers)
-
-    # A genuinely fabricated measurement must still be caught even when
-    # known reference numbers are present elsewhere in the same answer.
-    fabricated = answer + " The door is actually 99999 m tall."
-    assert not AgentService._narrative_consistent_with_tool_facts(fabricated, [(door_terms, facts)], known_reference_numbers)
+    # A genuinely fabricated measurement submitted alongside a legitimate
+    # reference-number restatement must still be caught.
+    verified, reason = AgentService._answer_facts_verified(
+        [{"entity": "IfcDoor", "measure": "tag", "value": 146600}, {"entity": "IfcDoor", "measure": "height_m", "value": 99999}],
+        real_facts, known_reference_numbers,
+    )
+    assert not verified
+    assert "IfcDoor" in reason
 
 
-def test_narrative_consistency_check_does_not_bisect_a_number_at_the_entity_window_edge() -> None:
-    """Found live (2026-09-20), same stress-test session, a second distinct
-    bug in the same real answer as the test above: the entity-bound window
-    used to be built by slicing a fixed +/-15-character substring around
-    each entity-term occurrence and re-scanning *that slice* for numbers --
-    a plain string slice, blind to number boundaries. "...tagged 146600;
-    reconcile_doors_windows explicitly..." sliced to "600; reconcile_doors"
-    around the "doors" inside "reconcile_doors_windows", turning the real,
-    legitimately-cited tag 146600 into a phantom "600" -- a number that
-    exists nowhere in the real answer, matches no known value, and isn't in
-    `known_reference_numbers` either (146600.0, not 600.0). Fixed by finding
-    every number once in the *full* text and comparing character positions
-    to the entity-term occurrence, instead of re-slicing and re-matching
-    around it -- a number's own span is never split.
+def test_answer_facts_verified_falls_back_to_a_shared_pool_for_untyped_facts() -> None:
+    """SPEC-M18 (D-074): `reconcile_doors_windows`'s own per-status counts
+    describe both doors and windows collectively, not one typed IFC
+    entity, and carry no PDF field name either -- `_fact_bucket_key`
+    assigns these to a shared "global" bucket, the same weak,
+    undiscriminating guarantee the retired check gave every claim, kept
+    here only as a fallback for a claim whose own entity/measure don't
+    resolve to anything more specific.
     """
-    door_terms = AgentService._entity_terms_for("IfcDoor")
-    facts = AgentService._numeric_tokens_from_result_value({"element": {"entity_type": "IfcDoor"}, "properties": {"Width": 1.25, "Height": 2.01}})
-    known_reference_numbers = {146600.0}
+    real_facts = {("global", ""): {"count": {6.0, 1.0}}}
+    verified, _ = AgentService._answer_facts_verified([{"entity": "reconciliation", "measure": "matched_count", "value": 6}], real_facts)
+    assert verified
 
-    # "doors" inside "reconcile_doors_windows" sits within 15 chars of the
-    # end of "146600" -- exactly the live-observed adjacency. The width/
-    # height sentence up front satisfies the separate baseline check
-    # (every call's own real number must appear somewhere), isolating this
-    # test to the entity-window bisection bug specifically.
-    answer = (
-        "IFC door properties show Width=1.25 m, Height=2.01 m. Separately, the schedule shows "
-        "tagged 146600; reconcile_doors_windows explicitly reports tag 146600 is present on the schedule."
-    )
-    assert AgentService._narrative_consistent_with_tool_facts(answer, [(door_terms, facts)], known_reference_numbers)
+    verified, reason = AgentService._answer_facts_verified([{"entity": "reconciliation", "measure": "matched_count", "value": 99999}], real_facts)
+    assert not verified
+    assert "reconciliation" in reason
+
+
+def test_answer_facts_verified_does_not_let_one_measure_validate_a_different_one() -> None:
+    """Codex review, PR #53, P1: this PR's own first draft bucketed
+    `real_facts` by entity only, with no measure dimension at all -- a
+    claim for one measure of an entity (its height) could be validated by
+    a completely different measure's real value (that same entity's own
+    count) merely because both numbers shared the entity's bucket.
+    Concretely: `count_elements(IfcDoor)` returns 4; a claim of {entity:
+    'IfcDoor', measure: 'height_m', value: 4} would incorrectly verify,
+    since 4 is a real IfcDoor fact -- just not a height.
+
+    Fixed by tagging each real fact with the specific measure it came from
+    (`_labeled_facts_from_tool_result`) and requiring a claim's own
+    declared measure to match that tag (`_normalize_measure_key`), not
+    just its entity.
+    """
+    real_facts = {AgentService._fact_bucket_key({"entity_type": "IfcDoor"}): AgentService._labeled_facts_from_tool_result("count_elements", {}, 4)}
+
+    # The door's own real count (4) is not a real height -- must be caught.
+    verified, reason = AgentService._answer_facts_verified([{"entity": "IfcDoor", "measure": "height_m", "value": 4}], real_facts)
+    assert not verified
+    assert "IfcDoor" in reason
+
+    # The same value, correctly declared as the entity's own count, still verifies.
+    assert AgentService._answer_facts_verified([{"entity": "IfcDoor", "measure": "count", "value": 4}], real_facts)[0]
+
+
+def test_v2_flags_a_number_stated_in_the_answer_but_never_submitted_as_a_claim(tmp_path: Path) -> None:
+    """Codex review, PR #53, P1: `_answer_facts_verified` alone only checks
+    that every *submitted* claim is real -- it never notices a number the
+    answer's own prose states but the model never submitted a claim for at
+    all. Reproduced live-shape: "There are 4 doors and 999 windows." with
+    only the (correct) door claim submitted -- the fabricated window count
+    was never checked against anything, since nothing claimed it.
+
+    Fixed by `_unclaimed_numbers_in_answer`, a coarse safety net layered on
+    top of the structural check: every number in the answer's own prose
+    must correspond to *something* real or claimed, even though it wasn't
+    itself submitted as a claim. Deliberately reintroduces only the
+    retired check's baseline half (does this number correspond to
+    something real anywhere this turn), never its entity-bound half (the
+    proximity scanning that caused all eight prior false positives).
+    """
+    fake = FakeModelProvider()
+    fake.script("v2_tool_turn", ScriptedToolCalls([
+        ("count_elements", {"entity_type": "IfcDoor"}),
+        ("count_elements", {"entity_type": "IfcWindow"}),
+    ]))
+    # Only the door claim submitted -- the fabricated "999" for windows is
+    # never declared as a claim at all, not even a wrong one.
+    fake.script("v2_tool_turn", ScriptedToolCalls([("submit_answer_facts", {"claims": [{"entity": "IfcDoor", "measure": "count", "value": 4}]})]))
+    fake.script("v2_tool_turn", ScriptedAnswer(["There are 4 doors and 999 windows."]))
+    _, service, resources = _service(tmp_path, fake)
+
+    response = asyncio.run(_run(service, resources, "How many doors and windows are there?", "eval-unclaimed-number"))
+
+    assert response.verification.status == "unverified"
+    assert "999" in response.verification.reason
+
+
+def test_v2_submit_answer_facts_alone_does_not_count_as_an_answered_subtask(tmp_path: Path) -> None:
+    """Codex review, PR #53, P2: `submit_answer_facts` is a local
+    bookkeeping no-op, appended to `subtask_dispositions` like any other
+    tool call before this fix -- a compliant model calling it with an
+    empty claims list (per its own tool description, for a no-number
+    answer) before an unsupported/clarification response would make that
+    bookkeeping call alone count as a successful "answered" subtask,
+    masking the turn's real disposition.
+
+    Reproduced here with a scripted turn that calls only submit_answer_facts
+    (empty claims) and no real tool at all -- the turn's own `subtask_
+    dispositions` list must end up empty (not `["answered"]`), so the
+    existing "no tool call was dispatched" fallback (clarification_required,
+    since no citations exist either) applies, not a false "answered."
+    """
+    fake = FakeModelProvider()
+    fake.script("v2_tool_turn", ScriptedToolCalls([("submit_answer_facts", {"claims": []})]))
+    fake.script("v2_tool_turn", ScriptedAnswer(["Could you clarify which building you mean?"]))
+    _, service, resources = _service(tmp_path, fake)
+
+    response = asyncio.run(_run(service, resources, "How many doors are there?", "eval-bookkeeping-only-disposition"))
+
+    assert response.disposition.value == "clarification_required"
 
 
 def test_v2_respects_an_expired_deadline(tmp_path: Path) -> None:
