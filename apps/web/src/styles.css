@@ -101,6 +101,29 @@ input, textarea { width: 100%; background: #0b1020; color: #f6f8ff; border: 1px 
 .technical-details { margin-top: 8px; color: #a8b4cf; font-size: .78rem; }
 .technical-details summary { cursor: pointer; color: #9fbfff; }
 .verified { color: #8ff0b1; } .failed { color: #ff9696; } .not_applicable { color: #d6c17a; } .unverified { color: #ffb454; }
+/* Owner-requested, 2026-09-29 (client-demo polish): the conversation's own
+   per-answer status badge and its "unverified" caveat line below the
+   answer duplicated the same signal -- the badge alone already says it,
+   so the caveat line (removed, main.tsx) was pure repetition that pulled
+   the eye. Scoped to .message-meta specifically (not the bare .unverified
+   class above), since Findings.tsx reuses that same class for a proposal
+   under human approve/reject review, where a clearly visible caveat is
+   still exactly the right call -- only the conversation's own badge is
+   toned down here. */
+.message-meta .unverified { color: #c2a06f; }
+/* Accessibility fix (independent review, Codex, PR #55): a `title`
+   attribute on a plain <span> is not reliably reachable by keyboard or
+   touch -- native <details>/<summary> is (focusable via Tab, toggled by
+   Enter/Space or a tap, announced by screen readers as a disclosure
+   widget), so the caveat's full explanation is never permanently
+   inaccessible, only collapsed by default like everywhere else in this
+   app. The popover is absolutely positioned so opening it does not
+   disturb .message-meta's own flex row height. */
+.verification-badge { position: relative; display: inline-flex; }
+.verification-badge summary { cursor: pointer; list-style: none; }
+.verification-badge summary::-webkit-details-marker { display: none; }
+.verification-badge summary::after { content: " ⓘ"; opacity: .8; font-size: .95em; }
+.verification-badge-popover { position: absolute; top: 100%; right: 0; margin-top: 6px; width: 220px; padding: 8px 10px; background: #16213f; border: 1px solid #3a4b78; border-radius: 8px; color: #d5e0f5; font-size: .72rem; line-height: 1.4; text-transform: none; z-index: 20; box-shadow: 0 4px 16px rgba(0,0,0,.4); }
 /* D-062: a caught narrative-consistency mismatch is disclosed, not
    withheld -- a small caveat line under the answer, not a full-size
    banner, since it is a possibility to double-check, not a confirmed
@@ -162,6 +185,12 @@ button:disabled { opacity: .6; cursor: wait; }
 .story-step-icon { font-size: 1rem; }
 .story-step-header strong { color: #eef3ff; font-size: .92rem; }
 .story-step-subtitle { display: block; color: #8ab0e6; font-size: .74rem; margin-top: 1px; }
+/* Owner-requested, 2026-09-29 (client-demo polish): a distinct violet
+   accent, matching .evidence-badge.viewer_snapshot's own existing
+   AI/vision-call color -- deliberately not reusing the verification
+   status colors (green/amber/red), since "a model was involved" is not
+   itself a pass/fail signal. */
+.model-used-badge { display: inline-flex; align-items: center; margin-left: 8px; padding: 2px 8px; border-radius: 999px; background: #2a2650; color: #c6b6ff; font-size: .68rem; font-weight: 700; letter-spacing: .02em; vertical-align: middle; }
 .story-step-body { margin: 8px 0 0; color: #c4d1ea; font-size: .84rem; }
 .plan-list { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 6px; }
 .plan-list li { display: grid; gap: 2px; padding: 8px 10px; background: #0c1326; border-radius: 8px; }
@@ -173,6 +202,10 @@ button:disabled { opacity: .6; cursor: wait; }
 .tool-call-args { color: #8ab0e6; margin-left: 4px; }
 .finding-verdict-result { padding: 8px 10px; background: #0c1326; border-radius: 8px; }
 .finding-verdict-result-basis { color: #8ab0e6; font-style: italic; }
+.evidence-group { margin-top: 8px; }
+.evidence-group > summary { cursor: pointer; color: #9fbfff; padding: 8px 10px; background: #0c1326; border: 1px solid #263457; border-radius: 10px; font-size: .82rem; transition: border-color .12s ease; }
+.evidence-group > summary:hover { border-color: #5994ef; }
+.evidence-group[open] > summary { border-radius: 10px 10px 0 0; margin-bottom: 0; }
 .evidence-cards { display: grid; gap: 10px; margin-top: 8px; }
 .evidence-card { display: block; padding: 10px; background: #0c1326; border: 1px solid #263457; border-radius: 10px; transition: border-color .12s ease; }
 .evidence-card:hover { border-color: #5994ef; }
