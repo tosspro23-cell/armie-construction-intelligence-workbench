@@ -3726,7 +3726,11 @@ exact trigger phrasing, "How many doors and windows are in this building?", prod
 `{entity: "IfcWindow", measure: "count", value: 47}`, `verification.status: "verified"`, reason
 "Every stated fact came from a verified tool call this turn." Both counts independently
 confirmed against the real IFC file itself, not just the app's own self-report:
-`grep -o "IFCDOOR(" DigitalHub_FM-ARC_v2.ifc | wc -l` -> 64,
-`grep -o "IFCWINDOW(" DigitalHub_FM-ARC_v2.ifc | wc -l` -> 47 (note: no leading `^#` anchor --
-this file's own STEP records don't start at column 0 the way the smaller synthetic fixtures do,
-confirmed empirically after an anchored grep first returned zero).
+`grep -c "^#[0-9]*= IFCDOOR(" DigitalHub_FM-ARC_v2.ifc` -> 64,
+`grep -c "^#[0-9]*= IFCWINDOW(" DigitalHub_FM-ARC_v2.ifc` -> 47. **Correction (independent
+review, Codex, PR #54):** this file's own STEP records genuinely do start at column 0
+(`#29733= IFCDOOR(...)`, confirmed directly) -- an anchored `^#[0-9]*=IFCDOOR(` first returned
+zero only because it omitted the space this exporter puts between `=` and the entity keyword,
+not because of the `^#` anchor itself; the un-anchored, un-spaced `grep -o "IFCDOOR(" | wc -l`
+used at the time happened to still count correctly (it matches the keyword regardless of what
+precedes it) but the diagnosis recorded for *why* the first attempt failed was wrong.
