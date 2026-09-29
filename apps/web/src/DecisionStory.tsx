@@ -172,12 +172,33 @@ function CopyQueryButton({ query }: { query: string }) {
   >{copied ? "Copied ✓" : "Copy query"}</button>;
 }
 
-function StepHeader({ number, icon, title, subtitle }: { number: number; icon: string; title: string; subtitle?: string }) {
+// Owner-requested, 2026-09-29 (client-demo polish): a demo audience should
+// see at a glance exactly which steps actually called out to an AI model
+// versus which ran deterministic code, since that distinction is the whole
+// point being demonstrated. `modelUsed` is driven by real per-step audit
+// events (see `isModelEvent`/`stepHasModel` below), not guessed from
+// `planning_mode` alone -- that alone would miss, for example, a V1
+// deterministic answer that still made a real vision-model call while
+// reading the PDF or the 3D viewer snapshot.
+function StepHeader({ number, icon, title, subtitle, modelUsed }: { number: number; icon: string; title: string; subtitle?: string; modelUsed?: boolean }) {
   return <div className="story-step-header">
     <span className="story-step-number">{number}</span>
     <span className="story-step-icon" aria-hidden="true">{icon}</span>
-    <div><strong>{title}</strong>{subtitle && <span className="story-step-subtitle">{subtitle}</span>}</div>
+    <div><strong>{title}</strong>{modelUsed && <span className="model-used-badge" title="This step made at least one real call to an AI model.">🤖 AI model</span>}{subtitle && <span className="story-step-subtitle">{subtitle}</span>}</div>
   </div>;
+}
+
+// Every model-calling code path in this backend (semantic planning,
+// contextual delta checks, PDF/viewer vision calls, V2's own tool-calling
+// turns) audits its event_type with a "model_*" prefix (model_called,
+// model_completed, model_failed, model_escalation) -- confirmed directly
+// against graph.py rather than assumed. `actual_model` is also checked
+// directly since it is populated on some of these events but not all
+// (V2's own per-iteration "v2_turn_started"/"v2_turn_continued" events
+// carry planning_mode but not actual_model -- only the turn's terminal
+// "v2_turn_finalized" event does).
+function isModelEvent(event: TraceEvent): boolean {
+  return event.event_type.toLowerCase().startsWith("model_") || Boolean(event.actual_model);
 }
 
 // Per-step "how do I know that" toggle: this step's own trace events,
@@ -227,6 +248,7 @@ export function DecisionStory({ latest, trace, projectId, onOpenCitation }: {
   // silently empty.
   const clarificationEvent = trace.find((event) => event.event_type === "clarification_requested");
   const byStage = (stage: Stage) => trace.filter((event) => auditStage(event) === stage);
+  const stepHasModel = (stage: Stage) => byStage(stage).some(isModelEvent);
   const stageTimings = stageTimingsMs(trace);
   // Plan's own StepTrace below already combines Planning + Normalization
   // events into one list -- their latencies are combined here too, so the
@@ -255,7 +277,7 @@ export function DecisionStory({ latest, trace, projectId, onOpenCitation }: {
 
     <ol className="story-steps">
       <li className="story-step">
-        <StepHeader number={1} icon="❓" title="Question" subtitle={[meta.normalized_request ? null : "as asked", stepMs(stageTimings["Intent Understanding"])].filter(Boolean).join(" · ") || undefined} />
+        <StepHeader number={1} icon="❓" title="Question" subtitle={[meta.normalized_request ? null : "as asked", stepMs(stageTimings["Intent Understanding"])].filter(Boolean).join(" · ") || undefined} modelUsed={stepHasModel("Intent Understanding")} />
         <p className="story-step-body">{meta.normalized_request || "—"}</p>
         <StepTrace events={byStage("Intent Understanding")} />
       </li>
@@ -270,7 +292,7 @@ export function DecisionStory({ latest, trace, projectId, onOpenCitation }: {
             this step's own trace and, correctly, couldn't find one. The
             total now lives on the Result step below, which is the one
             step that actually summarizes the whole request. */}
-        <StepHeader number={2} icon="🧭" title="Plan" subtitle={[`${meta.planning_mode || "—"} planning`, stepMs(planLatencyMs)].filter(Boolean).join(" · ")} />
+        <StepHeader number={2} icon="🧭" title="Plan" subtitle={[`${meta.planning_mode || "—"} planning`, stepMs(planLatencyMs)].filter(Boolean).join(" · ")} modelUsed={stepHasModel("Planning") || stepHasModel("Normalization")} />
         {subplans.length === 0 ? <p className="story-step-body empty">No plan recorded.</p> : <ul className="plan-list">
           {subplans.map((plan, index) => <li key={plan.subtask_id || index}>
             <span className="plan-op">{plan.operation || plan.intent || "—"}{plan.entity_type ? ` · ${plan.entity_type}` : ""}</span>
@@ -281,7 +303,7 @@ export function DecisionStory({ latest, trace, projectId, onOpenCitation }: {
       </li>
 
       <li className="story-step">
-        <StepHeader number={3} icon="⚙️" title="Execution" subtitle={[`source: ${meta.source || "—"}`, `${meta.tool_call_count || 0} tool call(s)`, stepMs(stageTimings["Execution"])].filter(Boolean).join(" · ")} />
+        <StepHeader number={3} icon="⚙️" title="Execution" subtitle={[`source: ${meta.source || "—"}`, `${meta.tool_call_count || 0} tool call(s)`, stepMs(stageTimings["Execution"])].filter(Boolean).join(" · ")} modelUsed={stepHasModel("Execution")} />
         {retrievalEvent ? <div className="retrieval-evidence">
           <p className="retrieval-summary">
             <strong>Azure AI Search retrieval considered</strong> — {retrievalEvent.payload.documents_evaluated?.length || 0} document(s) scored,
@@ -328,32 +350,37 @@ export function DecisionStory({ latest, trace, projectId, onOpenCitation }: {
             </tr>)}
           </tbody></table>
         </div>}
-        {/* Collapsed by default, one click to open -- matches the same
-            collapsed-summary-then-expandable-detail pattern already used
-            for each step's own raw trace and the AI Search relevance
-            table. Previously every citation's full card (including its
-            evidence-crop image) rendered open at once, which was the
-            first thing a stranger saw regardless of how many citations an
-            answer had. Owner-requested, 2026-09-14. */}
-        {citations.length === 0 ? <p className="story-step-body empty">No citations for this answer.</p> : <div className="evidence-cards">
-          {citations.map((citation) => <details key={stableCitationKey(citation)} className="evidence-card">
-            <summary><span className={`evidence-badge ${citation.source_type}`}>{citation.source_type}</span><span className="evidence-label">{citation.label}</span></summary>
-            {citation.locator?.evidence_crop && <AuthedImage className={`evidence-crop ${citation.locator.localized === false ? "unlocalized" : ""}`} src={`/api/v1/evidence/${citation.locator.evidence_crop}`} alt="Cited PDF evidence crop" />}
-            {citation.locator?.localized === false && <p className="evidence-unlocalized-note">Exact location on the page could not be confidently determined — showing the full page for manual review.</p>}
-            <dl className="citation-facts">{citationFacts(citation).slice(0, 4).map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{value}</dd></div>)}</dl>
-            <button type="button" className="evidence-jump" onClick={() => onOpenCitation(citation)}>Jump to this evidence →</button>
-          </details>)}
-        </div>}
+        {/* Each citation's own card is collapsed by default (unchanged,
+            Owner-requested 2026-09-14) -- but for a real building, the
+            *list itself* can still run to dozens of collapsed summary
+            rows, which is what actually reads as visually heavy at a
+            glance. Owner-requested, 2026-09-29 (client-demo polish): the
+            whole list now sits behind one more group-level toggle,
+            collapsed by default, so a stranger first sees only "N
+            citation(s) support this answer" -- one line -- with the full
+            (still individually-collapsed) list one click away. */}
+        {citations.length === 0 ? <p className="story-step-body empty">No citations for this answer.</p> : <details className="evidence-group">
+          <summary>{citations.length} citation{citations.length === 1 ? "" : "s"} support this answer — click to show</summary>
+          <div className="evidence-cards">
+            {citations.map((citation) => <details key={stableCitationKey(citation)} className="evidence-card">
+              <summary><span className={`evidence-badge ${citation.source_type}`}>{citation.source_type}</span><span className="evidence-label">{citation.label}</span></summary>
+              {citation.locator?.evidence_crop && <AuthedImage className={`evidence-crop ${citation.locator.localized === false ? "unlocalized" : ""}`} src={`/api/v1/evidence/${citation.locator.evidence_crop}`} alt="Cited PDF evidence crop" />}
+              {citation.locator?.localized === false && <p className="evidence-unlocalized-note">Exact location on the page could not be confidently determined — showing the full page for manual review.</p>}
+              <dl className="citation-facts">{citationFacts(citation).slice(0, 4).map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{value}</dd></div>)}</dl>
+              <button type="button" className="evidence-jump" onClick={() => onOpenCitation(citation)}>Jump to this evidence →</button>
+            </details>)}
+          </div>
+        </details>}
       </li>
 
       <li className="story-step">
-        <StepHeader number={5} icon="✅" title="Verification" subtitle={[latest.verification.status, stepMs(stageTimings["Verification"])].filter(Boolean).join(" · ")} />
+        <StepHeader number={5} icon="✅" title="Verification" subtitle={[latest.verification.status, stepMs(stageTimings["Verification"])].filter(Boolean).join(" · ")} modelUsed={stepHasModel("Verification")} />
         <p className={`story-step-body verification-reason ${latest.verification.status}`}>{latest.verification.reason || (latest.verification.status === "verified" ? "Every value was independently checked against its own source before being presented." : "—")}</p>
         <StepTrace events={byStage("Verification")} />
       </li>
 
       <li className="story-step">
-        <StepHeader number={6} icon="🏁" title="Result" subtitle={[meta.latency_ms ? totalMs(meta.latency_ms) : null, `${meta.model_call_count || 0} model call(s) total`].filter(Boolean).join(" · ")} />
+        <StepHeader number={6} icon="🏁" title="Result" subtitle={[meta.latency_ms ? totalMs(meta.latency_ms) : null, `${meta.model_call_count || 0} model call(s) total`].filter(Boolean).join(" · ")} modelUsed={stepHasModel("Final Response")} />
         <p className="story-step-body">Disposition: <strong>{latest.disposition.replace(/_/g, " ")}</strong></p>
         {/* Owner product feedback, 2026-09-21: a finding investigation's own
             conclusion (submit_finding_verdict's structured arguments,
