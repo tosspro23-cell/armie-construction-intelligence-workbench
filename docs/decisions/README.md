@@ -3734,3 +3734,65 @@ zero only because it omitted the space this exporter puts between `=` and the en
 not because of the `^#` anchor itself; the un-anchored, un-spaced `grep -o "IFCDOOR(" | wc -l`
 used at the time happened to still count correctly (it matches the keyword regardless of what
 precedes it) but the diagnosis recorded for *why* the first attempt failed was wrong.
+
+## D-075 — client-demo presentation polish: de-emphasize the redundant unverified caveat, collapse the evidence list by default, flag every model-calling step
+
+Owner-requested, 2026-09-29, ahead of an upcoming client demo of the workbench -- three
+presentation issues, none touching backend behavior:
+
+1. **Redundant unverified signal.** A turn's `unverified` status was shown twice: the
+   conversation panel's own per-message badge (top-right of the answer, orange), and a second,
+   separately-worded caveat line directly under the answer text (`main.tsx`'s
+   `.unverified-caveat` paragraph) -- the same information stated twice, with the second
+   repetition visually louder than the first (bright, saturated orange right in the reading flow)
+   despite the badge alone already carrying the signal. Fixed: the caveat paragraph is removed
+   from the conversation view's default flow; the badge's own color is toned down -- scoped
+   specifically to `.message-meta .unverified` via a more specific selector, not the bare
+   `.unverified` class, since `Findings.tsx` reuses that same class for a proposal under human
+   approve/reject review, where an unmistakable caveat remains exactly the right call. The Decision
+   Trace panel's own Verification step (`.verification-reason`) already surfaces the full reason
+   text for anyone who wants it -- unaffected by this change. **Amended (independent review, Codex,
+   PR #55):** the first version moved the caveat's full text into the badge's own `title`
+   attribute -- not reliably reachable by keyboard-only or touch-only users, since a `title`
+   tooltip needs a mouse hover. Fixed by replacing the plain badge with a native
+   `<details>/<summary>` disclosure instead: collapsed by default (same small "unverified ⓘ" look,
+   satisfying the original "keep it subtle" ask), but genuinely focusable (confirmed
+   programmatically: `summary.tabIndex === 0`, `.focus()` moves `document.activeElement` to it) and
+   toggled by Enter/Space or a tap, not hover-only.
+2. **Evidence list visual weight.** Every citation card was already individually collapsed
+   (Owner-requested, 2026-09-14) -- but for a real building with dozens of matched elements, the
+   sheer *number* of collapsed summary rows shown at once was itself what read as visually heavy,
+   not any one card's own content. Fixed by wrapping the whole citation list in one more
+   group-level `<details>`, collapsed by default, whose own summary states the count ("N citations
+   support this answer — click to show"); the per-citation collapse behavior underneath is
+   unchanged.
+3. **Model involvement not visible enough for a demo narrative.** Presenting this system's real
+   selling point -- a typed, deterministic core with the model used only where it actually adds
+   value -- requires being able to point at *exactly* which step in the Decision Trace involved a
+   real model call, without opening a raw JSON trace. Added a `🤖 AI model` badge to each step's
+   own header, driven by real per-step audit data (`isModelEvent`: `event_type` starting with
+   `model_` -- `model_called`/`model_completed`/`model_failed`/`model_escalation`, the convention
+   already used consistently across every model-calling code path in `graph.py` -- confirmed
+   directly via `grep`, not assumed -- or `actual_model` truthy, needed because V2's own
+   intermediate per-iteration turns, `v2_turn_started`/`v2_turn_continued`, carry `planning_mode`
+   but not `actual_model`; only the terminal `v2_turn_finalized` event does), not guessed from
+   `planning_mode` alone -- that alone would miss a V1 *deterministic* answer that still made a
+   real vision-model call while reading a PDF or a 3D viewer snapshot. Verified live, locally
+   (Ollama, `llama3.1:latest` substituted for the unavailable default `qwen3:8b` for this one
+   verification run only): a heuristic-path count question showed no badge on any step and `0
+   model call(s) total`; a property-lookup question that fell through to semantic planning showed
+   the badge on the Plan step only (`llm planning`, `2 model call(s) total`), correctly absent from
+   Execution (the property *lookups* the model planned are themselves deterministic IFC reads).
+
+**Scope:** presentation only -- no backend endpoint, schema, or verification logic changed; no new
+SPEC per this repo's own established `feedback_spec_first_scope` convention (matching D-071's own
+precedent: UI/presentation work on an already-shipped capability gets a D-0xx entry, not a new
+milestone spec).
+
+Verified in a real browser against a local dev server (backend on a local FastAPI instance, no
+Azure), not just by reading the diff -- both the negative case (no badge, heuristic path) and the
+positive case (badge present, semantic planning path) were produced live and inspected via the
+rendered DOM, per this repo's own frontend-verification requirement. No automated test suite
+covers `apps/web/`; `PYTHONPATH=apps/api python3 -m pytest -q` (488 passed, 10 skipped -- backend
+untouched, included to confirm no incidental import fallout) and `(cd apps/web && npm run build)`
+both clean.
