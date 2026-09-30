@@ -3678,8 +3678,62 @@ fail against commit `ce77f21` (the pre-redesign verification code, with `submit_
 already wired up but not yet consumed) exactly as the live bug did, and to pass against the current
 code.
 
-485 tests pass; `ruff check --select F,E9,I,F401 apps/api tests` clean; `npm run build` clean.
-Live-deployment verification: pending (see `PROJECT_STATE.md`'s M18 entry once deployed).
+488 tests pass (485 + 3 added after independent review, see below); `ruff check --select
+F,E9,I,F401 apps/api tests` clean; `npm run build` clean.
+
+**Independent review (Codex, PR #53), three real gaps found and fixed before merge, each
+confirmed via fail-before/pass-after against the pre-fix commit:**
+
+1. **P1 -- measure-blind matching:** the first draft of `real_facts` bucketed by entity only,
+   with no measure dimension at all. A claim for one measure of an entity (its height) could be
+   validated by a completely different measure's real value (that same entity's own count)
+   merely because both numbers shared the entity's bucket -- e.g. `count_elements(IfcDoor)`
+   returning 4 would incorrectly validate a claimed height of 4m. Fixed by
+   `_labeled_facts_from_tool_result`, tagging each real fact with the specific measure it came
+   from (dispatched by tool shape -- a `{name: count}` breakdown and a flat property bag are
+   structurally identical `dict[str, number]` shapes and cannot be told apart generically), and
+   `_normalize_measure_key` for comparing a claim's own declared measure against it.
+2. **P1 -- incomplete submissions:** `_answer_facts_verified` only checked that every
+   *submitted* claim was real; it never noticed a number the answer's own prose states but no
+   claim was ever submitted for at all (e.g. "4 doors and 999 windows" with only the door claim
+   submitted, or an empty claims list next to a fully numeric answer). Fixed by
+   `_unclaimed_numbers_in_answer`, a coarse safety net layered on top -- deliberately
+   reintroduces only the retired check's *baseline* half (does this number correspond to
+   something real anywhere this turn), never its entity-bound half, which is what produced all
+   eight prior false positives and is not brought back.
+3. **P2 -- bookkeeping counted as a subtask:** `submit_answer_facts`'s own no-op dispatch result
+   was appended to `subtask_dispositions` like a real subtask. A compliant model calling it with
+   an empty claims list (per its own tool description, for a no-number answer) before an
+   unsupported/clarification response would make that bookkeeping call alone read as a
+   successful "answered" subtask, masking the turn's real disposition. Fixed by excluding
+   `submit_answer_facts` specifically from `subtask_dispositions` (`submit_finding_verdict`,
+   investigation-only and already deployed since SPEC-M17, was left untouched -- out of this
+   review's scope).
+
+Also found and fixed while implementing the above: `result.get("plan", [{}])[0]` raised
+`IndexError` when a bookkeeping tool's own dispatch result carries `"plan": []`
+(present-but-empty, not missing -- the dict `.get` default only applies when the key is absent);
+and a scoping bug where the `distinct_value_summary` branch could silently reuse a stale `plan0`
+from a *previous* tool call in the same loop iteration, since Python `if`/`elif` blocks share
+their enclosing scope. Three new regression tests, each confirmed to fail against the pre-fix
+commit (`b46dcae`) and pass against the fix (`a4464ad`).
+
+**Merged (PR #53, commit `b5b7e4e`) and deployed 2026-09-27
+(`azure-deploy.yml` run [36342634096](https://github.com/tosspro23-cell/armie-construction-intelligence-workbench/actions/runs/36342634096)) --
+live-verified against the real RWTH DigitalHub building through the real production model**: the
+exact trigger phrasing, "How many doors and windows are in this building?", produced
+`submit_answer_facts` calls with `{entity: "IfcDoor", measure: "count", value: 64}` and
+`{entity: "IfcWindow", measure: "count", value: 47}`, `verification.status: "verified"`, reason
+"Every stated fact came from a verified tool call this turn." Both counts independently
+confirmed against the real IFC file itself, not just the app's own self-report:
+`grep -c "^#[0-9]*= IFCDOOR(" DigitalHub_FM-ARC_v2.ifc` -> 64,
+`grep -c "^#[0-9]*= IFCWINDOW(" DigitalHub_FM-ARC_v2.ifc` -> 47. **Correction (independent
+review, Codex, PR #54):** this file's own STEP records genuinely do start at column 0
+(`#29733= IFCDOOR(...)`, confirmed directly) -- an anchored `^#[0-9]*=IFCDOOR(` first returned
+zero only because it omitted the space this exporter puts between `=` and the entity keyword,
+not because of the `^#` anchor itself; the un-anchored, un-spaced `grep -o "IFCDOOR(" | wc -l`
+used at the time happened to still count correctly (it matches the keyword regardless of what
+precedes it) but the diagnosis recorded for *why* the first attempt failed was wrong.
 
 ## D-075 — client-demo presentation polish: de-emphasize the redundant unverified caveat, collapse the evidence list by default, flag every model-calling step
 
@@ -3692,13 +3746,19 @@ presentation issues, none touching backend behavior:
    `.unverified-caveat` paragraph) -- the same information stated twice, with the second
    repetition visually louder than the first (bright, saturated orange right in the reading flow)
    despite the badge alone already carrying the signal. Fixed: the caveat paragraph is removed
-   from the conversation view (its full explanatory text moved to the badge's own `title` tooltip,
-   so the detail is not lost, only no longer forced into view); the badge's own color is toned down
-   -- scoped specifically to `.message-meta .unverified` via a more specific selector, not the bare
+   from the conversation view's default flow; the badge's own color is toned down -- scoped
+   specifically to `.message-meta .unverified` via a more specific selector, not the bare
    `.unverified` class, since `Findings.tsx` reuses that same class for a proposal under human
    approve/reject review, where an unmistakable caveat remains exactly the right call. The Decision
    Trace panel's own Verification step (`.verification-reason`) already surfaces the full reason
-   text for anyone who wants it -- unaffected by this change.
+   text for anyone who wants it -- unaffected by this change. **Amended (independent review, Codex,
+   PR #55):** the first version moved the caveat's full text into the badge's own `title`
+   attribute -- not reliably reachable by keyboard-only or touch-only users, since a `title`
+   tooltip needs a mouse hover. Fixed by replacing the plain badge with a native
+   `<details>/<summary>` disclosure instead: collapsed by default (same small "unverified ⓘ" look,
+   satisfying the original "keep it subtle" ask), but genuinely focusable (confirmed
+   programmatically: `summary.tabIndex === 0`, `.focus()` moves `document.activeElement` to it) and
+   toggled by Enter/Space or a tap, not hover-only.
 2. **Evidence list visual weight.** Every citation card was already individually collapsed
    (Owner-requested, 2026-09-14) -- but for a real building with dozens of matched elements, the
    sheer *number* of collapsed summary rows shown at once was itself what read as visually heavy,
