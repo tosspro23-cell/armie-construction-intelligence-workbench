@@ -40,7 +40,7 @@ dependencies = [
   # SPEC-M7: Azure AI Search retrieval (opt-in, unset azure_search_endpoint
   # means this is never imported at runtime -- see app/services.py's
   # search_client_factory seam).
-  "azure-search-documents>=11.5,<12",
+  "azure-search-documents>=11.5,<13",
   # SPEC-M8: evidence crop persistence (opt-in, unset
   # evidence_storage_account_url means this is never imported at runtime --
   # see app/evidence_storage.py's factory seam).
