@@ -118,10 +118,18 @@ def test_instrumenting_inside_lifespan_produces_no_spans_but_matching_main_py_do
 
     # The one invariant this project actually depends on: main.py's own
     # eager placement (see its own comment, right after `FastAPI()`
-    # construction) reliably produces a real SERVER span -- this must hold
-    # regardless of what FastAPI/Starlette/OpenTelemetry's own internals do
-    # with the production-unused lifespan-registered case below.
-    assert int(eager_result.stdout.strip()) >= 1
+    # construction) reliably produces exactly one real SERVER span per
+    # request -- this must hold regardless of what FastAPI/Starlette/
+    # OpenTelemetry's own internals do with the production-unused
+    # lifespan-registered case below. Kept as an exact count, not loosened
+    # to `>= 1` alongside the lifespan relaxation below (Codex review, PR
+    # #56): the bisection that motivated this fix confirmed eager produced
+    # exactly one span with *every* dependency combination tried -- this
+    # assertion protects a real invariant (a duplicate SERVER span here
+    # would mean production double-recording one request's own
+    # AppRequests telemetry), not a claim that merely happened to hold by
+    # accident the way the lifespan count did.
+    assert int(eager_result.stdout.strip()) == 1
     # Informational only, not asserted (D-076): whether lifespan-based
     # instrumentation also happens to work is a third-party implementation
     # detail already observed to change across ordinary dependency
