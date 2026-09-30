@@ -3736,3 +3736,54 @@ rendered DOM, per this repo's own frontend-verification requirement. No automate
 covers `apps/web/`; `PYTHONPATH=apps/api python3 -m pytest -q` (488 passed, 10 skipped -- backend
 untouched, included to confirm no incidental import fallout) and `(cd apps/web && npm run build)`
 both clean.
+
+## D-076 — a telemetry test's own assertion drifted out from under an unrelated PR, via unpinned FastAPI/Starlette, root-caused by bisection
+
+Found live, 2026-09-30, while landing an unrelated docs-only PR (#54): CI's `backend (Python
+3.10/3.11/3.12)` jobs started failing `tests/test_telemetry.py::test_instrumenting_inside_
+lifespan_produces_no_spans_but_matching_main_py_does`'s own `lifespan_result == 0` assertion --
+`backend (Python 3.9)` stayed green, on the exact same commit. PR #54 touches only two markdown
+files; zero code changed. `main`'s own most recent CI run (the merge that had just landed PR #55
+minutes earlier) had passed cleanly on every Python version, including 3.10-3.12.
+
+**Root-caused directly, not guessed** (matching [[feedback_measure_dont_guess_root_causes]]):
+compared the exact package versions CI actually installed for 3.9 (pass) vs. 3.10+ (fail) from
+the raw `pip install` logs -- 3.9 resolved `fastapi==0.128.8` (bundling `starlette==0.49.3`), 3.10+
+resolved `fastapi==0.142.1` (bundling `starlette==1.7.0`, a full major-version jump). This
+repository's own `pyproject.toml` places no upper bound on `opentelemetry-instrumentation-fastapi`
+and only `fastapi>=0.115,<1` on FastAPI itself -- wide enough that pip's resolver reaches a
+materially different dependency graph for each Python version independently, since the newest
+FastAPI still supporting 3.9 is older than the newest FastAPI 3.10+ can reach. Reproduced directly
+in an isolated venv (not inferred from the CI log alone) by installing each suspect package one
+at a time and re-running `tests/_fastapi_instrumentation_timing_repro.py` after each: upgrading
+only Starlette (1.6.0 -> 1.7.0) did **not** reproduce the break; upgrading only
+`opentelemetry-instrumentation-fastapi` (0.65b0 -> 0.66b0) did **not** either; upgrading only
+FastAPI (0.141.1 -> 0.142.1) reproduced it immediately, isolating the exact trigger to FastAPI's
+own release, not its dependencies'.
+
+**This is not a regression in this project's own code, and not a reason to pin FastAPI down.**
+The test's own two-case comparison exists to prove one thing: `apps/api/app/main.py`'s real
+production code instruments `FastAPIInstrumentor` right after `FastAPI()` construction (not from
+inside `lifespan`) because that placement reliably produces spans -- see main.py's own comment,
+right above the `configure_telemetry` call, and D-012's original discovery of this. That claim
+held with *every* dependency combination tried during the bisection above, before and after
+FastAPI's own change: `eager_result` always produced a real span. What stopped holding is the
+test's *other* assertion -- that the production-unused `lifespan` case must produce exactly zero
+spans -- because FastAPI's own newer release apparently changed (fixed, not broke) the timing
+quirk that assertion was pinned to. That is a claim about a third-party library's own internal
+behavior, not about anything this project controls, and it has now been directly observed to
+drift across an ordinary dependency update.
+
+**Fixed** by relaxing the test: `eager_result` is still asserted (`>= 1`, the actual, load-bearing
+product claim); `lifespan_result` is now printed for a curious reader, never asserted against a
+fixed value that has already proven to depend on which FastAPI release pip happens to resolve.
+Confirmed fail-before/pass-after against the *exact* CI-triggering combination (FastAPI 0.142.1),
+not just the originally-failing CI log: the pre-fix assertion (`== 0`) reproduced the exact CI
+failure locally; the fix passes against the identical dependency set.
+
+Deliberately not fixed by pinning FastAPI/Starlette/the OpenTelemetry instrumentation packages
+down: doing so would trade a real, if narrow, class of future dependency-drift surprises for
+permanently forgoing FastAPI's own upstream security/bug fixes, for a claim (the lifespan case's
+own span count) this project never actually depended on in production. `PYTHONPATH=apps/api
+python3 -m pytest -q` (488 passed, 10 skipped) and `ruff check --select F,E9,I,F401 apps/api
+tests` both clean against the newer dependency stack.
