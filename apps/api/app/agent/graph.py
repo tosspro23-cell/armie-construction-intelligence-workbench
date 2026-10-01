@@ -801,22 +801,19 @@ Return only a corrected MultiQueryPlan JSON object."""
         relies on the same "the model's own units are SI/metres" assumption
         this project already makes everywhere else it reads an IFC quantity.
         """
-        import ifcopenshell.util.element as ifc_element_util
-
         model = project_resources.ifc_repository.model
         items: dict[str, dict[str, Any]] = {}
         for element in [*model.by_type("IfcDoor"), *model.by_type("IfcWindow")]:
             tag = getattr(element, "Tag", None)
             if not tag:
                 continue
-            psets = ifc_element_util.get_psets(element, qtos_only=True)
-            quantities = next(iter(psets.values()), {}) if psets else {}
-            width = quantities.get("Width")
-            height = quantities.get("Height")
-            if width is None:
-                width = getattr(element, "OverallWidth", None)
-            if height is None:
-                height = getattr(element, "OverallHeight", None)
+            # SPEC-M18 follow-up (2026-09-30): reuses IfcRepository's own
+            # shared extraction (added so the 3D viewer's selection panel
+            # and citation evidence could show the same width/height this
+            # reconciliation comparison always has) instead of keeping a
+            # second, independently-drifting copy of the same Qto/
+            # OverallWidth-OverallHeight lookup here.
+            width, height = project_resources.ifc_repository.door_window_dimensions_m(element)
             containment = getattr(element, "ContainedInStructure", []) or []
             storey = getattr(containment[0].RelatingStructure, "Name", None) if containment else None
             items[str(tag)] = {
@@ -1290,8 +1287,20 @@ Return only a corrected MultiQueryPlan JSON object."""
             counts[item["status"]] += 1
             reconciliation_items.append(item)
             if ifc_item:
+                # Owner-reported, 2026-09-30: this is the exact citation a
+                # reconciliation mismatch answer hands back, and "Jump to
+                # this evidence" reads its own locator to populate the
+                # viewer's selection panel -- so the dimensions the owner
+                # actually came here to cross-check (IFC vs. PDF) were
+                # missing from the one evidence path that matters most for
+                # this workflow, even after `_make_evidence` (the OTHER,
+                # non-reconciliation evidence constructor) already carried
+                # them. `ifc_item` already has `width_m`/`height_m` here
+                # (from `_reconciliation_ifc_items`, which now delegates to
+                # `IfcRepository.door_window_dimensions_m`) -- reused, not
+                # recomputed.
                 evidence.append(Evidence(source_type=SourceType.IFC, source_file=state["project_resources"].ifc_repository.path.name,
-                    summary=f"IFC {ifc_item['entity_type']} Tag={tag}.", locator={"global_id": ifc_item["global_id"], "express_id": ifc_item["express_id"], "tag": tag}))
+                    summary=f"IFC {ifc_item['entity_type']} Tag={tag}.", locator={"global_id": ifc_item["global_id"], "express_id": ifc_item["express_id"], "tag": tag, "width_m": ifc_item.get("width_m"), "height_m": ifc_item.get("height_m")}))
             if pdf_item:
                 evidence.append(Evidence(source_type=SourceType.PDF, source_file=state["project_resources"].document_analyzer.pdf_path.name,
                     summary=f"PDF schedule row Mark={tag}.", locator={"page": 2, "mark": tag}))

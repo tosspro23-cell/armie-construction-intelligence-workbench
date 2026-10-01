@@ -16,7 +16,7 @@ type Response = {
   answer_markdown: string; citations: Citation[]; verification: { status: string; reason?: string };
   execution_metadata: Record<string, any>; reconciliation_items?: ReconciliationItem[];
 };
-type Selected = { globalId?: string; expressId?: number; type?: string; name?: string; tag?: string | null };
+type Selected = { globalId?: string; expressId?: number; type?: string; name?: string; tag?: string | null; widthM?: number | null; heightM?: number | null };
 type ConversationTurn = { id: string; user: string; assistant: Response; timestamp: string; trace: TraceEvent[] };
 
 // `_natural_answer` (apps/api/app/agent/graph.py) intentionally wraps
@@ -503,7 +503,7 @@ function App() {
     // recently, regardless of which direction its highlight just toggled.
     if (citation.source_type === "ifc") {
       setTab("bim");
-      setSelected({ globalId: citation.locator.global_id, expressId: citation.locator.express_id, type: citation.locator.entity_type, name: citation.label, tag: citation.locator.tag });
+      setSelected({ globalId: citation.locator.global_id, expressId: citation.locator.express_id, type: citation.locator.entity_type, name: citation.label, tag: citation.locator.tag, widthM: citation.locator.width_m, heightM: citation.locator.height_m });
       if (citation.locator.global_id) toggleHighlight(citation.locator.global_id);
     }
     if (citation.source_type === "pdf") {
@@ -562,6 +562,14 @@ function App() {
               (get_element_properties, citation locators) since D-070/D-072's
               own fix; this is the first place it reaches this panel too. */}
           <div><dt>Tag</dt><dd>{selected?.tag || "—"}</dd></div>
+          {/* Owner-reported, 2026-09-30: cross-checking a Findings-tab
+              dimension mismatch (IFC vs. PDF schedule) needed the IFC
+              side's own real width/height visible here too, not just
+              identity fields -- doors/windows only (null for every other
+              entity type by design; IfcRepository.door_window_dimensions_m's
+              own docstring explains why), so this row simply doesn't
+              appear for a non-door/window selection. */}
+          {(selected?.widthM != null || selected?.heightM != null) && <div><dt>Dimensions</dt><dd>{selected?.widthM != null ? `${selected.widthM.toFixed(2)} m` : "—"} × {selected?.heightM != null ? `${selected.heightM.toFixed(2)} m` : "—"}</dd></div>}
           <div><dt>ExpressID</dt><dd>{selected?.expressId ?? "—"}</dd></div><div><dt>GlobalId</dt><dd>{selected?.globalId || "—"}</dd></div></dl></>}
         {tab === "drawing" && <section className="drawing"><h2>Engineering Drawing</h2>
           <div className="drawing-toolbar">
