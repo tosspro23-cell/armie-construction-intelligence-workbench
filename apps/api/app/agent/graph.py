@@ -2846,6 +2846,21 @@ Return only a corrected MultiQueryPlan JSON object."""
                 # submits one as a claim despite `submit_answer_facts`'s own
                 # instruction not to.
                 known_reference_numbers: set[float] = set()
+                # Codex review, PR #62, P1: a storey name's own digit is a
+                # legitimate thing for an answer's *prose* to restate, but it
+                # is never a legitimate stand-in for a *measurement* -- kept
+                # in its own set, merged into `known_reference_numbers` only
+                # for `_unclaimed_numbers_in_answer` below, never passed to
+                # `_answer_facts_verified`. Mixing it into the same set
+                # `_answer_facts_verified` checks would let a fabricated
+                # structured claim (e.g. a submitted width of exactly `2`)
+                # pass unconditionally merely because this turn's citations
+                # happen to carry a "Level 2" storey name -- a tag/record/
+                # mark is safe there because a model would never coincide a
+                # real element identifier with a fabricated measurement's
+                # value, but a storey number (small, common digits like 1/2)
+                # has no such property.
+                storey_restatement_numbers: set[float] = set()
                 for citation in all_citations:
                     locator = citation.get("locator") or {}
                     for key in ("tag", "record", "mark"):
@@ -2876,7 +2891,7 @@ Return only a corrected MultiQueryPlan JSON object."""
                     if isinstance(storey_value, str):
                         for digits in re.findall(r"\d+(?:\.\d+)?", storey_value):
                             try:
-                                known_reference_numbers.add(float(digits))
+                                storey_restatement_numbers.add(float(digits))
                             except (TypeError, ValueError):
                                 pass
                 # SPEC-M18 (D-074): replaces the free-text, character-
@@ -2941,7 +2956,7 @@ Return only a corrected MultiQueryPlan JSON object."""
                     # coarse safety net closes that, without reintroducing
                     # the entity-proximity scanning that caused the eight
                     # prior false positives -- see its own docstring.
-                    unclaimed = self._unclaimed_numbers_in_answer(narrative, answer_facts, real_facts, known_reference_numbers) if facts_verified else []
+                    unclaimed = self._unclaimed_numbers_in_answer(narrative, answer_facts, real_facts, known_reference_numbers | storey_restatement_numbers) if facts_verified else []
                     if facts_verified and not unclaimed:
                         verification = VerificationStatus(status="verified", reason="Every stated fact came from a verified tool call this turn.")
                     elif facts_verified and unclaimed:

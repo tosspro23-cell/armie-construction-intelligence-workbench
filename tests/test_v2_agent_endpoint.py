@@ -350,3 +350,53 @@ def test_v2_request_record_gets_the_real_trace_id_used_by_the_turn(tmp_path: Pat
     assert record["trace_id"] == final["trace_id"]
     assert record["trace_id"] != "v2-trace-sync-1"  # the real trace_id, not the placeholder it started as
     assert record["status"] == "completed"
+
+
+class _RecordingSpan:
+    """Mirrors tests/test_cloud_trace_link.py's own stand-in for the real
+    OpenTelemetry span, used there to confirm V1's `chat()` tags the
+    current span with `app.trace_id` -- reused here to prove V2's own SSE
+    path (`_v2_sse_stream`) now does the same thing."""
+
+    def __init__(self) -> None:
+        self.attributes: dict[str, object] = {}
+
+    def set_attribute(self, key: str, value: object) -> None:
+        self.attributes[key] = value
+
+
+def test_v2_sse_stream_tags_the_current_otel_span_with_the_final_responses_trace_id(tmp_path: Path, monkeypatch) -> None:
+    """Codex review, PR #62, P2: this PR wires `cloud_trace_url`/
+    `cloud_trace_query` into V2's own response (main.py's `_v2_sse_stream`
+    publishes them via `final_response.execution_metadata`), but a
+    configured Azure environment's own query
+    (`customDimensions["app.trace_id"] == trace_id`) only ever matches
+    real request telemetry if something actually tagged the active span
+    with that trace_id first -- `_tag_span_with_trace_id` (D-028/D-031) was
+    only ever called from `chat()`'s own V1 return paths, never from
+    `_v2_sse_stream`, so every V2 answer's new clickable link pointed at a
+    query that could never return a row. Fixed by calling the same helper
+    from `_v2_sse_stream` right before its own final SSE payload is built,
+    using `final_response.trace_id` -- the real value the published URL
+    itself is keyed on, not the caller-supplied `request_id`.
+    """
+    import app.main as main_module
+
+    recorded_span = _RecordingSpan()
+    monkeypatch.setattr(main_module.otel_trace, "get_current_span", lambda: recorded_span)
+
+    settings = _settings(tmp_path)
+    fake = FakeModelProvider()
+    fake.script("v2_tool_turn", ScriptedToolCalls([("count_elements", {"entity_type": "IfcDoor"})]))
+    fake.script("v2_tool_turn", ScriptedAnswer(["The project has 4 doors."]))
+    container, service = _build(settings, fake)
+    main_module.app.state.container = container
+    main_module.app.state.agent = service
+    main_module.app.state.requests = {}
+
+    response = asyncio.run(main_module.chat(ChatRequest(request_id="v2-span-tag-1", thread_id="v2-span-tag-thread", question=QUESTION, engine="v2")))
+    events = asyncio.run(_collect_sse_events(response))
+
+    final = [event for event in events if event["type"] == "final"][0]["response"]
+    assert final["trace_id"] != "v2-span-tag-1"  # the real trace_id, not the request_id
+    assert recorded_span.attributes.get("app.trace_id") == final["trace_id"]

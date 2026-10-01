@@ -724,6 +724,18 @@ async def _v2_sse_stream(agent: AgentService, conversations: ConversationStore, 
                 # never actually has any audit events under.
                 record["trace_id"] = final_response.trace_id
                 record["status"] = "completed" if final_response.disposition.value not in {"timeout", "cancelled", "error"} else final_response.disposition.value
+                # Codex review, PR #62, P2: chat()'s own V1 path is the only
+                # caller of `_tag_span_with_trace_id` -- this SSE path built
+                # (and, as of this PR, published) a `cloud_trace_url` for
+                # every V2 turn without ever tagging the active request span
+                # with `app.trace_id`, so a configured Azure environment's
+                # query (`customDimensions["app.trace_id"] == trace_id`)
+                # would match no telemetry at all for a V2 answer -- a
+                # clickable link to a search that always comes back empty.
+                # Tagged here, not inside `invoke_v2` itself (graph.py),
+                # since the live OpenTelemetry span belongs to this request
+                # handler, matching where chat() tags it for V1.
+                _tag_span_with_trace_id(final_response)
                 payload = {"type": "final", "response": _json.loads(final_response.model_dump_json())}
             else:
                 payload = event
