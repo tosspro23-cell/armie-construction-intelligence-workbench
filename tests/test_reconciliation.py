@@ -191,6 +191,30 @@ def test_missing_in_pdf_and_missing_in_ifc_items_leave_the_absent_side_null(tmp_
     assert w05.ifc_width_m is None and w05.ifc_height_m is None
 
 
+def test_reconciliation_citations_own_locator_now_carries_the_ifc_sides_dimensions(tmp_path: Path) -> None:
+    """Owner-reported, 2026-09-30: cross-checking a reconciliation mismatch
+    (this is the exact "MissMatch" workflow the owner described -- IFC vs.
+    PDF dimensions) means clicking "Jump to this evidence" on one of THESE
+    citations, not a plain get_properties lookup. `_make_evidence`
+    (`IfcRepository`) already carries `width_m`/`height_m` in its own
+    locators, but `_synthesize_reconciliation_response` builds its own,
+    separate `Evidence` objects (`apps/api/app/agent/graph.py`) and left
+    them out -- confirmed live: jumping to a reconciliation citation in the
+    3D viewer showed no Dimensions row, while jumping to an ordinary
+    get_properties citation for the same element did. Both paths must carry
+    the same fields now.
+    """
+    settings = _settings(tmp_path)
+    fake = FakeModelProvider()
+    container, service = _service(settings, fake)
+
+    response = service.invoke(project_resources=_demo(container), thread_id="reconcile-dims", question=RECONCILIATION_QUESTION, viewer_context=None)
+
+    w01_citation = next(citation for citation in response.citations if citation.locator.get("tag") == "W01")
+    assert w01_citation.locator["width_m"] == pytest.approx(1.2)
+    assert w01_citation.locator["height_m"] == pytest.approx(1.5)
+
+
 def test_non_reconciliation_cross_source_question_still_refused_end_to_end(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     fake = FakeModelProvider()

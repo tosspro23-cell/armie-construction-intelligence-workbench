@@ -18,7 +18,7 @@ from pathlib import Path
 from app.agent.graph import AgentService
 from app.config import Settings, get_settings
 from app.services import ProjectResources, ServiceContainer
-from fakes.fake_provider import FakeModelProvider
+from fakes.fake_provider import FakeModelProvider, ScriptedAnswer, ScriptedToolCalls
 from fastapi.testclient import TestClient
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -73,6 +73,47 @@ def test_cloud_trace_url_is_built_from_configured_tenant_and_resource_id_and_car
     assert url.startswith("https://portal.azure.com/#@11111111-2222-3333-4444-555555555555")
     assert "/resource/subscriptions/sub/resourceGroups/rg/providers/microsoft.insights/components/armiem3-insights/logs" in url
     assert response.trace_id in url  # the actual claim: this link names *this* request, not a generic dashboard
+
+
+def test_v2_response_also_carries_a_cloud_trace_link(tmp_path: Path) -> None:
+    """Owner-reported, 2026-09-30, from testing the deployed app on the V2
+    engine: the Decision Trace's Cloud Provenance banner rendered as plain,
+    unclickable text -- only V1's own `_finalize` path (tested above) ever
+    set `cloud_trace_url`/`cloud_trace_query`; V2's own, separate final-
+    response construction (`invoke_v2`) never did, a real gap that went
+    unnoticed while V1 was still the default engine. Exercised through
+    `invoke_v2` itself (FakeModelProvider's scripted tool turn, no Ollama)
+    so this proves the actual V2 response path, not just the shared helper
+    methods in isolation.
+    """
+    settings = Settings(
+        data_dir=ROOT / "demo_data", ifc_file="armie_demo.ifc", pdf_files=["armie_demo_schedule.pdf"],
+        audit_store_path=tmp_path / "audit.jsonl", evidence_dir=tmp_path / "evidence",
+        azure_tenant_id="11111111-2222-3333-4444-555555555555",
+        app_insights_resource_id="/subscriptions/sub/resourceGroups/rg/providers/microsoft.insights/components/armiem3-insights",
+    )
+    settings.ensure_runtime_directories()
+    fake = FakeModelProvider()
+    fake.script("v2_tool_turn", ScriptedToolCalls([("count_elements", {"entity_type": "IfcDoor"})]))
+    fake.script("v2_tool_turn", ScriptedToolCalls([("submit_answer_facts", {"claims": [{"entity": "IfcDoor", "measure": "count", "value": 4}]})]))
+    fake.script("v2_tool_turn", ScriptedAnswer(["There are 4 doors."]))
+    container = ServiceContainer(settings, text_provider_factory=lambda s: fake, vision_provider_factory=lambda s: fake)
+    service = AgentService(container)
+    resources = asyncio.run(container.get_project("demo"))
+
+    final = None
+    async def _run():
+        nonlocal final
+        async for event in service.invoke_v2(project_resources=resources, thread_id="v2-cloud-link", question="How many doors are there?", viewer_context=None):
+            if event["type"] == "final":
+                final = event["response"]
+    asyncio.run(_run())
+
+    assert final is not None
+    url = final.execution_metadata.get("cloud_trace_url")
+    assert url is not None
+    assert final.trace_id in url
+    assert final.trace_id in final.execution_metadata.get("cloud_trace_query", "")
 
 
 # --- main.py's chat() tags the real OpenTelemetry span ----------------------------

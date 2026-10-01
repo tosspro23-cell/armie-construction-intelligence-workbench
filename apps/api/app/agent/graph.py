@@ -801,22 +801,19 @@ Return only a corrected MultiQueryPlan JSON object."""
         relies on the same "the model's own units are SI/metres" assumption
         this project already makes everywhere else it reads an IFC quantity.
         """
-        import ifcopenshell.util.element as ifc_element_util
-
         model = project_resources.ifc_repository.model
         items: dict[str, dict[str, Any]] = {}
         for element in [*model.by_type("IfcDoor"), *model.by_type("IfcWindow")]:
             tag = getattr(element, "Tag", None)
             if not tag:
                 continue
-            psets = ifc_element_util.get_psets(element, qtos_only=True)
-            quantities = next(iter(psets.values()), {}) if psets else {}
-            width = quantities.get("Width")
-            height = quantities.get("Height")
-            if width is None:
-                width = getattr(element, "OverallWidth", None)
-            if height is None:
-                height = getattr(element, "OverallHeight", None)
+            # SPEC-M18 follow-up (2026-09-30): reuses IfcRepository's own
+            # shared extraction (added so the 3D viewer's selection panel
+            # and citation evidence could show the same width/height this
+            # reconciliation comparison always has) instead of keeping a
+            # second, independently-drifting copy of the same Qto/
+            # OverallWidth-OverallHeight lookup here.
+            width, height = project_resources.ifc_repository.door_window_dimensions_m(element)
             containment = getattr(element, "ContainedInStructure", []) or []
             storey = getattr(containment[0].RelatingStructure, "Name", None) if containment else None
             items[str(tag)] = {
@@ -1290,8 +1287,20 @@ Return only a corrected MultiQueryPlan JSON object."""
             counts[item["status"]] += 1
             reconciliation_items.append(item)
             if ifc_item:
+                # Owner-reported, 2026-09-30: this is the exact citation a
+                # reconciliation mismatch answer hands back, and "Jump to
+                # this evidence" reads its own locator to populate the
+                # viewer's selection panel -- so the dimensions the owner
+                # actually came here to cross-check (IFC vs. PDF) were
+                # missing from the one evidence path that matters most for
+                # this workflow, even after `_make_evidence` (the OTHER,
+                # non-reconciliation evidence constructor) already carried
+                # them. `ifc_item` already has `width_m`/`height_m` here
+                # (from `_reconciliation_ifc_items`, which now delegates to
+                # `IfcRepository.door_window_dimensions_m`) -- reused, not
+                # recomputed.
                 evidence.append(Evidence(source_type=SourceType.IFC, source_file=state["project_resources"].ifc_repository.path.name,
-                    summary=f"IFC {ifc_item['entity_type']} Tag={tag}.", locator={"global_id": ifc_item["global_id"], "express_id": ifc_item["express_id"], "tag": tag}))
+                    summary=f"IFC {ifc_item['entity_type']} Tag={tag}.", locator={"global_id": ifc_item["global_id"], "express_id": ifc_item["express_id"], "tag": tag, "width_m": ifc_item.get("width_m"), "height_m": ifc_item.get("height_m")}))
             if pdf_item:
                 evidence.append(Evidence(source_type=SourceType.PDF, source_file=state["project_resources"].document_analyzer.pdf_path.name,
                     summary=f"PDF schedule row Mark={tag}.", locator={"page": 2, "mark": tag}))
@@ -2837,6 +2846,21 @@ Return only a corrected MultiQueryPlan JSON object."""
                 # submits one as a claim despite `submit_answer_facts`'s own
                 # instruction not to.
                 known_reference_numbers: set[float] = set()
+                # Codex review, PR #62, P1: a storey name's own digit is a
+                # legitimate thing for an answer's *prose* to restate, but it
+                # is never a legitimate stand-in for a *measurement* -- kept
+                # in its own set, merged into `known_reference_numbers` only
+                # for `_unclaimed_numbers_in_answer` below, never passed to
+                # `_answer_facts_verified`. Mixing it into the same set
+                # `_answer_facts_verified` checks would let a fabricated
+                # structured claim (e.g. a submitted width of exactly `2`)
+                # pass unconditionally merely because this turn's citations
+                # happen to carry a "Level 2" storey name -- a tag/record/
+                # mark is safe there because a model would never coincide a
+                # real element identifier with a fabricated measurement's
+                # value, but a storey number (small, common digits like 1/2)
+                # has no such property.
+                storey_restatement_numbers: set[float] = set()
                 for citation in all_citations:
                     locator = citation.get("locator") or {}
                     for key in ("tag", "record", "mark"):
@@ -2844,6 +2868,30 @@ Return only a corrected MultiQueryPlan JSON object."""
                         if isinstance(raw_value, (str, int, float)) and not isinstance(raw_value, bool):
                             try:
                                 known_reference_numbers.add(float(raw_value))
+                            except (TypeError, ValueError):
+                                pass
+                    # Owner-reported, 2026-09-30, found live: "第二层有几扇
+                    # 门?" ("how many doors on the second floor?") ->
+                    # "第二层（Level 2）共有 8 扇门。" flagged unverified --
+                    # `_unclaimed_numbers_in_answer` (D-074's own coarse
+                    # safety net) scans the full answer text for every
+                    # number, and "2" (from the model restating the
+                    # storey's own name, "Level 2", for clarity) matched
+                    # neither a submitted claim nor any real fact this turn
+                    # (the real fact was the door count, 8). Exactly the
+                    # same class of false positive `known_reference_numbers`
+                    # already exists to close for a restated tag/mark --
+                    # a storey name is the same kind of identifying label,
+                    # not a measurement, and every citation this turn
+                    # already carries its own real storey name. Extracted
+                    # the same way, not a new mechanism: any digit sequence
+                    # embedded in `locator["storey"]` (e.g. "Level 2") is a
+                    # legitimate restatement regardless of phrasing.
+                    storey_value = locator.get("storey")
+                    if isinstance(storey_value, str):
+                        for digits in re.findall(r"\d+(?:\.\d+)?", storey_value):
+                            try:
+                                storey_restatement_numbers.add(float(digits))
                             except (TypeError, ValueError):
                                 pass
                 # SPEC-M18 (D-074): replaces the free-text, character-
@@ -2908,7 +2956,7 @@ Return only a corrected MultiQueryPlan JSON object."""
                     # coarse safety net closes that, without reintroducing
                     # the entity-proximity scanning that caused the eight
                     # prior false positives -- see its own docstring.
-                    unclaimed = self._unclaimed_numbers_in_answer(narrative, answer_facts, real_facts, known_reference_numbers) if facts_verified else []
+                    unclaimed = self._unclaimed_numbers_in_answer(narrative, answer_facts, real_facts, known_reference_numbers | storey_restatement_numbers) if facts_verified else []
                     if facts_verified and not unclaimed:
                         verification = VerificationStatus(status="verified", reason="Every stated fact came from a verified tool call this turn.")
                     elif facts_verified and unclaimed:
@@ -2948,6 +2996,16 @@ Return only a corrected MultiQueryPlan JSON object."""
                         # or when it was but the model never called the
                         # tool (e.g. the turn ended some other way first).
                         "finding_verdict": state.get("finding_verdict"),
+                        # Owner-reported, 2026-09-30: the Decision Trace's
+                        # own Cloud Provenance banner rendered as plain,
+                        # unclickable text for every V2 turn -- V1's own
+                        # `_finalize` path has set these two keys since
+                        # D-028, but V2's own final-response construction
+                        # never did, a real gap that went unnoticed while
+                        # V1 was still the default engine. Wired the same
+                        # way V1 already does it, not a new mechanism.
+                        "cloud_trace_url": self._cloud_trace_url(trace_id),
+                        "cloud_trace_query": self._cloud_trace_query(trace_id),
                     },
                     reconciliation_items=[ReconciliationItem.model_validate(item) for item in all_reconciliation_items],
                 )

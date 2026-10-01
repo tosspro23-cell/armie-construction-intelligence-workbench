@@ -213,6 +213,7 @@ class IfcRepository:
                     # selectable in the browser with a bounded proxy box.
                     origin = self._placement_origin(element)
                     dimensions = self._FALLBACK_DIMENSIONS.get(element.is_a(), [0.5, 0.5, 0.5])
+                    width_m, height_m = self.door_window_dimensions_m(element)
                     output.append({
                         "express_id": element.id(), "global_id": getattr(element, "GlobalId", None),
                         "entity_type": element.is_a(), "name": self._name_of(element),
@@ -220,9 +221,11 @@ class IfcRepository:
                         "storey": self._storey_name(element), "center": origin,
                         "dimensions": dimensions, "color": self._PALETTE.get(element.is_a(), "#cdc6b8"),
                         "is_external": self._is_external(element),
+                        "width_m": width_m, "height_m": height_m,
                     })
                     continue
                 dimensions = [max(maximum[index] - minimum[index], 0.05) for index in range(3)]
+                width_m, height_m = self.door_window_dimensions_m(element)
                 output.append({
                     "express_id": element.id(),
                     "global_id": getattr(element, "GlobalId", None),
@@ -245,6 +248,13 @@ class IfcRepository:
                     "dimensions": dimensions,
                     "color": self._PALETTE.get(entity_type, "#cdc6b8"),
                     "is_external": self._is_external(element),
+                    # Owner-reported, 2026-09-30: doors/windows only (see
+                    # `door_window_dimensions_m`'s own docstring) -- a
+                    # human cross-checking a Findings-tab dimension
+                    # mismatch against the 3D model had no way to see the
+                    # IFC side's own real width/height without leaving the
+                    # viewer for the chat tool.
+                    "width_m": width_m, "height_m": height_m,
                 })
         return output
 
@@ -299,14 +309,17 @@ class IfcRepository:
                     origin = self._placement_origin(element)
                     width, depth, height = self._FALLBACK_DIMENSIONS.get(element.is_a(), [0.5, 0.5, 0.5])
                     vertices, faces = self._fallback_box_mesh(origin, width, depth, height)
+                    width_m, height_m = self.door_window_dimensions_m(element)
                     output.append({
                         "express_id": element.id(), "global_id": getattr(element, "GlobalId", None),
                         "entity_type": element.is_a(), "name": self._name_of(element),
                         "tag": getattr(element, "Tag", None),
                         "storey": self._storey_name(element), "color": self._PALETTE.get(element.is_a(), "#cdc6b8"),
                         "is_external": self._is_external(element), "vertices": vertices, "faces": faces,
+                        "width_m": width_m, "height_m": height_m,
                     })
                     continue
+                width_m, height_m = self.door_window_dimensions_m(element)
                 output.append({
                     "express_id": element.id(),
                     "global_id": getattr(element, "GlobalId", None),
@@ -323,6 +336,9 @@ class IfcRepository:
                     "is_external": self._is_external(element),
                     "vertices": vertices,
                     "faces": faces,
+                    # Owner-reported, 2026-09-30: see viewer_elements's own
+                    # matching comment -- doors/windows only.
+                    "width_m": width_m, "height_m": height_m,
                 })
         return output
 
@@ -671,6 +687,7 @@ class IfcRepository:
         sample = elements[: min(query.limit, len(elements))]
         evidence: list[Evidence] = []
         for element in sample:
+            width_m, height_m = self.door_window_dimensions_m(element)
             locator = {
                 "global_id": getattr(element, "GlobalId", None),
                 "express_id": element.id(),
@@ -681,6 +698,12 @@ class IfcRepository:
                 "property_path": query.property_path,
                 "measure": query.measure,
                 "aggregation": query.aggregation,
+                # Owner-reported, 2026-09-30: jumping from an Evidence
+                # citation to its element in the 3D viewer showed identity
+                # fields only -- doors/windows only, see
+                # `door_window_dimensions_m`'s own docstring for why this
+                # deliberately does not generalize to every entity type.
+                "width_m": width_m, "height_m": height_m,
             }
             evidence.append(Evidence(
                 source_type=SourceType.IFC,
@@ -784,6 +807,45 @@ class IfcRepository:
                 value = props["IsExternal"]
                 return bool(value) if isinstance(value, bool) else None
         return None
+
+    @staticmethod
+    def door_window_dimensions_m(element: Any) -> tuple[float | None, float | None]:
+        """Owner-reported, 2026-09-30: cross-checking a door/window
+        dimension mismatch (IFC vs. PDF schedule) between the Findings tab
+        and the 3D viewer required the viewer's own selection panel to
+        show a width/height -- it only ever showed identity fields
+        (GlobalId/ExpressID/Tag), never the actual measurement being
+        compared. Deliberately scoped to IfcDoor/IfcWindow only, not every
+        entity type this viewer renders: OD-15 (docs/decisions/README.md)
+        already narrowly authorizes door/window dimension comparison and
+        nothing broader, and a generic "width" would be actively
+        misleading for other types anyway (a wall's own Qto `Width`
+        quantity means its thickness, not a comparable opening size).
+
+        Mirrors `AgentService._reconciliation_ifc_items`'s own
+        already-established extraction exactly (`apps/api/app/agent/
+        graph.py`) -- the same Qto-quantity lookup, the same
+        `OverallWidth`/`OverallHeight` schema-attribute fallback for a
+        real, Qto-less Revit-vintage export (D-037) -- reused from there,
+        not a second, independently-drifting implementation of the same
+        read. `None` for anything else, or when neither source has it.
+        """
+        if not element.is_a("IfcDoor") and not element.is_a("IfcWindow"):
+            return None, None
+        import ifcopenshell.util.element as ifc_element_util
+
+        psets = ifc_element_util.get_psets(element, qtos_only=True)
+        quantities = next(iter(psets.values()), {}) if psets else {}
+        width = quantities.get("Width")
+        height = quantities.get("Height")
+        if width is None:
+            width = getattr(element, "OverallWidth", None)
+        if height is None:
+            height = getattr(element, "OverallHeight", None)
+        return (
+            float(width) if isinstance(width, (int, float)) and not isinstance(width, bool) else None,
+            float(height) if isinstance(height, (int, float)) and not isinstance(height, bool) else None,
+        )
 
     @staticmethod
     def _compact_element(element: Any) -> dict[str, Any]:

@@ -16,6 +16,15 @@ type SelectedElement = {
   // citation locators) since D-070/D-072's own owner-reported fix; this
   // carries it into the 3D viewer's own selection, not a new read.
   tag?: string | null;
+  // Owner-reported, 2026-09-30: cross-checking a Findings-tab dimension
+  // mismatch (IFC vs. PDF schedule) needed the IFC side's own real
+  // width/height visible right here, not just the schedule's. Doors/
+  // windows only -- `null` for every other entity type by design (a
+  // wall's own Qto "Width" means its thickness, not a comparable
+  // opening size), matching IfcRepository.door_window_dimensions_m's
+  // own scope exactly.
+  widthM?: number | null;
+  heightM?: number | null;
 };
 
 type ViewerElement = {
@@ -24,6 +33,8 @@ type ViewerElement = {
   entity_type?: string;
   name?: string;
   tag?: string | null;
+  width_m?: number | null;
+  height_m?: number | null;
   // SPEC-M12: `/api/v1/project/viewer-mesh`'s real triangulated geometry --
   // flat IFC world-space coordinates (`vertices`, 3 floats per vertex) and
   // triangle indices into them (`faces`, 3 indices per triangle), in place
@@ -475,7 +486,7 @@ export function IfcViewer({ onSelection, onSnapshot, onStatus, highlightedGlobal
       }) || hits[0];
       const mesh = preferredHit.object as THREE.Mesh;
       const element = mesh.userData as ViewerElement;
-      onSelection({ globalId: element.global_id, expressId: element.express_id, type: element.entity_type, name: element.name, tag: element.tag });
+      onSelection({ globalId: element.global_id, expressId: element.express_id, type: element.entity_type, name: element.name, tag: element.tag, widthM: element.width_m, heightM: element.height_m });
       if (element.global_id) onToggleHighlight(element.global_id);
     };
 

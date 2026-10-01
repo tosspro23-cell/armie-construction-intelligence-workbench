@@ -3847,3 +3847,97 @@ permanently forgoing FastAPI's own upstream security/bug fixes, for a claim (the
 own span count) this project never actually depended on in production. `PYTHONPATH=apps/api
 python3 -m pytest -q` (488 passed, 10 skipped) and `ruff check --select F,E9,I,F401 apps/api
 tests` both clean against the newer dependency stack.
+
+## D-077 — three owner-reported bugs from a live production test: V2's own cloud-trace link, a storey-name false positive, and no door/window dimensions in the 3D viewer
+
+Owner-reported, 2026-09-30, from personally testing the deployed app (Duplex Apartment project,
+V2 engine) -- three distinct issues, none touching the same code path:
+
+1. **Cloud Provenance banner not clickable on a V2 answer.** V1's own `_finalize` path
+   (`apps/api/app/agent/graph.py`) has set `cloud_trace_url`/`cloud_trace_query` in
+   `execution_metadata` since D-028 -- a deep link into Application Insights for the turn's own
+   `trace_id`, gated on `settings.azure_tenant_id`/`settings.app_insights_resource_id` both being
+   set. V2's own, separate final-response construction (added later, SPEC-M16) never called
+   either helper -- a real, pre-existing gap that went unnoticed while V1 was still the default
+   engine, not a regression from any change this session. Confirmed directly against the deployed
+   container (not guessed): `AZURE_TENANT_ID`/`APP_INSIGHTS_RESOURCE_ID` were both already set
+   correctly in production, ruling out a config/deployment cause before touching any code. Fixed
+   by adding both keys to V2's own success-path `execution_metadata`, calling the same
+   `self._cloud_trace_url(trace_id)`/`self._cloud_trace_query(trace_id)` V1 already uses -- the
+   same mechanism, not a new one. V2 cannot run at all locally (Ollama raises "not supported in
+   this phase" unconditionally for V2's own tool-calling), so this fix could not be
+   browser-verified before deploy; confirmed instead by direct production `curl` showing the keys
+   present in a V2 response's `execution_metadata` after redeploy.
+
+2. **A restated storey name flagged as an unclaimed number.** "第二层有几扇门？" ("how many doors on
+   the second floor?") came back `unverified` -- `_unclaimed_numbers_in_answer` (D-074's own coarse
+   safety net, which scans a V2 answer's full text for every digit sequence and flags anything that
+   matches no submitted claim, no real tool fact, and no `known_reference_numbers` entry) saw the
+   model restate the storey's own name ("第二层（Level 2）") for clarity and had no exemption for a
+   storey label, only for a restated tag/mark (D-065/D-066/D-068's own precedent for this exact
+   false-positive class). Reproduced directly against real production before changing anything
+   (matching [[feedback_measure_dont_guess_root_causes]]): the exact same question, asked again,
+   reproduced the `unverified` status. Fixed the same way those prior exemptions were: extended
+   `known_reference_numbers`'s construction loop to also pull every digit sequence out of each
+   citation's own `locator["storey"]` field (e.g. "Level 2" -> `2.0`) -- a storey name is the same
+   kind of identifying label a tag or mark already is, not a measurement, and every citation already
+   carries its own real storey name. New regression test
+   (`tests/test_v2_representative_eval.py::test_v2_exempts_a_restated_storey_name_as_a_known_reference_number`),
+   confirmed fail-before/pass-after by stripping the fix via an exact-string-match script and
+   re-running.
+
+3. **No door/window dimensions in the 3D viewer, needed for cross-source mismatch review.** The
+   owner's actual workflow: running the door/window reconciliation (OD-15's own pilot), seeing a
+   `dimension_mismatch` item, and wanting to visually confirm the IFC side's own real
+   width/height against the PDF schedule by clicking the element in the 3D viewer -- which showed
+   identity fields only (`GlobalId`/`ExpressID`/`Tag`), never the measurement actually being
+   compared. Added a new shared `IfcRepository.door_window_dimensions_m` static method
+   (`apps/api/app/tools/ifc/repository.py`) -- the same Qto-quantity lookup with the
+   `OverallWidth`/`OverallHeight` schema-attribute fallback for a Qto-less Revit export (D-037)
+   `AgentService._reconciliation_ifc_items` already had, reused rather than duplicated (that
+   method now delegates to it, confirmed behavior-identical by the existing full reconciliation
+   suite). Deliberately scoped to `IfcDoor`/`IfcWindow` only, not every entity type the viewer
+   renders: OD-15 (recorded in `CLAUDE.md` as a non-negotiable invariant) narrowly authorizes
+   door/window reconciliation and nothing broader, and a generic "width" would be actively
+   misleading for other types regardless -- a wall's own Qto `Width` quantity means its thickness,
+   not a comparable opening size. Wired into `viewer_elements`, `mesh_elements`, and
+   `IfcRepository._make_evidence`'s own citation locators, plus a new "Dimensions" row in the
+   frontend's selection-details panel (`apps/web/src/main.tsx`) fed by both the direct-3D-click
+   path and the citation-jump path (`IfcViewer.tsx`, `main.tsx`'s `openCitation`).
+
+   **A second, separate evidence path was missed on the first pass and only caught by testing the
+   owner's actual workflow, not just the unit tests:** `_synthesize_reconciliation_response`
+   (`apps/api/app/agent/graph.py`) -- the reconciliation-mismatch answer itself, i.e. exactly the
+   scenario the owner described -- builds its own `Evidence` objects independently of
+   `_make_evidence`, and its IFC-side locator did not carry `width_m`/`height_m` even though the
+   `ifc_item` it already had in hand (from the now-shared `_reconciliation_ifc_items`) carried
+   both. A unit test against `_make_evidence` alone would never have caught this: it exercises a
+   different evidence constructor than the one a reconciliation answer's own citations actually go
+   through. Found by locally reproducing the owner's exact click path end-to-end in a browser (ask
+   the reconciliation question, expand its evidence, click "Jump to this evidence" on a window
+   citation) rather than trusting the already-passing dimensions-exposure unit tests, per this
+   repo's own [[feedback_stress_testing_finds_bugs_a_single_repro_test_misses]] precedent -- the
+   Dimensions row was present after a direct 3D click but silently absent after a citation jump
+   from a reconciliation answer, the exact asymmetry that gave the gap away. Fixed by adding
+   `width_m`/`height_m` to that locator too, read from the same already-available `ifc_item`. New
+   regression test
+   (`tests/test_reconciliation.py::test_reconciliation_citations_own_locator_now_carries_the_ifc_sides_dimensions`),
+   confirmed fail-before/pass-after the same way (stashed the one-line fix, confirmed the test
+   failed with `KeyError: 'width_m'`, restored it, confirmed pass).
+
+**Scope:** three independent bug fixes, no new capability and no change to reconciliation's own
+join shape -- still door/window-only, per OD-15. No new SPEC per this repo's own
+[[feedback_spec_first_scope]] convention (matching D-071/D-075's precedent: bug fixes on an
+already-shipped capability get a D-0xx entry, not a milestone spec).
+
+Verified locally end-to-end in a real browser (local FastAPI backend, local Vite dev server, no
+Azure) for issue 3 only -- the only one of the three that does not require a real V2/Ollama model
+call: direct 3D click on a window (W02) showed `Dimensions: 1.20 m × 1.75 m`, matching its known
+reconciliation-table value; direct 3D click on a wall showed no Dimensions row (deliberate, not a
+gap); and "Jump to this evidence" from a live reconciliation answer's own W01 citation showed
+`Dimensions: 1.20 m × 1.50 m`, matching W01's known fixture value, only after the second evidence
+path above was also fixed. Issues 1 and 2 require a real V2 engine turn, which Ollama cannot
+perform locally (V2 tool-calling is unconditionally unsupported outside this phase) -- deferred to
+direct production verification after deploy. `PYTHONPATH=apps/api python3 -m pytest -q` (494
+passed, 10 skipped), `ruff check --select F,E9,I,F401 apps/api tests`, and `(cd apps/web && npm
+run build)` all clean.
