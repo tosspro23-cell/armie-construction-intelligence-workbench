@@ -2846,6 +2846,30 @@ Return only a corrected MultiQueryPlan JSON object."""
                                 known_reference_numbers.add(float(raw_value))
                             except (TypeError, ValueError):
                                 pass
+                    # Owner-reported, 2026-09-30, found live: "第二层有几扇
+                    # 门?" ("how many doors on the second floor?") ->
+                    # "第二层（Level 2）共有 8 扇门。" flagged unverified --
+                    # `_unclaimed_numbers_in_answer` (D-074's own coarse
+                    # safety net) scans the full answer text for every
+                    # number, and "2" (from the model restating the
+                    # storey's own name, "Level 2", for clarity) matched
+                    # neither a submitted claim nor any real fact this turn
+                    # (the real fact was the door count, 8). Exactly the
+                    # same class of false positive `known_reference_numbers`
+                    # already exists to close for a restated tag/mark --
+                    # a storey name is the same kind of identifying label,
+                    # not a measurement, and every citation this turn
+                    # already carries its own real storey name. Extracted
+                    # the same way, not a new mechanism: any digit sequence
+                    # embedded in `locator["storey"]` (e.g. "Level 2") is a
+                    # legitimate restatement regardless of phrasing.
+                    storey_value = locator.get("storey")
+                    if isinstance(storey_value, str):
+                        for digits in re.findall(r"\d+(?:\.\d+)?", storey_value):
+                            try:
+                                known_reference_numbers.add(float(digits))
+                            except (TypeError, ValueError):
+                                pass
                 # SPEC-M18 (D-074): replaces the free-text, character-
                 # proximity `_narrative_consistent_with_tool_facts` scan --
                 # eight confirmed false positives across two live stress-

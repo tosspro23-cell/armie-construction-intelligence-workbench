@@ -811,6 +811,53 @@ def test_v2_correctly_verifies_two_different_entity_counts_in_one_answer(tmp_pat
     assert response.verification.status == "verified"
 
 
+def test_v2_exempts_a_restated_storey_name_as_a_known_reference_number(tmp_path: Path) -> None:
+    """Owner-reported, 2026-09-30, found live: "第二层有几扇门?" ("how many
+    doors on the second floor?") -> "第二层（Level 2）共有 8 扇门。" was
+    flagged unverified, with the specific reason "The answer states 2,
+    which was never submitted as a claim and does not match any value
+    this turn's tool calls returned" -- the "2" in question was not the
+    real door count (correctly submitted as its own claim), it was the
+    model restating the storey's own name, "Level 2", for clarity.
+    `_unclaimed_numbers_in_answer` (D-074's own coarse safety net) scans
+    the full answer text for every number and had no way to recognize a
+    storey name's own embedded digit as anything other than an
+    unaccounted-for claim.
+
+    Exactly the same class of false positive `known_reference_numbers`
+    already exists to close for a restated tag/mark (D-065/D-066/D-068) --
+    a storey name is the same kind of identifying label, not a
+    measurement, and every citation this turn already carries its own
+    real storey name in `locator["storey"]`. Verified here with the real
+    demo fixture's own `count_elements(IfcDoor, storey="Level 01")`
+    (already established elsewhere in this file to return 2) -- the
+    answer restates "Level 01" (embedding "01") right next to the real,
+    correctly-claimed count "2", so both a genuinely fabricated storey
+    reference and a genuinely fabricated count would still need to be
+    caught independently, not just "some number matched something."
+    """
+    fake = FakeModelProvider()
+    fake.script("v2_tool_turn", ScriptedToolCalls([("count_elements", {"entity_type": "IfcDoor", "storey": "Level 01"})]))
+    fake.script("v2_tool_turn", ScriptedToolCalls([("submit_answer_facts", {"claims": [{"entity": "IfcDoor", "measure": "count", "value": 2}]})]))
+    fake.script("v2_tool_turn", ScriptedAnswer(["Level 01 has 2 doors."]))
+    _, service, resources = _service(tmp_path, fake)
+
+    response = asyncio.run(_run(service, resources, "How many doors are on Level 01?", "eval-storey-restatement"))
+
+    assert response.disposition.value == "answered"
+    assert response.verification.status == "verified"
+
+    # A genuinely fabricated count must still be caught even with a real
+    # storey name sitting right next to it in the same sentence.
+    fake_bad = FakeModelProvider()
+    fake_bad.script("v2_tool_turn", ScriptedToolCalls([("count_elements", {"entity_type": "IfcDoor", "storey": "Level 01"})]))
+    fake_bad.script("v2_tool_turn", ScriptedToolCalls([("submit_answer_facts", {"claims": [{"entity": "IfcDoor", "measure": "count", "value": 99999}]})]))
+    fake_bad.script("v2_tool_turn", ScriptedAnswer(["Level 01 has 99999 doors."]))
+    _, service_bad, resources_bad = _service(tmp_path, fake_bad)
+    response_bad = asyncio.run(_run(service_bad, resources_bad, "How many doors are on Level 01?", "eval-storey-restatement-bad"))
+    assert response_bad.verification.status == "unverified"
+
+
 def test_v2_exempts_a_tag_cited_only_via_reconciliations_pdf_side_mark_locator(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """D-068 follow-up, found reading the code while investigating the bug
     above: `known_reference_numbers` (D-066) only ever checked citation
