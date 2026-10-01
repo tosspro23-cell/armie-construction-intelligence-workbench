@@ -2972,6 +2972,16 @@ Return only a corrected MultiQueryPlan JSON object."""
                         # or when it was but the model never called the
                         # tool (e.g. the turn ended some other way first).
                         "finding_verdict": state.get("finding_verdict"),
+                        # Owner-reported, 2026-09-30: the Decision Trace's
+                        # own Cloud Provenance banner rendered as plain,
+                        # unclickable text for every V2 turn -- V1's own
+                        # `_finalize` path has set these two keys since
+                        # D-028, but V2's own final-response construction
+                        # never did, a real gap that went unnoticed while
+                        # V1 was still the default engine. Wired the same
+                        # way V1 already does it, not a new mechanism.
+                        "cloud_trace_url": self._cloud_trace_url(trace_id),
+                        "cloud_trace_query": self._cloud_trace_query(trace_id),
                     },
                     reconciliation_items=[ReconciliationItem.model_validate(item) for item in all_reconciliation_items],
                 )
