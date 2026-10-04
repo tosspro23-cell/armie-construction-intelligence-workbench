@@ -1473,3 +1473,59 @@ def test_v2_invoke_actually_sends_the_viewer_selection_to_the_model(tmp_path: Pa
     first_turn_prompt = fake.calls[0].prompt
     assert "1ctyjgDIX8IAhrrKTlC1w0" in first_turn_prompt
     assert "get_element_properties" in first_turn_prompt
+
+
+def test_v2_suppresses_viewer_guidance_during_a_finding_investigation(tmp_path: Path) -> None:
+    """Codex review, PR #63, P2: `build_finding_investigation_question`
+    refers to the finding under investigation as "this element" throughout
+    (see its own docstring), identified by the finding's own tag --
+    completely independent of whatever the user happens to still have
+    selected in the 3D viewer from earlier browsing. The frontend sends
+    the current viewer selection on *every* V2 turn regardless of which
+    finding was clicked (`main.tsx`'s `runV2Turn`), so an unrelated, stale
+    selection could otherwise be sitting right there when "Ask agent to
+    investigate" is clicked for a completely different finding. Without
+    this guard, the viewer-selection fix above would let the model resolve
+    the investigation question's own "this element" to that unrelated
+    GlobalId instead of the finding actually under investigation --
+    exactly the kind of correctness risk this project's own door/window
+    reconciliation pilot cannot afford. `invoke_v2`'s own call site
+    suppresses `viewer_context` outright (passes `None`) whenever
+    `include_verdict_tool` is set, which is true if and only if this turn
+    is a finding investigation (`_chat_v2`'s own exclusive setter) -- so
+    the finding's own tag is the only thing "this element" can mean.
+
+    Exercises `invoke_v2` directly (not the real `/api/v1/findings` HTTP
+    flow `test_finding_verdict_tool.py` already covers end-to-end) with an
+    unrelated, clearly-stale GlobalId in `viewer_context` alongside
+    `include_verdict_tool=True`, and inspects the real system prompt sent
+    to the model.
+    """
+    fake = FakeModelProvider()
+    fake.script("v2_tool_turn", ScriptedToolCalls([
+        ("get_element_properties", {"entity_type": "IfcWindow", "tags": ["W02"]}),
+        ("submit_finding_verdict", {"verdict": "inconclusive", "basis": "Could not corroborate either value."}),
+    ]))
+    fake.script("v2_tool_turn", ScriptedAnswer(["Inconclusive; see my submitted verdict."]))
+    _, service, resources = _service(tmp_path, fake)
+
+    final = None
+    async def _run_investigation():
+        nonlocal final
+        async for event in service.invoke_v2(
+            project_resources=resources, thread_id="eval-investigation-stale-selection",
+            question="Investigate the dimension mismatch for tag W02.",
+            viewer_context={
+                "selected_global_ids": ["UNRELATED-STALE-SELECTION-GLOBALID"],
+                "selected_entity_type": "IfcDoor", "selected_display_name": "A totally different door",
+            },
+            include_verdict_tool=True,
+        ):
+            if event["type"] == "final":
+                final = event["response"]
+    asyncio.run(_run_investigation())
+
+    assert final.disposition.value == "answered"
+    first_turn_prompt = fake.calls[0].prompt
+    assert "UNRELATED-STALE-SELECTION-GLOBALID" not in first_turn_prompt
+    assert "do not ask the user to re-identify" not in first_turn_prompt

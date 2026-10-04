@@ -2626,7 +2626,19 @@ Return only a corrected MultiQueryPlan JSON object."""
             ]
         except Exception:
             storey_names = []
-        messages: list[dict[str, Any]] = [{"role": "system", "content": self._v2_system_prompt(storey_names, source_preference, viewer_context)}]
+        # Codex review, PR #63, P2: a finding investigation's own question
+        # (`build_finding_investigation_question`) refers to the finding
+        # under investigation as "this element" throughout, identified by
+        # the finding's own tag -- completely independent of whatever the
+        # user happens to still have selected in the 3D viewer from
+        # earlier browsing (the frontend sends the current selection on
+        # every V2 turn regardless of which finding was clicked). Passing
+        # viewer_context into the prompt here would let the model resolve
+        # "this element" to an unrelated, possibly stale selection instead
+        # of the finding it was actually asked to investigate -- suppressed
+        # unconditionally for an investigation turn so the finding's own
+        # identity is the only thing "this element" can mean.
+        messages: list[dict[str, Any]] = [{"role": "system", "content": self._v2_system_prompt(storey_names, source_preference, None if include_verdict_tool else viewer_context)}]
         # SPEC-M18 (D-074): SUBMIT_ANSWER_FACTS_TOOL is offered on every V2
         # turn (unlike SUBMIT_FINDING_VERDICT_TOOL, which stays
         # investigation-only) -- it feeds the general narrative-consistency
