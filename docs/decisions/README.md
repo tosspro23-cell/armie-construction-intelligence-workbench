@@ -3941,3 +3941,57 @@ perform locally (V2 tool-calling is unconditionally unsupported outside this pha
 direct production verification after deploy. `PYTHONPATH=apps/api python3 -m pytest -q` (494
 passed, 10 skipped), `ruff check --select F,E9,I,F401 apps/api tests`, and `(cd apps/web && npm
 run build)` all clean.
+
+## D-078 — V2 never told the model a viewer selection existed, so a plain click-selection led to an unnecessary clarification
+
+Owner-reported, 2026-10-04, found live testing the production app (RWTH DigitalHub, V2 engine):
+selected a window in the 3D viewer, then asked "what height is this window?" with Source left at
+its default "Auto" -- the model responded "Which window do you mean? ... or you can select the
+window in the 3D viewer and tell me to inspect the current view," asking the user to redo
+something they had, in fact, already done.
+
+**Root cause, confirmed by reading the actual request path, not guessed:** the frontend already
+sends `viewer_context.selected_global_ids`/`selected_entity_type`/`selected_display_name` on every
+V2 turn once an element is clicked (`apps/web/src/main.tsx`'s `runV2Turn`, unconditionally, not
+gated on the Source control). `AgentService.invoke_v2` stores it in `state["viewer_context"]` and
+`inspect_current_view`/`get_element_properties` both already know how to use a real selection when
+called -- but the system prompt built for the model (`AgentService._v2_system_prompt`) never
+mentioned a selection existed at all, *unless* `source_preference` happened to be the separate,
+narrower `"viewer_snapshot"` value (a different, vaguer hint: "prefer inspect_current_view... when
+the question could plausibly be about what is currently shown"). With Source at its default
+"Auto" -- the overwhelmingly common case -- the model had no way to know whether
+`inspect_current_view`'s own documented precondition ("only usable if the user has an active
+viewer snapshot/selection") held for this turn, and reasonably declined to guess rather than
+fabricate a selection that might not exist.
+
+**A second, more specific defect found while fixing the first, not assumed away:** the obvious fix
+-- "tell the model a selection exists, suggest `inspect_current_view`" -- would have been wrong.
+`_execute_viewer` (the tool's real implementation) requires an actual captured screenshot
+(`viewer_context.screenshot_base64`); given only a GlobalId with no snapshot, it returns its own,
+*different* `clarification_required` ("Please capture the current model view before asking for
+visual reasoning. A selected IFC ID alone is better handled by deterministic IFC tools.") --
+trading one unnecessary clarification for another, not actually fixing the owner's reported
+problem. The right tool for a plain click-selection (the owner's actual case -- no "Capture
+current view" was taken) is the same deterministic `get_element_properties(global_ids=...,
+entity_type=...)` any other property question already uses; `inspect_current_view` is the correct
+recommendation only when `screenshot_base64` is actually present (a genuine visual "what does this
+look like" question).
+
+**Fixed:** `_v2_system_prompt` gained a `viewer_context` parameter and a new `viewer_guidance`
+clause, included unconditionally (independent of `source_preference`) whenever a selection or
+snapshot exists this turn, empty otherwise. It states the real GlobalId(s)/entity type/display name
+plainly and routes to the correct tool for what is actually available: `get_element_properties`
+when a GlobalId is selected (with no snapshot), `inspect_current_view` when a snapshot was
+captured, both when both exist. `invoke_v2`'s own call site now passes the turn's real
+`viewer_context` through instead of nothing.
+
+Three regression tests: `_v2_system_prompt` discloses a plain selection under `source_preference=
+"auto"` (the owner's own reported case) and recommends `get_element_properties`, not `inspect_
+current_view`; the same function correctly still recommends `inspect_current_view` when a snapshot
+is actually present; and nothing is claimed when no selection/snapshot exists at all. A fourth,
+end-to-end test drives the real `invoke_v2` loop with `FakeModelProvider` and inspects the actual
+`messages` list sent to the model (not just the helper function in isolation), confirming the
+selected GlobalId and `get_element_properties` both actually reach the model's first turn. All four
+confirmed fail-before/pass-after. 501 tests pass (up from 497); `ruff check --select F,E9,I,F401
+apps/api tests` and `(cd apps/web && npm run build)` both clean. Not yet verified against a real
+model in production (V2 cannot run locally against Ollama) -- deferred to post-deploy verification.
