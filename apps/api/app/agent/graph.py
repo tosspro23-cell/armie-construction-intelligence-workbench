@@ -2283,7 +2283,9 @@ Return only a corrected MultiQueryPlan JSON object."""
         return AgentResponse.model_validate(outcome["final_response"])
 
     @staticmethod
-    def _v2_system_prompt(storey_names: list[str] | None = None, source_preference: str = "auto") -> str:
+    def _v2_system_prompt(
+        storey_names: list[str] | None = None, source_preference: str = "auto", viewer_context: dict[str, Any] | None = None,
+    ) -> str:
         """SPEC-M16: V2's own system prompt.
 
         Deliberately restates the same honesty invariant every part of V1
@@ -2304,6 +2306,24 @@ Return only a corrected MultiQueryPlan JSON object."""
         PDF-only with no overlap at all) -- a prompt-level steer for the
         genuinely ambiguous cases is the honest integration point this
         architecture actually has, not a hard routing gate.
+
+        `viewer_context` (owner-reported, 2026-10-04): the frontend sends a
+        `selected_global_ids`/`target_global_id` on every V2 turn once the
+        user has clicked an element in the 3D viewer (`main.tsx`'s
+        `runV2Turn`), and `inspect_current_view` already resolves that
+        selection correctly when called -- but nothing ever told the model
+        a selection existed in the first place unless `source_preference`
+        happened to be the explicit "viewer_snapshot" value (a separate,
+        narrower hint). Confirmed live: the owner selected a window, then
+        asked "what height is this window?" with Source left at its
+        default "Auto", and the model asked the user to re-identify a
+        window it had, in fact, already been told about -- `inspect_current_
+        view`'s own tool description ("only usable if the user has an
+        active viewer snapshot/selection") left the model unable to tell
+        whether that precondition held, so it reasonably declined to guess.
+        `viewer_guidance` below states the actual selection plainly,
+        unconditionally (not gated on `source_preference`), whenever one
+        exists this turn -- empty, changing nothing, when it does not.
         """
         storey_guidance = (
             f"This project's real storey names are exactly: {storey_names} -- always pass one of "
@@ -2315,6 +2335,45 @@ Return only a corrected MultiQueryPlan JSON object."""
             "pdf": "The user has set a source preference of 'pdf' -- when a question could plausibly be answered from either the IFC model or the PDF drawings, prefer extract_pdf_field over the IFC-based tools, unless the question is unambiguously about the 3D model itself. ",
             "viewer_snapshot": "The user has set a source preference of 'viewer_snapshot' -- prefer inspect_current_view over other tools when the question could plausibly be about what is currently shown in the 3D viewer. ",
         }.get(source_preference, "")
+        viewer = viewer_context or {}
+        selected_ids = [value for value in (viewer.get("selected_global_ids") or []) if value] or (
+            [viewer["target_global_id"]] if viewer.get("target_global_id") else []
+        )
+        has_snapshot = bool(viewer.get("screenshot_base64"))
+        if selected_ids or has_snapshot:
+            details = f"GlobalId(s) {selected_ids}" if selected_ids else "an active current-view snapshot"
+            if viewer.get("selected_entity_type"):
+                details += f", entity type {viewer['selected_entity_type']}"
+            if viewer.get("selected_display_name"):
+                details += f", display name \"{viewer['selected_display_name']}\""
+            # A plain click-selection (the common case -- no "Capture
+            # current view" was necessarily taken) carries a real GlobalId
+            # and, usually, its entity type -- resolve it with the same
+            # deterministic property lookup any other question already
+            # uses, never the vision tool: `inspect_current_view` requires
+            # a real screenshot (`_execute_viewer`'s own precondition) and
+            # returns its own clarification_required, not an answer, when
+            # only a GlobalId is present with no snapshot captured.
+            # `inspect_current_view` is the right call only when a snapshot
+            # actually exists (a visual "what does this look like"-style
+            # question), independent of whether anything is also selected.
+            if selected_ids:
+                lookup_hint = (
+                    f"call get_element_properties with global_ids={selected_ids}"
+                    + (f" and entity_type=\"{viewer['selected_entity_type']}\"" if viewer.get("selected_entity_type") else "")
+                    + " to resolve it"
+                    + (", or inspect_current_view if the question is about what the view visually looks like" if has_snapshot else "")
+                )
+            else:
+                lookup_hint = "call inspect_current_view to resolve it"
+            viewer_guidance = (
+                f"The user currently has {details} selected/visible in the 3D viewer. If their question "
+                "refers to it in any way (\"this\", \"that\", \"the selected element/window/door\", \"what I'm "
+                f"looking at\", etc.), {lookup_hint} -- do not ask the user to re-identify something they "
+                "have already selected. "
+            )
+        else:
+            viewer_guidance = ""
         return (
             "You are a construction/BIM assistant with tools to query a real IFC building model "
             "and its PDF drawings/schedules. Decide which tool(s) answer the user's question, call "
@@ -2325,6 +2384,7 @@ Return only a corrected MultiQueryPlan JSON object."""
             "Respond in the same language as the user's latest message. "
             f"{storey_guidance}"
             f"{source_guidance}"
+            f"{viewer_guidance}"
             "If a tool result includes a non-empty 'warnings' field (e.g. a storey filter matched "
             "zero elements), that is a signal your filter value may be wrong, not proof the true "
             "count is zero -- reconsider the filter (check it against the real storey names above) "
@@ -2566,7 +2626,19 @@ Return only a corrected MultiQueryPlan JSON object."""
             ]
         except Exception:
             storey_names = []
-        messages: list[dict[str, Any]] = [{"role": "system", "content": self._v2_system_prompt(storey_names, source_preference)}]
+        # Codex review, PR #63, P2: a finding investigation's own question
+        # (`build_finding_investigation_question`) refers to the finding
+        # under investigation as "this element" throughout, identified by
+        # the finding's own tag -- completely independent of whatever the
+        # user happens to still have selected in the 3D viewer from
+        # earlier browsing (the frontend sends the current selection on
+        # every V2 turn regardless of which finding was clicked). Passing
+        # viewer_context into the prompt here would let the model resolve
+        # "this element" to an unrelated, possibly stale selection instead
+        # of the finding it was actually asked to investigate -- suppressed
+        # unconditionally for an investigation turn so the finding's own
+        # identity is the only thing "this element" can mean.
+        messages: list[dict[str, Any]] = [{"role": "system", "content": self._v2_system_prompt(storey_names, source_preference, None if include_verdict_tool else viewer_context)}]
         # SPEC-M18 (D-074): SUBMIT_ANSWER_FACTS_TOOL is offered on every V2
         # turn (unlike SUBMIT_FINDING_VERDICT_TOOL, which stays
         # investigation-only) -- it feeds the general narrative-consistency
