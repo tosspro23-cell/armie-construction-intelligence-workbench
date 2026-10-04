@@ -237,6 +237,23 @@ The following screenshots were captured locally from the synthetic public fixtur
 
 *The Decision Trace panel makes planning, execution, evidence, verification, and the final disposition inspectable, step by step.*
 
+The following two were captured live against the real, deployed Azure profile and RWTH DigitalHub
+(the real Dataset Pack building, not a synthetic fixture) -- not staged or re-created afterward.
+
+![V2 resolving a 3D-viewer selection](docs/images/real-building-viewer-selection.png)
+
+*Clicking a window in the 3D viewer, then asking "what is the height of thi window?" (a real, live
+question, typo included) resolves the click-selection directly -- `get_element_properties` called
+with the viewer's own selected GlobalId, answered and verified, no clarification needed. The same
+turn's Cloud Provenance banner is a real, clickable Application Insights deep link for this exact
+request.*
+
+![Door/window dimensions in the 3D viewer](docs/images/real-building-viewer-dimensions.png)
+
+*Selecting a door/window element surfaces its own real width/height directly in the viewer's
+selection panel, for visually cross-checking an IFC-vs-PDF reconciliation mismatch without leaving
+the 3D view.*
+
 ## Supported capabilities
 
 - Project and per-level door/window counts, grouped counts by storey, and bounded
