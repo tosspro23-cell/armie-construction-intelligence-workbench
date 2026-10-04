@@ -63,15 +63,23 @@ IFC/PDF tools as V1) or produces a final streamed answer. The model also states 
 own final answer as a structured claim via a dedicated tool, `submit_answer_facts`
 (`{entity, measure, value}` per claim); `_answer_facts_verified` checks each claim structurally
 against this turn's own real tool results (bucketed by canonical entity/measure, not scanned out of
-free text) before the answer is shown `verified`, with `_unclaimed_numbers_in_answer` as a coarser
-safety net for a number the prose states but no claim ever covered. This structural design
+free text, so a claim for one measure of an entity can no longer be validated by a completely
+different measure's real value) before the answer is shown `verified`. This structural design
 (SPEC-M18, D-074) retired an earlier free-text, character-proximity scan
 (`_narrative_consistent_with_tool_facts`) that had accumulated eight confirmed false-positive
 shapes across live stress-testing (D-065, D-066, D-068, D-069, D-073, and the "14 doors and 24
-windows" case that triggered the redesign) -- a restated identifier or storey name sitting next to
-a real number is now structurally impossible to mistake for a fabricated claim, rather than one
-more pattern added to an ever-growing exemption list (D-077 extended the same structural exemption
-mechanism to a restated storey name). V2's own system prompt also discloses an existing 3D-viewer
+windows" case that triggered the redesign) -- a claim's own declared entity/measure, not where a
+number happens to sit in a sentence, is what `_answer_facts_verified` checks it against, closing
+that whole shape of false positive by construction.
+
+A second, narrower check, `_unclaimed_numbers_in_answer`, still does scan the answer's own prose
+with a regex -- its job is different: not validating a submitted claim, but catching a number the
+prose states that no claim ever covered at all. This coarser check still needs its own exemption
+set (`known_reference_numbers`, a restated tag/mark/record, D-065/D-066/D-068; `D-077` extended it
+to a restated storey name, `locator["storey"]`) for a legitimate restatement that was never meant
+to be a claim -- the same class of pattern-based exemption the retired check needed, scoped to a
+narrower, lower-stakes role now that the primary verification no longer depends on it. V2's own
+system prompt also discloses an existing 3D-viewer
 selection to the model, routed to whichever tool actually fits what the frontend sent this turn
 (`get_element_properties` for a plain click-selection, `inspect_current_view` only when a real
 screenshot was captured) -- suppressed outright during a finding investigation, where the
