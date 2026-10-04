@@ -1371,3 +1371,105 @@ def test_v2_respects_a_cancellation_request(tmp_path: Path) -> None:
 
     assert final.disposition.value == "cancelled"
     assert not fake.calls
+
+
+def test_v2_system_prompt_discloses_an_existing_viewer_selection_regardless_of_source_preference() -> None:
+    """Owner-reported, 2026-10-04, found live: selected a window in the 3D
+    viewer, then asked "what height is this window?" with Source left at
+    its default "Auto" -- the model asked the user to re-identify a window
+    it had, in fact, already been told about (the frontend always sends
+    `selected_global_ids` on every V2 turn, `main.tsx`'s `runV2Turn`). The
+    gap was that nothing in the system prompt ever disclosed a selection
+    existed unless `source_preference` happened to be the separate,
+    narrower "viewer_snapshot" value.
+
+    A plain click-selection (no "Capture current view" screenshot) must
+    route to `get_element_properties(global_ids=..., entity_type=...)` --
+    the same deterministic property lookup any other question already
+    uses -- never `inspect_current_view`: that tool requires a real
+    screenshot (`_execute_viewer`'s own precondition) and would itself
+    return a *different* clarification_required ("capture the current
+    model view...") when given only a GlobalId, trading one unnecessary
+    clarification for another. `viewer_guidance` now states the actual
+    selection unconditionally, independent of `source_preference`.
+    """
+    viewer_context = {
+        "selected_global_ids": ["03iwAedpj2TfaeVhYaw$rx"],
+        "selected_entity_type": "IfcWindow",
+        "selected_display_name": "IfcWindow: FE 3 tlg - DK-Fix im Rahmen-DK-2:6000 x 1500:2530571",
+    }
+
+    prompt_auto = AgentService._v2_system_prompt(None, "auto", viewer_context)
+    assert "03iwAedpj2TfaeVhYaw$rx" in prompt_auto
+    assert "IfcWindow" in prompt_auto
+    assert "get_element_properties" in prompt_auto
+    assert "do not ask the user to" in prompt_auto
+
+    prompt_snapshot = AgentService._v2_system_prompt(None, "viewer_snapshot", viewer_context)
+    assert "03iwAedpj2TfaeVhYaw$rx" in prompt_snapshot
+
+
+def test_v2_system_prompt_routes_a_captured_snapshot_to_inspect_current_view() -> None:
+    """The flip side of the test above: when a real screenshot was
+    captured (`screenshot_base64` present, "Capture current view"), the
+    right tool genuinely is the vision-based `inspect_current_view` --
+    confirming the fix did not blanket-replace that recommendation, only
+    corrected it for the plain-selection-without-a-snapshot case.
+    """
+    prompt = AgentService._v2_system_prompt(None, "auto", {
+        "selected_global_ids": ["03iwAedpj2TfaeVhYaw$rx"], "selected_entity_type": "IfcWindow",
+        "screenshot_base64": "ZmFrZS1wbmc=",
+    })
+    assert "inspect_current_view" in prompt
+    assert "get_element_properties" in prompt  # both offered: a real GlobalId is still known too
+
+
+def test_v2_system_prompt_omits_viewer_guidance_when_nothing_is_selected() -> None:
+    """The flip side of the test above: no selection, no snapshot -- the
+    prompt must not claim one exists (there is nothing for `inspect_
+    current_view` to resolve, and claiming otherwise would just invite a
+    new, different false confidence).
+    """
+    assert "3D viewer" not in AgentService._v2_system_prompt(None, "auto", None)
+    assert "3D viewer" not in AgentService._v2_system_prompt(None, "auto", {})
+    assert "3D viewer" not in AgentService._v2_system_prompt(None, "auto", {"selected_global_ids": [], "screenshot_base64": None})
+
+
+def test_v2_invoke_actually_sends_the_viewer_selection_to_the_model(tmp_path: Path) -> None:
+    """End-to-end confirmation that `invoke_v2` (not just `_v2_system_prompt`
+    in isolation) actually wires the turn's own `viewer_context` into the
+    real message sent to the model -- `FakeModelProvider` records the exact
+    `messages` list `stream_turn` was called with (its own `RecordedCall.
+    prompt`, `str(messages)`), so this proves the selection reaches the
+    model's first turn, not merely that the helper function can produce it.
+
+    Scripts the real demo fixture's own W01 window (global_id
+    `1ctyjgDIX8IAhrrKTlC1w0`, established elsewhere in this file/
+    `test_reconciliation.py`) being resolved via `get_element_properties`
+    -- the tool the corrected guidance actually recommends for a plain
+    selection with no captured snapshot, matching this repo's own real
+    `get_element_properties(global_ids=...)` parameter shape.
+    """
+    fake = FakeModelProvider()
+    fake.script("v2_tool_turn", ScriptedToolCalls([("get_element_properties", {"entity_type": "IfcWindow", "global_ids": ["1ctyjgDIX8IAhrrKTlC1w0"]})]))
+    fake.script("v2_tool_turn", ScriptedAnswer(["This window is 1.50 m tall."]))
+    _, service, resources = _service(tmp_path, fake)
+
+    final = None
+    async def _run_with_selection():
+        nonlocal final
+        async for event in service.invoke_v2(
+            project_resources=resources, thread_id="eval-viewer-selection", question="What height is this window?",
+            viewer_context={
+                "selected_global_ids": ["1ctyjgDIX8IAhrrKTlC1w0"],
+                "selected_entity_type": "IfcWindow", "selected_display_name": "W01",
+            },
+        ):
+            if event["type"] == "final":
+                final = event["response"]
+    asyncio.run(_run_with_selection())
+
+    assert final.disposition.value == "answered"
+    first_turn_prompt = fake.calls[0].prompt
+    assert "1ctyjgDIX8IAhrrKTlC1w0" in first_turn_prompt
+    assert "get_element_properties" in first_turn_prompt
