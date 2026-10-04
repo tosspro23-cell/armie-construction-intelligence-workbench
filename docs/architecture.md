@@ -54,16 +54,37 @@ buildings, SPEC-M13, see README.md's "Real Dataset Pack"), each with its own dir
 POSIX ACL on the underlying storage account, verified with a minimal service principal holding
 zero RBAC roles.
 
-## Tool-calling agent and finding resolution (SPEC-M16/M17, D-061/D-063/D-064)
+## Tool-calling agent and finding resolution (SPEC-M16/M17/M18, D-061/D-063/D-064/D-074)
 
 A second engine, selectable per conversation, replaces the fixed plan → execute → verify pipeline
 above with a bounded iteration loop (`AgentService.invoke_v2`): each iteration either dispatches
 every tool call the model requested this turn (`asyncio.gather`, same underlying deterministic
-IFC/PDF tools as V1) or produces a final streamed answer. A narrative-consistency check
-(`_narrative_consistent_with_tool_facts`) cross-references every number the final answer states
-against this turn's own real tool results before the answer is shown `verified` -- a disclosed
-heuristic, not a general semantic fact-checker, closed against six distinct real false-positive
-shapes found by live stress-testing (D-065, D-066, D-068, D-069, D-073).
+IFC/PDF tools as V1) or produces a final streamed answer. The model also states each number in its
+own final answer as a structured claim via a dedicated tool, `submit_answer_facts`
+(`{entity, measure, value}` per claim); `_answer_facts_verified` checks each claim structurally
+against this turn's own real tool results (bucketed by canonical entity/measure, not scanned out of
+free text, so a claim for one measure of an entity can no longer be validated by a completely
+different measure's real value) before the answer is shown `verified`. This structural design
+(SPEC-M18, D-074) retired an earlier free-text, character-proximity scan
+(`_narrative_consistent_with_tool_facts`) that had accumulated eight confirmed false-positive
+shapes across live stress-testing (D-065, D-066, D-068, D-069, D-073, and the "14 doors and 24
+windows" case that triggered the redesign) -- a claim's own declared entity/measure, not where a
+number happens to sit in a sentence, is what `_answer_facts_verified` checks it against, closing
+that whole shape of false positive by construction.
+
+A second, narrower check, `_unclaimed_numbers_in_answer`, still does scan the answer's own prose
+with a regex -- its job is different: not validating a submitted claim, but catching a number the
+prose states that no claim ever covered at all. This coarser check still needs its own exemption
+set (`known_reference_numbers`, a restated tag/mark/record, D-065/D-066/D-068; `D-077` extended it
+to a restated storey name, `locator["storey"]`) for a legitimate restatement that was never meant
+to be a claim -- the same class of pattern-based exemption the retired check needed, scoped to a
+narrower, lower-stakes role now that the primary verification no longer depends on it. V2's own
+system prompt also discloses an existing 3D-viewer
+selection to the model, routed to whichever tool actually fits what the frontend sent this turn
+(`get_element_properties` for a plain click-selection, `inspect_current_view` only when a real
+screenshot was captured) -- suppressed outright during a finding investigation, where the
+investigation's own "this element" must resolve to the finding's own tag, never an unrelated,
+possibly stale viewer selection (D-078).
 
 Every non-matched item a door/window reconciliation detects is promoted into a persisted
 `EngineeringFinding` (`apps/api/app/finding_workflow.py`'s own enforced state machine: open →
