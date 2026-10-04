@@ -247,7 +247,13 @@ The following screenshots were captured locally from the synthetic public fixtur
 - Real multi-project workspaces on the Azure profile: independent IFC/PDF corpora, isolated by
   Azure Data Lake Storage Gen2 directory ACLs, with per-project frozen source-version provenance
   surfaced on every citation and audit event.
-- Current-view screenshot inspection with honest target-visibility handling.
+- Current-view screenshot inspection with honest target-visibility handling; the V2 agent also
+  recognizes an existing 3D-viewer click-selection on its own (no snapshot required) and resolves
+  a deictic reference ("this window," "that door") to it directly, routed to the correct
+  deterministic lookup rather than asking the user to re-select something already selected.
+- Door/window width/height surfaced directly in the 3D viewer's selection panel and citation
+  evidence (doors/windows only, matching reconciliation's own scope) -- for visually cross-checking
+  an IFC-vs-PDF dimension mismatch without leaving the viewer.
 - Short-term conversational context, clarification, unsupported-operation handling, citations,
   and independent verification.
 - Narrow, explicitly scoped IFC↔drawing cross-source reconciliation: door and window quantities
@@ -275,27 +281,28 @@ PYTHONPATH=apps/api python3 -m pytest -q
 cd apps/web && npm run build
 ```
 
-494 tests run against the public synthetic fixtures and the two real, openly-licensed Dataset Pack
+502 tests run against the public synthetic fixtures and the two real, openly-licensed Dataset Pack
 buildings, covering: deterministic-contract tests for the router/plan-validation/verification
 modules; provider failure-path evals driven by a fake, no-network provider; deterministic
 document-extraction tests across every board/field combination plus ambiguity, vision-fallback,
 and bbox-plausibility paths; an explicit disposition-taxonomy contract suite; cross-source
 reconciliation's ground truth, detector precision, and fixture isolation; multi-project ADLS
 opt-in/download/concurrency/failure-contract tests, including a real thread-pool race; the V2
-tool-calling agent's own representative-question suite and narrative-consistency verification;
-the Engineering Finding lifecycle, including real-Postgres concurrent-transaction tests; the
-Azure AI Search retrieval seam; per-caller and global rate limiting; the answer-polish
-number-preservation guard's full truth table; and the Cloud Provenance Application Insights
-link's span-tagging, proven via a real HTTP request against a recording-span double, not just a
-unit check on the URL-building helper. CI runs the full suite on Python 3.9-3.12
-(`.github/workflows/ci.yml`); see `docs/specs/` (one file per milestone, M1 through M17) for the
-full test inventory and `docs/decisions/README.md` for every fix's own verification account.
-Azure-specific behavior (real deployment, real Azure OpenAI/Search/ADLS/Application
-Insights) is additionally verified against the live subscription on every deploy via
-`azure-deploy.yml`'s own post-deploy smoke tests, and by hand -- see `docs/reports/` for the
-dated deployment-baseline reports and `docs/decisions/README.md` (73 decision-log entries and
-counting) for every live fix found and verified directly against production, including several
-found only by stress-testing the agent against the two real Dataset Pack buildings above.
+tool-calling agent's own representative-question suite and structured answer-fact verification
+(`submit_answer_facts`/`_answer_facts_verified`, SPEC-M18); the Engineering Finding lifecycle,
+including real-Postgres concurrent-transaction tests; the Azure AI Search retrieval seam;
+per-caller and global rate limiting; the answer-polish number-preservation guard's full truth
+table; and the Cloud Provenance Application Insights link's span-tagging on both engines, proven
+via a real HTTP request/stream against a recording-span double, not just a unit check on the
+URL-building helper. CI runs the full suite on Python 3.9-3.12 (`.github/workflows/ci.yml`); see
+`docs/specs/` (one file per milestone, M1 through M18) for the full test inventory and
+`docs/decisions/README.md` for every fix's own verification account. Azure-specific behavior (real
+deployment, real Azure OpenAI/Search/ADLS/Application Insights) is additionally verified against
+the live subscription on every deploy via `azure-deploy.yml`'s own post-deploy smoke tests, and by
+hand -- see `docs/reports/` for the dated deployment-baseline reports and
+`docs/decisions/README.md` (78 decision-log entries and counting) for every live fix found and
+verified directly against production, including several found only by stress-testing the agent
+against the two real Dataset Pack buildings above.
 
 ## Privacy and data
 
