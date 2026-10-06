@@ -9,8 +9,8 @@ param namePrefix string = 'armiem3'
 
 param location string = resourceGroup().location
 
-@description('platform.bicep output: acr.properties.loginServer')
-param acrLoginServer string
+@description('platform.bicep output: acr.properties.loginServer, when platform.bicep was run with createAcr=true. Empty (the default, D-079 follow-up) means apiImage/webImage below are pulled from a registry that needs no credentials at all -- a public GitHub Container Registry package, specifically -- so no `registries` entry, and no AcrPull role assignment, is needed for either app. This is not "ACR with a blank name"; it is "no private-registry login step in this deployment at all."')
+param acrLoginServer string = ''
 
 @description('platform.bicep output: the user-assigned managed identity resource ID')
 param identityId string
@@ -192,7 +192,10 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
     managedEnvironmentId: containerAppsEnv.id
     configuration: {
       activeRevisionsMode: 'Single'
-      registries: [
+      // D-079 follow-up: empty when acrLoginServer is empty -- apiImage is
+      // then a public registry reference (ghcr.io) needing no credentials
+      // at all, so no AcrPull-identity login entry is declared.
+      registries: empty(acrLoginServer) ? [] : [
         {
           server: acrLoginServer
           identity: identityId
@@ -293,7 +296,9 @@ resource webApp 'Microsoft.App/containerApps@2024-03-01' = {
     managedEnvironmentId: containerAppsEnv.id
     configuration: {
       activeRevisionsMode: 'Single'
-      registries: [
+      // D-079 follow-up: same reasoning as apiApp's own registries block
+      // above.
+      registries: empty(acrLoginServer) ? [] : [
         {
           server: acrLoginServer
           identity: webIdentityId
