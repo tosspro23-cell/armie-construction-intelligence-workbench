@@ -4072,3 +4072,50 @@ none of the api app's risk. Re-verified: `az bicep build` compiles cleanly; the 
 template's own `minReplicas` expression for the api app is `"[if(empty(parameters('databaseUrl')),
 1, 0)]"`, confirmed by inspecting the compiled output directly, not inferred from the Bicep source
 alone.
+
+**Amended same week (2026-10-06): the registry's own flat Basic-tier fee was eliminated outright,
+not just kept from growing.** Checking Azure's own retail pricing directly (`prices.azure.com`)
+found Container Registry has no free SKU at all -- Basic's $0.1666/day ($0.1666/day; ~€4.60/month
+at the time) applies identically whether a subscription is still spending free trial credit or has
+already converted to standard pay-as-you-go, and is independent of how much (or how little) is
+actually stored. Since this repository is already public, its own container images were migrated
+to GitHub Container Registry (`ghcr.io`) as public packages instead -- genuinely free, no storage
+or bandwidth limit, confirmed directly against GitHub's own published policy for public packages.
+
+`infra/bicep/platform.bicep` gained a `createAcr` parameter, defaulting to `false`: ACR
+provisioning and its two AcrPull role assignments are now conditional, not unconditional.
+`infra/bicep/apps.bicep`'s `acrLoginServer` became optional (empty default); each Container App's
+own `registries` block is empty when it is, which means an anonymous pull from a registry that
+needs no credentials at all, not "ACR with a blank name." `azure-deploy.yml` now builds and pushes
+to `ghcr.io/<owner>/armie-api`/`armie-web` using the workflow's own ephemeral `GITHUB_TOKEN`
+(`packages: write` permission added) instead of `az acr login`, and a new step pulls each pushed
+image back down **anonymously**, immediately after pushing it, failing the whole deploy with an
+actionable error if a package's visibility is not actually Public yet -- before Container Apps is
+ever pointed at it.
+
+Independent review (Codex, PR #66) caught two real defects before merge: a GUID-seed change for
+the AcrPull role assignments' own `name` property that would have broken the documented
+`createAcr=true` private-registry fallback against any resource group the pre-D-079 template had
+already provisioned (`RoleAssignmentExists` on redeploy) -- reverted to the original seed, since
+referencing a same-condition conditional resource was never actually the problem; and an
+undocumented gap where `createAcr=false` alone does not delete an already-existing ACR (`az
+deployment group create`'s own default Incremental mode leaves a resource no longer in the
+template untouched, not deleted) -- documented as a deliberate, separate, manual step, matching
+this project's own established pattern for `data.bicep`'s continuously-billing Postgres server.
+
+**Could not be tested from a feature branch before merging, for a reason unrelated to this
+change's own correctness:** this subscription's OIDC federated identity trusts only `main` as the
+token subject -- a real test run from `chore/migrate-to-ghcr` failed Azure login outright
+(`AADSTS700213: No matching federated identity record found for ... ref:refs/heads/chore/migrate-
+to-ghcr`), matching how every prior `azure-deploy.yml` change in this project's history has had to
+be tested. Merged, then verified for real from `main` immediately after
+(`gh workflow run ... --ref main`): the deploy succeeded end-to-end, the public-pull verification
+step passed on its first real run, and `az containerapp show` confirmed both apps now reference
+`ghcr.io/tosspro23-cell/armie-api:a37b6cf`/`armie-web:a37b6cf` with an empty `registries` array (no
+credentials). A real functional request against the live app ("How many doors are in this
+project?") returned `answered`/`"4"`, not just a bare `200` -- confirming the new image actually
+works, not merely that it starts. The old Azure Container Registry (`armiem3acr33yetvtv5jbwa`) was
+then deleted outright (`az acr delete`, confirmed via a subsequent `ResourceNotFound` on the same
+resource) -- its flat monthly fee is now fully eliminated, not merely prevented from growing
+further, and the live app was re-confirmed working (both a bare `200` and the same real functional
+request) after that deletion.
