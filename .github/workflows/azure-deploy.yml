@@ -73,6 +73,13 @@ on:
 permissions:
   id-token: write
   contents: read
+  # D-079 follow-up: needed to push this workflow's own images to GitHub
+  # Container Registry (ghcr.io) instead of the Azure Container Registry
+  # this template used to provision -- ACR's flat per-day fee is real cost
+  # for a personal project regardless of usage; a public GHCR package is
+  # free with no storage/bandwidth limit, since this repository is already
+  # public.
+  packages: write
 
 jobs:
   deploy:
@@ -133,6 +140,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # D-079 follow-up: computed once, reused by every later step that
+      # needs it -- GHCR requires an all-lowercase image path, and
+      # `github.repository_owner` is not guaranteed to already be lowercase
+      # for every account.
+      - name: Compute the lowercase GHCR repository path
+        run: echo "GHCR_REPO_LOWER=$(echo "ghcr.io/${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
+
       # A repository secret (unlike a required workflow_dispatch input)
       # cannot be enforced as "required" by GitHub itself -- an unset repo
       # secret just resolves to an empty string here. Fail closed instead
@@ -179,7 +193,7 @@ jobs:
             fi
           done
 
-      - name: Deploy platform prerequisites (registry, identity, monitoring, role assignments)
+      - name: Deploy platform prerequisites (identity, monitoring, role assignments)
         id: platform
         run: |
           az deployment group create \
@@ -190,8 +204,6 @@ jobs:
                          azureSearchServiceName="$AZURE_SEARCH_SERVICE_NAME" \
             --query properties.outputs -o json > platform-outputs.json
           cat platform-outputs.json
-          echo "acr_login_server=$(jq -r .acrLoginServer.value platform-outputs.json)" >> "$GITHUB_OUTPUT"
-          echo "acr_name=$(jq -r .acrName.value platform-outputs.json)" >> "$GITHUB_OUTPUT"
           echo "identity_id=$(jq -r .identityId.value platform-outputs.json)" >> "$GITHUB_OUTPUT"
           echo "identity_client_id=$(jq -r .identityClientId.value platform-outputs.json)" >> "$GITHUB_OUTPUT"
           echo "web_identity_id=$(jq -r .webIdentityId.value platform-outputs.json)" >> "$GITHUB_OUTPUT"
@@ -201,29 +213,50 @@ jobs:
           echo "azure_openai_endpoint=$(jq -r .azureOpenAiEndpoint.value platform-outputs.json)" >> "$GITHUB_OUTPUT"
           echo "azure_search_endpoint=$(jq -r .azureSearchEndpoint.value platform-outputs.json)" >> "$GITHUB_OUTPUT"
 
-      # `az acr build` (ACR Tasks / cloud build) is used by default on a lot
-      # of tutorials, but new subscriptions often have it blocked outright
-      # (TasksOperationsNotAllowed -- an anti-abuse restriction, found live
-      # during SPEC-M3's manual deployment). ubuntu-latest runners are
-      # amd64 already (Azure Container Apps doesn't run arm64), so a plain
-      # local `docker build` + push needs no cross-platform flag here,
-      # unlike the Apple Silicon dev machine this was first deployed from.
-      - name: Log in to the registry (az acr login)
-        run: az acr login --name "${{ steps.platform.outputs.acr_name }}"
+      # D-079 follow-up: pushed to GitHub Container Registry, not Azure
+      # Container Registry -- this repository is already public, and a
+      # public GHCR package is genuinely free (no storage/bandwidth limit),
+      # unlike ACR's Basic tier, which bills a flat per-day fee regardless
+      # of usage (confirmed directly against Azure's own retail pricing;
+      # no free SKU exists for Container Registry at all). ubuntu-latest
+      # runners are amd64 already (Azure Container Apps doesn't run
+      # arm64), so a plain local `docker build` + push needs no
+      # cross-platform flag here, unlike the Apple Silicon dev machine this
+      # was first deployed from.
+      - name: Log in to the registry (ghcr.io)
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
       - name: Build and push API image
         run: |
           docker build -f apps/api/Dockerfile \
-            -t "${{ steps.platform.outputs.acr_login_server }}/armie-api:$IMAGE_TAG" \
+            -t "${GHCR_REPO_LOWER}/armie-api:$IMAGE_TAG" \
             .
-          docker push "${{ steps.platform.outputs.acr_login_server }}/armie-api:$IMAGE_TAG"
+          docker push "${GHCR_REPO_LOWER}/armie-api:$IMAGE_TAG"
 
       - name: Build and push web image
         run: |
           docker build -f apps/web/Dockerfile \
-            -t "${{ steps.platform.outputs.acr_login_server }}/armie-web:$IMAGE_TAG" \
+            -t "${GHCR_REPO_LOWER}/armie-web:$IMAGE_TAG" \
             .
-          docker push "${{ steps.platform.outputs.acr_login_server }}/armie-web:$IMAGE_TAG"
+          docker push "${GHCR_REPO_LOWER}/armie-web:$IMAGE_TAG"
+
+      # A freshly-created GHCR package can default to private even in a
+      # public repository (confirmed: GitHub does not guarantee it inherits
+      # the repository's own visibility) -- a private package would need
+      # its own pull credential wired into apps.bicep, reintroducing a
+      # secret this migration exists to remove. Fails loudly rather than
+      # silently deploying Container Apps pointed at an image they cannot
+      # actually pull.
+      - name: Verify the pushed images are publicly pullable
+        run: |
+          set -euo pipefail
+          docker logout ghcr.io
+          for image in "armie-api" "armie-web"; do
+            if ! docker pull "${GHCR_REPO_LOWER}/${image}:$IMAGE_TAG" > /dev/null; then
+              echo "::error::${GHCR_REPO_LOWER}/${image}:$IMAGE_TAG could not be pulled anonymously -- its GHCR package visibility is likely still Private. Set it to Public in the package's own Settings page (https://github.com/users/${{ github.repository_owner }}/packages/container/${image}/settings or the org equivalent) and re-run this workflow."
+              exit 1
+            fi
+          done
 
       # Independent-review fix: a routine redeploy that simply left
       # database_url blank (e.g. a caller who forgot it was ever set)
@@ -291,7 +324,6 @@ jobs:
             --resource-group "$RESOURCE_GROUP" \
             --template-file infra/bicep/apps.bicep \
             --parameters namePrefix="$NAME_PREFIX" \
-                         acrLoginServer="${{ steps.platform.outputs.acr_login_server }}" \
                          identityId="${{ steps.platform.outputs.identity_id }}" \
                          identityClientId="${{ steps.platform.outputs.identity_client_id }}" \
                          webIdentityId="${{ steps.platform.outputs.web_identity_id }}" \
@@ -300,8 +332,8 @@ jobs:
                          azureOpenAiEndpoint="${{ steps.platform.outputs.azure_openai_endpoint }}" \
                          azureOpenAiTextDeployment="$AZURE_OPENAI_TEXT_DEPLOYMENT" \
                          azureOpenAiVisionDeployment="$AZURE_OPENAI_VISION_DEPLOYMENT" \
-                         apiImage="${{ steps.platform.outputs.acr_login_server }}/armie-api:$IMAGE_TAG" \
-                         webImage="${{ steps.platform.outputs.acr_login_server }}/armie-web:$IMAGE_TAG" \
+                         apiImage="${GHCR_REPO_LOWER}/armie-api:$IMAGE_TAG" \
+                         webImage="${GHCR_REPO_LOWER}/armie-web:$IMAGE_TAG" \
                          databaseUrl="$DATABASE_URL" \
                          apiSharedSecret="$API_SHARED_SECRET" \
                          evidenceStorageAccountUrl="$EVIDENCE_STORAGE_ACCOUNT_URL" \
