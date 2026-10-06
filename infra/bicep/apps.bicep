@@ -229,13 +229,27 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
       // permanently-warm replica billed 24/7 regardless of traffic was
       // ~70% of this deployment's entire monthly cost (Cost Management
       // query, confirmed directly, not estimated) for a low-traffic
-      // personal demo. `minReplicas: 0` is safe under the same invariant
-      // above: it still never allows more than one replica to exist
-      // concurrently, it only allows zero to exist when idle. Trade-off,
-      // accepted: the first request after an idle period pays a cold-start
-      // delay (observed: a few seconds) while a fresh replica starts.
+      // personal demo.
+      //
+      // Independent review (Codex, PR #65) caught a real gap in the first
+      // version of this fix: `minReplicas: 0` is only actually safe when
+      // `databaseUrl` is set. `get_conversation_store`/`get_audit_store`/
+      // `get_finding_store` (`apps/api/app/persistence/factory.py`) all
+      // fall back to in-memory or local-container-filesystem storage when
+      // it is unset -- the documented default for this very template
+      // (`param databaseUrl string = ''` above) -- and a scale-to-zero
+      // event tears down that container's own local state entirely. With
+      // `databaseUrl` set, none of this applies (Postgres survives a
+      // replica replacement by design, SPEC-M4); without it, scaling to
+      // zero would silently reset every conversation, finding, and local
+      // audit record on every idle cooldown. `minReplicas` is therefore
+      // `0` only when persistence is actually configured, `1` (today's
+      // original, safe default) otherwise -- this deployment's own real
+      // `databaseUrl` is set, so it gets the cost fix; a deployment that
+      // never opted into Postgres keeps exactly its original, safe
+      // behavior, unchanged by this commit.
       scale: {
-        minReplicas: 0
+        minReplicas: empty(databaseUrl) ? 1 : 0
         maxReplicas: 1
       }
       containers: [

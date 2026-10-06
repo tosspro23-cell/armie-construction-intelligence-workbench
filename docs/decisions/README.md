@@ -4052,3 +4052,23 @@ covers Azure infrastructure configuration directly (`infra/bicep/` has no existi
 this repo); this is an operational/cost fix, not a product-behavior change, so no new `pytest`
 coverage applies -- matching this repo's own established practice for infrastructure-only fixes
 (e.g. D-024's CI migration-step gap).
+
+**Amended same day (independent review, Codex, PR #65): the first version of this fix had a real,
+unconditional-scale-to-zero gap on the api app.** `get_conversation_store`/`get_audit_store`/
+`get_finding_store` (`apps/api/app/persistence/factory.py`) all fall back to in-memory or
+local-container-filesystem storage when `databaseUrl` is unset -- the documented default for this
+very template (`param databaseUrl string = ''`). A scale-to-zero event tears down that container's
+own local state entirely; with no Postgres configured, every idle cooldown would have silently
+reset every conversation, finding, and local audit record for any deployment that used the
+template's own default, not only this one. Confirmed directly that this specific, currently-running
+deployment already has `DATABASE_URL` set (`az containerapp show`), so no data loss actually
+occurred here -- but the template itself needed to be correct for its own documented default, not
+just for this one configuration. Fixed: `minReplicas` is now `empty(databaseUrl) ? 1 : 0` on the
+api app specifically -- `0` (the cost fix) only when Postgres-backed durability is actually
+configured, `1` (the original, always-safe behavior) otherwise. The web app's own `minReplicas: 0`
+is unaffected and unconditional -- confirmed directly (`apps/web/Dockerfile`) it is a stateless
+nginx/static-asset container with no conversation/audit/finding storage of its own, so it carries
+none of the api app's risk. Re-verified: `az bicep build` compiles cleanly; the compiled ARM
+template's own `minReplicas` expression for the api app is `"[if(empty(parameters('databaseUrl')),
+1, 0)]"`, confirmed by inspecting the compiled output directly, not inferred from the Bicep source
+alone.
