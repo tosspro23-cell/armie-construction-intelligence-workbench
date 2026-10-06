@@ -215,15 +215,27 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
       }
     }
     template: {
-      // Pinned to exactly one replica (OD-22, SPEC-M3 §11). SPEC-M4 (OD-25)
-      // makes conversation context and audit events durable via Postgres
-      // when databaseUrl is set above, but does not lift this pin:
+      // maxReplicas pinned to exactly one (OD-22, SPEC-M3 §11). SPEC-M4
+      // (OD-25) makes conversation context and audit events durable via
+      // Postgres when databaseUrl is set above, but does not lift this pin:
       // app.state.requests still holds live, in-process asyncio.Task
       // references used for request cancellation, which have no
       // serializable cross-replica representation and would still silently
       // fragment across replicas.
+      //
+      // minReplicas (D-079, 2026-10-06): found live -- this was `1`, with
+      // no comment and no stated reason tied to it specifically (only
+      // maxReplicas=1 has a real invariant behind it, above). A
+      // permanently-warm replica billed 24/7 regardless of traffic was
+      // ~70% of this deployment's entire monthly cost (Cost Management
+      // query, confirmed directly, not estimated) for a low-traffic
+      // personal demo. `minReplicas: 0` is safe under the same invariant
+      // above: it still never allows more than one replica to exist
+      // concurrently, it only allows zero to exist when idle. Trade-off,
+      // accepted: the first request after an idle period pays a cold-start
+      // delay (observed: a few seconds) while a fresh replica starts.
       scale: {
-        minReplicas: 1
+        minReplicas: 0
         maxReplicas: 1
       }
       containers: [
@@ -280,8 +292,15 @@ resource webApp 'Microsoft.App/containerApps@2024-03-01' = {
       }
     }
     template: {
+      // minReplicas: 0 (D-079, 2026-10-06) -- same reasoning as apiApp's
+      // own scale block above: no functional requirement ever needed this
+      // app warm 24/7, and it was contributing to the same cost problem.
+      // maxReplicas stays 1, matching apiApp's own single-replica posture
+      // (this app holds no in-process state at all, so even that is more
+      // conservative than strictly required -- kept symmetric rather than
+      // introducing an asymmetry with no stated reason).
       scale: {
-        minReplicas: 1
+        minReplicas: 0
         maxReplicas: 1
       }
       containers: [
