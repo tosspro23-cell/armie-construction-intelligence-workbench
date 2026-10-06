@@ -29,7 +29,7 @@ param azureOpenAiAccountName string
 @description('D-022: name of an EXISTING Azure AI Search service (SPEC-M7, D-018), in this same resource group. Blank (the default) leaves apps.bicep\'s AZURE_SEARCH_ENDPOINT unset, the same opt-in-when-unset pattern as this parameter\'s siblings. This template computes the endpoint string only -- it does NOT grant RBAC on the Search service (see below for why); create the service and grant its RBAC out-of-band first, the same as azureOpenAiAccountName above and evidence.bicep\'s own storage-account RBAC.')
 param azureSearchServiceName string = ''
 
-@description('D-079 follow-up, 2026-10-06: this template used to create an Azure Container Registry unconditionally -- found live that its own flat Basic-tier daily fee ($0.1666/day, independent of actual usage or storage) was a real, unavoidable recurring cost for a personal project, confirmed directly via Azure retail pricing (no free SKU exists for this service at all). Since this project\'s source repository is already public, its own container images can instead be hosted on GitHub Container Registry (ghcr.io) as public packages -- genuinely free, no storage/bandwidth limit, no separate registry resource to pay for. `createAcr` defaults to `false`: this template no longer provisions a registry or its AcrPull role assignments unless explicitly asked to (e.g. reverting to a private-registry deployment profile). `azure-deploy.yml` no longer passes a non-default value for this.')
+@description('D-079 follow-up, 2026-10-06: this template used to create an Azure Container Registry unconditionally -- found live that its own flat Basic-tier daily fee ($0.1666/day, independent of actual usage or storage) was a real, unavoidable recurring cost for a personal project, confirmed directly via Azure retail pricing (no free SKU exists for this service at all). Since this project\'s source repository is already public, its own container images can instead be hosted on GitHub Container Registry (ghcr.io) as public packages -- genuinely free, no storage/bandwidth limit, no separate registry resource to pay for. `createAcr` defaults to `false`: this template no longer provisions a registry or its AcrPull role assignments unless explicitly asked to (e.g. reverting to a private-registry deployment profile). `azure-deploy.yml` no longer passes a non-default value for this. Independent-review finding (Codex, PR #66): flipping this to `false` does NOT delete an already-existing ACR from a resource group this template previously provisioned -- `az deployment group create` runs in Incremental mode by default (Azure\'s own documented behavior), which leaves a resource no longer present in the template untouched, not deleted. Deleting the old registry (`az acr delete --name <name> --resource-group <rg> --yes`) after confirming the GHCR path actually works is a deliberate, separate, manual step this template does not perform automatically -- the same pattern this project already uses for data.bicep\'s own Postgres server (see that file\'s header: a resource that bills continuously is never torn down as an automatic side effect of a routine deploy).')
 param createAcr bool = false
 
 var uniqueSuffix = uniqueString(resourceGroup().id)
@@ -102,8 +102,17 @@ resource webIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-3
   location: location
 }
 
+// Codex review, PR #66, P2: the `name` GUID must stay exactly what it was
+// before createAcr existed (`guid(acr.id, identity.id, acrPullRoleId)`),
+// not a newly-invented seed -- `createAcr=true` against a resource group
+// this template (or its pre-D-079 version) already provisioned is the
+// documented private-registry fallback, and Azure deduplicates a role
+// assignment by its own (scope, principal, roleDefinitionId) tuple, not by
+// this `name`. A different GUID for the same tuple fails deployment with
+// RoleAssignmentExists; referencing `acr.id` here is safe precisely
+// because this resource shares the identical `if (createAcr)` condition.
 resource acrPullAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (createAcr) {
-  name: guid(resourceGroup().id, namePrefix, identityName, 'acrpull-api')
+  name: guid(acr.id, identity.id, acrPullRoleId)
   scope: acr
   properties: {
     roleDefinitionId: acrPullRoleId
@@ -113,7 +122,7 @@ resource acrPullAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' 
 }
 
 resource webAcrPullAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (createAcr) {
-  name: guid(resourceGroup().id, namePrefix, webIdentityName, 'acrpull-web')
+  name: guid(acr.id, webIdentity.id, acrPullRoleId)
   scope: acr
   properties: {
     roleDefinitionId: acrPullRoleId
