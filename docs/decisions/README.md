@@ -3995,3 +3995,80 @@ selected GlobalId and `get_element_properties` both actually reach the model's f
 confirmed fail-before/pass-after. 501 tests pass (up from 497); `ruff check --select F,E9,I,F401
 apps/api tests` and `(cd apps/web && npm run build)` both clean. Not yet verified against a real
 model in production (V2 cannot run locally against Ollama) -- deferred to post-deploy verification.
+
+## D-079 — Container Apps billed 24/7 regardless of traffic; the registry's own unpruned image history pushed it past its free storage tier
+
+Owner-reported, 2026-10-06: the subscription's free credit was two days from expiring, and the
+owner asked for the real cost breakdown -- not a guess -- plus whether the deployment should move
+to a different hosting model (Azure Functions was specifically proposed) to make it affordable as
+a self-funded personal project.
+
+**Measured directly via Azure Cost Management (`az rest` against the Cost Management query API,
+not estimated), 30 real days, `armie-m3-rg`:** €18.92 total -- Azure Container Apps €13.20 (70%),
+Container Registry €3.89 (21%), Azure OpenAI (Foundry Models) €1.54 (8%, real usage, not a
+problem), the rest near zero.
+
+**Root cause 1, confirmed by reading the actual resource config, not assumed:** both `armiem3-api`
+and `armiem3-web` (`az containerapp show`) had `minReplicas: 1` -- billed continuously regardless
+of whether anyone was using the demo. `infra/bicep/apps.bicep`'s own `maxReplicas: 1` on the api
+app carries a real, documented invariant (OD-22, SPEC-M3 §11: `app.state.requests` holds
+in-process `asyncio.Task` references with no cross-replica representation) -- but that invariant
+is about the *maximum* never exceeding one concurrent replica, not about the *minimum*. Nothing in
+the codebase or its own comments ties `minReplicas: 1` to any functional requirement; it reads as
+the original milestone's unexamined default, never revisited. Fixed by setting `minReplicas: 0` on
+both apps (immediately via `az containerapp update` so the saving started accruing before the next
+scheduled deploy, and in `infra/bicep/apps.bicep` itself so a future `azure-deploy.yml` run does
+not silently regress it back to `1`) -- `maxReplicas: 1` is unchanged, so the real invariant above
+still holds exactly as before. Trade-off, accepted: a request after an idle period (the Consumption
+plan's own `cooldownPeriod: 300`, five minutes) pays a cold-start delay -- observed directly,
+around a second once the image is already warm in the registry's layer cache, longer on a truly
+cold pull -- a reasonable cost for a personal, low-traffic demo.
+
+**Root cause 2, also measured, not assumed:** `az acr show-usage` reported 11.28 GB of image
+storage against the Basic tier's 10 GB included allowance -- already in overage, and growing by
+design: every `azure-deploy.yml` run tags its image with the triggering commit SHA
+(`image_tag`'s own documented default) and nothing ever deleted an old tag, so 70 `armie-api` and
+67 `armie-web` historical images had accumulated across this project's deploy history with no
+retention policy at all. Fixed by deleting all but the five most recent tags of each repository
+(`az acr repository delete`, confirmed the currently-running revision's own image tag was not
+among those removed before deleting anything) -- this is a one-time cleanup, not a standing policy;
+a periodic or deploy-time prune is a real follow-up this entry's own `docs/decisions/
+REVIEW_REQUIRED.md` companion should track if the registry grows back toward the limit.
+
+**Why this was fixed in place rather than migrating to Azure Functions, as the owner's own
+alternative proposal suggested:** Azure Container Apps' Consumption plan already bills exactly the
+way Functions' own Consumption plan does -- near-zero when idle, metered only during real
+execution -- `minReplicas: 1` was the single setting standing between this deployment and that
+behavior. A migration to Functions would mean re-hosting a FastAPI app with SSE streaming
+responses, in-process rate limiting, and in-process cancellation state (the same constraints
+OD-22's own invariant already names) on a materially different execution/timeout model, for a cost
+outcome a one-line config change already achieves. Scoped correctly, this was a misconfiguration
+to fix, not an architecture to replace.
+
+Verified directly, not assumed: `az containerapp show` confirms `minReplicas: 0` on both apps
+post-change; a request against the live app immediately after the change still returns `200`;
+`az bicep build` confirms the template still compiles cleanly after the edit. No test suite
+covers Azure infrastructure configuration directly (`infra/bicep/` has no existing test harness in
+this repo); this is an operational/cost fix, not a product-behavior change, so no new `pytest`
+coverage applies -- matching this repo's own established practice for infrastructure-only fixes
+(e.g. D-024's CI migration-step gap).
+
+**Amended same day (independent review, Codex, PR #65): the first version of this fix had a real,
+unconditional-scale-to-zero gap on the api app.** `get_conversation_store`/`get_audit_store`/
+`get_finding_store` (`apps/api/app/persistence/factory.py`) all fall back to in-memory or
+local-container-filesystem storage when `databaseUrl` is unset -- the documented default for this
+very template (`param databaseUrl string = ''`). A scale-to-zero event tears down that container's
+own local state entirely; with no Postgres configured, every idle cooldown would have silently
+reset every conversation, finding, and local audit record for any deployment that used the
+template's own default, not only this one. Confirmed directly that this specific, currently-running
+deployment already has `DATABASE_URL` set (`az containerapp show`), so no data loss actually
+occurred here -- but the template itself needed to be correct for its own documented default, not
+just for this one configuration. Fixed: `minReplicas` is now `empty(databaseUrl) ? 1 : 0` on the
+api app specifically -- `0` (the cost fix) only when Postgres-backed durability is actually
+configured, `1` (the original, always-safe behavior) otherwise. The web app's own `minReplicas: 0`
+is unaffected and unconditional -- confirmed directly (`apps/web/Dockerfile`) it is a stateless
+nginx/static-asset container with no conversation/audit/finding storage of its own, so it carries
+none of the api app's risk. Re-verified: `az bicep build` compiles cleanly; the compiled ARM
+template's own `minReplicas` expression for the api app is `"[if(empty(parameters('databaseUrl')),
+1, 0)]"`, confirmed by inspecting the compiled output directly, not inferred from the Bicep source
+alone.

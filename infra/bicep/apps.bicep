@@ -215,15 +215,41 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = {
       }
     }
     template: {
-      // Pinned to exactly one replica (OD-22, SPEC-M3 §11). SPEC-M4 (OD-25)
-      // makes conversation context and audit events durable via Postgres
-      // when databaseUrl is set above, but does not lift this pin:
+      // maxReplicas pinned to exactly one (OD-22, SPEC-M3 §11). SPEC-M4
+      // (OD-25) makes conversation context and audit events durable via
+      // Postgres when databaseUrl is set above, but does not lift this pin:
       // app.state.requests still holds live, in-process asyncio.Task
       // references used for request cancellation, which have no
       // serializable cross-replica representation and would still silently
       // fragment across replicas.
+      //
+      // minReplicas (D-079, 2026-10-06): found live -- this was `1`, with
+      // no comment and no stated reason tied to it specifically (only
+      // maxReplicas=1 has a real invariant behind it, above). A
+      // permanently-warm replica billed 24/7 regardless of traffic was
+      // ~70% of this deployment's entire monthly cost (Cost Management
+      // query, confirmed directly, not estimated) for a low-traffic
+      // personal demo.
+      //
+      // Independent review (Codex, PR #65) caught a real gap in the first
+      // version of this fix: `minReplicas: 0` is only actually safe when
+      // `databaseUrl` is set. `get_conversation_store`/`get_audit_store`/
+      // `get_finding_store` (`apps/api/app/persistence/factory.py`) all
+      // fall back to in-memory or local-container-filesystem storage when
+      // it is unset -- the documented default for this very template
+      // (`param databaseUrl string = ''` above) -- and a scale-to-zero
+      // event tears down that container's own local state entirely. With
+      // `databaseUrl` set, none of this applies (Postgres survives a
+      // replica replacement by design, SPEC-M4); without it, scaling to
+      // zero would silently reset every conversation, finding, and local
+      // audit record on every idle cooldown. `minReplicas` is therefore
+      // `0` only when persistence is actually configured, `1` (today's
+      // original, safe default) otherwise -- this deployment's own real
+      // `databaseUrl` is set, so it gets the cost fix; a deployment that
+      // never opted into Postgres keeps exactly its original, safe
+      // behavior, unchanged by this commit.
       scale: {
-        minReplicas: 1
+        minReplicas: empty(databaseUrl) ? 1 : 0
         maxReplicas: 1
       }
       containers: [
@@ -280,8 +306,15 @@ resource webApp 'Microsoft.App/containerApps@2024-03-01' = {
       }
     }
     template: {
+      // minReplicas: 0 (D-079, 2026-10-06) -- same reasoning as apiApp's
+      // own scale block above: no functional requirement ever needed this
+      // app warm 24/7, and it was contributing to the same cost problem.
+      // maxReplicas stays 1, matching apiApp's own single-replica posture
+      // (this app holds no in-process state at all, so even that is more
+      // conservative than strictly required -- kept symmetric rather than
+      // introducing an asymmetry with no stated reason).
       scale: {
-        minReplicas: 1
+        minReplicas: 0
         maxReplicas: 1
       }
       containers: [
