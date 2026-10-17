@@ -61,8 +61,12 @@ Checked directly against `main` at `322ce3a` (2026-10-17), not assumed:
 
 - `QueryPlan.operation` and its sibling enums (`models.py:303`, `:371`, `:397`, `:497`) contain
   only read/analysis operations -- no write operation exists in any contract.
-- `README.md:157` and `docs/architecture.md:93` are the only two statements of the "never writes"
-  claim (`grep -rn "never writes to the real\|never write.*IFC"`).
+- The "never writes" trust claim has more than two copies -- the first grep (`never writes to the
+  real\|never write.*IFC`) was too narrow. A wider sweep (`read-only|never writ|does not write|...`)
+  finds: `README.md:157` and `docs/architecture.md:93` (the bolded claim), **`README.md:145`** ("a fixed
+  set of read-only IFC/PDF tools"), and code comments/docstrings asserting the same
+  (`apps/api/app/agent/tools.py:13`, `apps/api/app/agent/graph.py:1086-1087`, `:3122`). All are in
+  scope of the correction (§9).
 - V2 dispatch is genuinely parallel (`graph.py:3137` creates the tasks, `:3152` gathers them).
 - `IfcRepository.__init__` only stores `self.path` (`repository.py:122`); `model` is a
   `@cached_property` that opens the file lazily (`:130-138`) -- a new instance pointed at a
@@ -128,9 +132,17 @@ class ModelRevision(BaseModel):
     status: Literal["candidate", "published", "superseded", "rejected"]
     created_at: datetime
     published_at: datetime | None
-    actor_session_id: str | None      # X-Session-Id, same documented stand-in as D-016 -- not a real identity
+    proposed_by_session_id: str       # X-Session-Id at proposal; REQUIRED (see below) -- D-016 stand-in, not a real identity
+    published_by_session_id: str | None   # X-Session-Id at publish; None until published; never overwrites the proposer
     trace_id: str
 ```
+
+Proposal and publication are attributed **separately** -- a candidate may be proposed by one session
+and published by another, and a single field would retain only one of them (Invariant 6). Both
+edit-capable entry points **require** the session header: `propose_ifc_edit` is not offered on a
+chat turn with no `X-Session-Id` (`main.py:413` accepts a missing header today, so this is an
+explicit new gate for edit tools only, not a change to chat), and the publish endpoint rejects a
+missing header with `400`.
 
 A Postgres implementation, its migration (`0010`, plus the `.github/workflows/ci.yml` apply step --
 the D-024 gap), and durable file storage (Blob) are **deferred** to the spec that enables Azure
@@ -173,11 +185,24 @@ def propose_rename(base_path: Path, plan: RenameElementPlan, out_dir: Path, revi
 **D. Two V2 tools**, offered only when `Settings.ifc_edit_enabled` is true (new, default `false`)
 **and** the turn is not a finding investigation:
 
+- **Local-profile enforcement in code, not just a flag.** `ifc_edit_enabled` alone is not the gate:
+  application startup (config validation) **refuses to boot** when `ifc_edit_enabled` is true
+  together with `adls_account_url` (or any other Azure storage setting), and `invoke_v2` additionally
+  checks the same condition before offering the tools -- so an accidentally-set environment variable
+  on an Azure deployment can neither expose the tools nor silently write revisions to
+  container-local disk, and OD-58's deferred authorization requirement cannot be bypassed by
+  configuration drift.
 - `propose_ifc_edit(target_global_id, new_name)` -- resolves the project's current revision,
   calls `propose_rename`, persists a `candidate` `ModelRevision`, returns id + diff. Never changes
-  what any other request is served. It writes only a brand-new uniquely-named file plus one store
-  record, so running inside V2's parallel `to_thread` dispatch is safe; a candidate orphaned by a
-  timed-out turn is inert by construction (never served) and harmless.
+  what any other request is served. The candidate *file* is brand-new and uniquely named, but the *manifest*
+  is one shared per-project JSON document, and two `propose_ifc_edit` calls in one turn (or two
+  concurrent requests) run through `asyncio.gather(...to_thread(...))` -- an unsynchronized
+  read-modify-write would let the last writer discard the other candidate's record. Therefore **every
+  manifest mutation (propose, publish, reject) takes the same per-project lock** (a `threading.Lock`
+  per project, because the callers are worker threads, not coroutines) and **replaces the manifest
+  atomically** (write to a temp file in the same directory, `fsync`, `os.replace`). A candidate
+  orphaned by a timed-out turn is inert by construction (never served) and harmless. An
+  acceptance test proves it with a real concurrent double-propose (§8).
 - `get_edit_result(candidate_id)` -- status/diff/validation of a previously proposed candidate.
 
 No `publish`/`apply` tool is offered to the model, in this spec or any future one without a new
@@ -194,7 +219,8 @@ behind the existing app-wide `require_api_key` dependency (no new auth surface):
    with `409 stale_candidate` -- a candidate built on an older revision can never silently overwrite
    a newer one (the lost-update bug the first draft left open).
 3. Mark it `published` and the previous published revision `superseded` as one store operation,
-   under a per-project lock (same pattern as `ServiceContainer._project_locks`).
+   under the store's per-project lock -- the **same** lock proposals use (§4D), not a second one -- with
+   the atomic manifest replacement described there.
 
 **F. `ServiceContainer.get_project` becomes revision-aware without any invalidation hook.**
 `get_project` first resolves the project's current published `revision_id` (a cheap store read),
@@ -212,13 +238,26 @@ adding a second mechanism, and **removes the draft's "no clean invalidation hook
 One `IfcRepository` per revision, never mutated (§3's `cached_property` finding is why).
 
 **G. Minimal frontend + API surface.**
+- **Provenance records capture the producing revision.** `Citation` and `AuditEvent` already persist
+  `project_id`/`source_set_id` (`models.py:426`, `:593`) but, because a revision deliberately keeps
+  `source_set_id` unchanged, they cannot distinguish revision A from B. Both gain an additive
+  `revision_id: str | None = None` (`None` = the frozen base), stamped at creation from the
+  `ProjectResources` the producing request actually used -- never looked up later. `AuditEvent`
+  stores it in its existing JSONB `payload`; `Citation` travels inside already-JSONB response/evidence
+  data. **No Postgres migration and no `engineering_findings` column** are added (a new column would
+  make code that writes it fail on a production database where migrations are applied by hand,
+  `azure-deploy.yml` never runs them). The Findings/Decision Trace badge reads the *recorded*
+  `revision_id` -- a finding's via its `trace_id`'s audit events and citations -- and **never the
+  project's current metadata**, so reopening a result produced from revision A after B is published
+  still labels it A.
 - The metadata endpoint (`main.py:179` area) reports the current `revision_id` (or `null`).
 - `IfcViewer` takes `revisionId` as an effect dependency (alongside `projectId`, `:538`) so the 3D
   view reloads on publish; the viewer-mesh request carries the revision so the browser cannot serve
   a stale mesh.
 - A "Propose rename" action on the selected-element panel, a diff preview, and a "Publish" button
   behind a confirmation. The active revision id (or "base") and a **"modified from original"**
-  badge appear wherever `source_set_id` already does (Decision Trace, Findings).
+  badge appear wherever `source_set_id` already does (Decision Trace, Findings), driven by the recorded
+  `revision_id` above.
 - Browsing older revisions read-only is a stretch goal, not required for §8.
 
 ## 5. Explicitly excluded scope
@@ -248,16 +287,16 @@ One `IfcRepository` per revision, never mutated (§3's `cached_property` finding
 
 | File | Change |
 |---|---|
-| `apps/api/app/schemas/models.py` | New `RenameElementPlan`; new `ModelRevision`. |
+| `apps/api/app/schemas/models.py` | New `RenameElementPlan`; new `ModelRevision`; additive `revision_id` on `Citation` and `AuditEvent`. |
 | `apps/api/app/persistence/model_revision_store.py` | New `ModelRevisionStore` Protocol + `InMemory…` + `LocalFile…` implementations. |
 | `apps/api/app/tools/ifc/editor.py` | New pure `propose_rename` + `EditCandidate`; fidelity check; header modification notice. |
-| `apps/api/app/config.py` | `ifc_edit_enabled` (default `false`), `model_revisions_dir`. |
+| `apps/api/app/config.py` | `ifc_edit_enabled` (default `false`), `model_revisions_dir`; startup validation rejecting `ifc_edit_enabled` with ADLS/Azure storage settings. |
 | `apps/api/app/agent/tools.py` | `PROPOSE_IFC_EDIT_TOOL` / `GET_EDIT_RESULT_TOOL`, offered conditionally (§4D). |
 | `apps/api/app/agent/graph.py` | `invoke_v2` (conditional offer; never on investigation turns); `_v2_dispatch_tool` local dispatch for the two tools. Existing parallel-dispatch path untouched. |
 | `apps/api/app/services.py` | Revision-aware `get_project`; `_revision_repositories`; revision joins the ADLS cache key. |
 | `apps/api/app/main.py` | `POST …/revisions/{id}/publish`; metadata reports `revision_id`; viewer-mesh/`project_ifc` accept the revision implicitly via `get_project`. |
 | `apps/web/src/IfcViewer.tsx`, `apps/web/src/main.tsx` | `revisionId` dep + reload; "Propose rename"/diff/"Publish"; revision + "modified" badge. |
-| `README.md`, `docs/architecture.md` | Correct the "never writes" claim (§9) in the same PR as the code. |
+| `README.md`, `docs/architecture.md`, `apps/api/app/agent/tools.py`, `apps/api/app/agent/graph.py` | Correct **every** copy of the "never writes"/"read-only tools" claim (§9) -- `README.md:145` and `:157`, `architecture.md:93`, and the code comments at `tools.py:13`, `graph.py:1086-1087`/`:3122` -- in the same PR as the code. |
 | `demo_data/projects/{duplex,digitalhub}/ATTRIBUTION.md` | One added sentence each: derived revisions exist outside git, carry a modification notice, and are not the committed original. |
 | `docs/decisions/README.md`, `PROJECT_STATE.md`, `docs/decisions/REVIEW_REQUIRED.md` | `D-080`; M19 entry; tracked Azure-enablement gap. |
 
@@ -273,14 +312,17 @@ One `IfcRepository` per revision, never mutated (§3's `cached_property` finding
    §4E.2); a stale candidate is rejected, never merged.
 5. Revision files are immutable and uniquely named; a revision never reuses or overwrites any file,
    and never carries the committed original's file name.
-6. Every proposed/published edit is attributed to the request's `X-Session-Id` and recorded durably
-   in `ModelRevisionStore` -- not an unaudited side channel (D-016's precedent for what that id does
+6. Every proposed and every published edit is attributed to its own request's `X-Session-Id`
+   (`proposed_by_session_id`, `published_by_session_id`, both required for the action to happen) and
+   recorded durably in `ModelRevisionStore` -- not an unaudited side channel (D-016's precedent for what that id does
    and does not prove).
 7. Finding-investigation turns never receive edit tools; the investigation agent still never
    writes (`README.md:157`'s claim remains true of it).
-8. `ifc_edit_enabled` defaults to `false`, and must stay `false` on any deployment that can scale to
-   zero until the deferred Azure spec lands.
-9. OD-15's door/window reconciliation scope, every V1 path, and every existing read contract
+8. `ifc_edit_enabled` defaults to `false`, and the application **refuses to start** with it enabled
+   alongside ADLS/Azure storage settings until the deferred Azure spec lands (enforced in code, §4D).
+9. A result's recorded `revision_id` is fixed at creation; no later publish can change what an
+   already-persisted citation, audit event or Decision Trace says produced it.
+10. OD-15's door/window reconciliation scope, every V1 path, and every existing read contract
    (`QueryPlan`, `Evidence`, `Citation`, `VerificationStatus`) are unaffected.
 
 ## 8. Acceptance criteria
@@ -294,6 +336,15 @@ One `IfcRepository` per revision, never mutated (§3's `cached_property` finding
 - **Stale candidate:** two candidates built from the same parent -- publishing the first succeeds,
   publishing the second returns `409 stale_candidate`; a concurrent double-publish yields exactly
   one winner.
+- **Concurrent proposals:** two real concurrent `propose_ifc_edit` calls (threads, same project) both
+  end up in the manifest; a concurrent propose+publish loses neither. A test that interleaves the
+  read and write demonstrably fails against an unlocked manifest and passes with the lock.
+- **Local-only enforcement:** starting the app with `ifc_edit_enabled=true` and `adls_account_url`
+  set fails fast; `invoke_v2` never offers the edit tools in that combination.
+- **Attribution:** a candidate proposed by session X and published by session Y records both; an edit
+  request without `X-Session-Id` is refused.
+- **Provenance:** a finding/citation/audit event produced under revision A still reports A after B is
+  published (checked by reopening it, not by reading current metadata).
 - **Fidelity:** a deliberately corrupted candidate (a second attribute changed on another entity)
   is rejected by §4C.4 and never publishable -- demonstrated with a real altered file, not a mock.
 - **Real buildings:** `propose_rename` run against both the Duplex and RWTH DigitalHub IFCs passes
@@ -311,8 +362,9 @@ One `IfcRepository` per revision, never mutated (§3's `cached_property` finding
 
 - `docs/decisions/README.md`: `D-080` -- the design, the trust-claim reversal and why, the
   measured real-building results, and the Stage 0 verification account.
-- `README.md` / `docs/architecture.md`: rewrite "the agent never writes to the IFC model or PDF
-  drawing itself" to the new, precise truth -- a human-gated, revision-based edit path exists for a
+- `README.md` (`:145` *and* `:157`) / `docs/architecture.md` (`:93`) and the code comments listed in
+  §3: rewrite "the agent never writes to the IFC model or PDF drawing itself" and "a fixed set of
+  read-only IFC/PDF tools" to the new, precise truth -- a human-gated, revision-based edit path exists for a
   narrow, listed set of edit types, locally; no agent turn can publish; finding investigations
   still never write. Same PR as the code (release-claim change per `CLAUDE.md`).
 - `demo_data/projects/{duplex,digitalhub}/ATTRIBUTION.md`: the one-sentence derived-revision note.
@@ -325,8 +377,8 @@ One `IfcRepository` per revision, never mutated (§3's `cached_property` finding
 - Branch: `feat/m19-ifc-edit-foundation`. One commit per lettered subsection of §4, plus a separate
   docs commit for §9. This spec itself is committed alone, first, per `CLAUDE.md`.
 - **Stop and report, do not improvise, if:**
-  - the "never writes" claim turns out to have copies beyond `README.md:157` / `architecture.md:93`
-    -- a partial correction is worse than none;
+  - the "never writes"/"read-only" claim turns out to have copies beyond those enumerated in §3 -- a
+    partial correction is worse than none; re-run the wide sweep before the docs commit;
   - the revision-keyed `get_project` cannot be made to cover some read path (any code reading
     `settings.ifc_path` or `container.ifc_repository` for *content* rather than availability);
   - `ifcopenshell` cannot round-trip a real building such that the fidelity check (§4C.4) can pass
